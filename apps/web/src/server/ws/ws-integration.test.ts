@@ -303,6 +303,24 @@ import { generateGreetingsForGame } from "../flows/greetings";
 import type { GreetingRow } from "../repo/repository";
 
 describe("greeting handlers (gm:updateGreeting / gm:regenGreeting)", () => {
+  it("sync:full carries teams[].greeting after generation", async () => {
+    await hub.applyEvent(gameId, { type: "gm:setTheme", theme: "Cats", now: Date.now() });
+    await generateGreetingsForGame(hub, repo, ai, gameId);
+
+    const gm = connect({ role: "gm", joinToken: gameCode });
+    const syncPromise = waitFor<Record<string, unknown>>(gm, "sync:full");
+    await emitAck(gm, "join", { role: "gm", joinToken: gameCode });
+    const sync = await syncPromise;
+
+    const teams = sync.teams as Array<{ greeting?: { text?: string; status?: string } }>;
+    expect(teams).toHaveLength(3);
+    for (const t of teams) {
+      expect(t.greeting?.text).toBeTruthy();
+      expect(t.greeting?.status).toBe("proposed");
+    }
+    gm.close();
+  });
+
   it("gm:updateGreeting persists status 'edited' and emits greeting:updated", async () => {
     await hub.applyEvent(gameId, { type: "gm:setTheme", theme: "Cats", now: Date.now() });
     const gm = connect({ role: "gm", joinToken: gameCode });

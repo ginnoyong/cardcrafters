@@ -55,6 +55,7 @@ function TeamCard({
   phase,
   phaseEndsAt,
   serverNow,
+  greetingText,
 }: {
   name: string;
   label: string;
@@ -63,6 +64,7 @@ function TeamCard({
   phase: string;
   phaseEndsAt: number | null;
   serverNow: number;
+  greetingText?: string;
 }) {
   const [qr, setQr] = useState<string | null>(null);
   const remaining = useCountdown(phaseEndsAt, serverNow);
@@ -88,6 +90,7 @@ function TeamCard({
       <p className="cc-badge">
         {phaseLabel(phase)} · {memberCount}/{MAX_TEAM_MEMBERS} players
       </p>
+      {greetingText ? <p className="cc-greeting">“{greetingText}”</p> : null}
       {remaining !== null ? (
         <p className="cc-timer" aria-label="phase timer">
           ⏱ {fmt(remaining)}
@@ -132,6 +135,12 @@ function PresenterBoard({ code }: { code: string }) {
       ),
       onEvent<{ playerId: string; reason?: string }>(socket, "player:left", (p) =>
         dispatch({ type: "playerLeft", playerId: p.playerId, kicked: p.reason === "kick" }),
+      ),
+      // Live greeting updates so team cards show text as soon as it lands.
+      onEvent<{ teamId: string; text: string; status: string; round?: number }>(
+        socket,
+        "greeting:updated",
+        (p) => dispatch({ type: "greetingUpdated", teamId: p.teamId, text: p.text, status: p.status, round: p.round }),
       ),
     );
 
@@ -187,6 +196,7 @@ function PresenterBoard({ code }: { code: string }) {
             phase={snapshot?.phase ?? "LOBBY"}
             phaseEndsAt={snapshot?.phaseEndsAt ?? null}
             serverNow={snapshot?.serverNow ?? Date.now()}
+            greetingText={team.greeting?.text || undefined}
           />
         ))}
       </section>

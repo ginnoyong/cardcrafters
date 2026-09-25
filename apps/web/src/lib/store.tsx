@@ -35,6 +35,8 @@ export interface ClientTeam {
   memberCount: number;
   members: ClientTeamMember[];
   itemCount: number;
+  /** Current-round greeting (""/null until generated or edited). */
+  greeting: { text: string; status: string | null };
 }
 
 export interface GameSnapshot {
@@ -64,6 +66,7 @@ export type StoreAction =
   | { type: "phaseChanged"; payload: Record<string, unknown> }
   | { type: "playerJoined"; playerId: string; nickname: string; teamId: string }
   | { type: "playerLeft"; playerId: string; kicked: boolean }
+  | { type: "greetingUpdated"; teamId: string; text: string; status: string | null; round?: number }
   | { type: "reset" };
 
 function patchRound(state: GameSnapshot | null, round: number): GameSnapshot | null {
@@ -132,6 +135,20 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
         })),
       };
     }
+    case "greetingUpdated": {
+      const base = state;
+      if (!base) return state;
+      // Round guard: drop stale events from a previous round.
+      if (typeof action.round === "number" && action.round !== base.round) return state;
+      return {
+        ...base,
+        teams: base.teams.map((team) =>
+          team.id === action.teamId
+            ? { ...team, greeting: { text: action.text, status: action.status } }
+            : team,
+        ),
+      };
+    }
     case "reset":
       return null;
     default:
@@ -166,6 +183,10 @@ function normalizeSnapshot(raw: SyncFullEvent): GameSnapshot {
         connected: Boolean(m.connected),
       })),
       itemCount: Number(t.itemCount ?? 0),
+      greeting: {
+        text: typeof t.greeting?.text === "string" ? t.greeting.text : "",
+        status: typeof t.greeting?.status === "string" ? t.greeting.status : null,
+      },
     })),
   };
 }
@@ -211,8 +232,22 @@ export function useGameStore(): GameStoreValue {
   return ctx;
 }
 
-/** Convenience hook: phase badge label (e.g. "BUILD"). */
+/** Convenience hook: plain-language phase label (never internal jargon).
+ *  LOBBY→"Waiting for players", GREETINGS→"Getting card text ready",
+ *  BUILD→"Building the cards", SCORING→"Scoring", JUDGING→"Judging",
+ *  REVEAL→"Winner!", RESULTS→"Results". Unknown phases fall back to a
+ *  title-cased raw value. */
+const PHASE_LABELS: Record<string, string> = {
+  LOBBY: "Waiting for players",
+  GREETINGS: "Getting card text ready",
+  BUILD: "Building the cards",
+  SCORING: "Scoring",
+  JUDGING: "Judging",
+  REVEAL: "Winner!",
+  RESULTS: "Results",
+};
+
 export function phaseLabel(phase: string | null | undefined): string {
   if (!phase) return "—";
-  return phase.charAt(0) + phase.slice(1).toLowerCase();
+  return PHASE_LABELS[phase] ?? (phase.charAt(0) + phase.slice(1).toLowerCase());
 }

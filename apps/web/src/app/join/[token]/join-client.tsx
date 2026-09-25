@@ -138,6 +138,13 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
       onEvent<{ playerId: string; reason?: string }>(socket, "player:left", (p) =>
         dispatch({ type: "playerLeft", playerId: p.playerId, kicked: p.reason === "kick" }),
       ),
+      // Live greeting updates — the store reducer keys on teamId, so events
+      // for other teams are ignored naturally (own-team filter is implicit).
+      onEvent<{ teamId: string; text: string; status: string; round?: number }>(
+        socket,
+        "greeting:updated",
+        (p) => dispatch({ type: "greetingUpdated", teamId: p.teamId, text: p.text, status: p.status, round: p.round }),
+      ),
     );
 
     socket.connect();
@@ -187,9 +194,16 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
         )}
       </section>
 
+      {team?.greeting.text ? (
+        <section className="cc-card cc-greeting-card" aria-label="your card greeting">
+          <h3>Your card will say:</h3>
+          <p className="cc-greeting">“{team.greeting.text}”</p>
+        </section>
+      ) : null}
+
       {snapshot?.phase === PHASE.BUILD ? (
         <section className="cc-card" aria-label="build phase notice">
-          <h3>Build phase started</h3>
+          <h3>{phaseLabel(snapshot.phase)} — started</h3>
           <p>Item submission arrives in a later build — hold tight!</p>
         </section>
       ) : null}

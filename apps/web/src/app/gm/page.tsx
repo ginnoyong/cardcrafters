@@ -4,15 +4,22 @@
  * GM console — landing (create game) + live game control.
  *
  * Flow:
- *   1. Pick team count (1–10) and an optional opening theme → POST /api/games.
- *   2. The console shows the code, live teams/players (QR join codes), and
- *      phase controls (gm:setTheme / gm:approveGreetings over sockets).
- *   3. Resume: /gm?code=CODE reloads the console for an existing game
- *      (join tokens come back via /api/games/:code?full=1).
+ *   1. Team count (1–10) + REQUIRED theme → POST /api/games. The SERVER sets
+ *      the theme and auto-generates each team's greeting (the console never
+ *      emits gm:setTheme).
+ *   2. Console: one FLIPPABLE card per team — front = the generated greeting
+ *      (inline edit + regenerate) plus join status/roster, back = QR join
+ *      code + copyable link.
+ *   3. A single "Start building" button below the grid emits
+ *      gm:approveGreetings once every team's greeting is ready; after BUILD
+ *      starts it disappears.
+ *   4. Greeting text reaches the console via sync:full (buildSyncFull now
+ *      carries teams[].greeting) and live via `greeting:updated`.
+ *   5. Resume: /gm?code=CODE reloads the console for an existing game
+ *      (tokens + greetings come back via /api/games/:code?full=1 AND the
+ *      join-time sync:full snapshot).
  *
  * GM auth IS knowing the game code (party-game trade-off, see ws/auth.ts).
- * NOTE: approving greetings moves the game to BUILD but greeting generation
- * itself arrives in Step 6 — players see BUILD with no generation yet.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -48,6 +55,12 @@ interface CreatedGame {
   teams: TeamSetup[];
 }
 
+/** Result shape for greeting mutations (ack passthrough). */
+interface GreetingMutationResult {
+  ok: boolean;
+  error?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Small presentational bits
 // ---------------------------------------------------------------------------
@@ -71,8 +84,32 @@ function PhaseBadge({ phase, round }: { phase: string | null; round: number | nu
   );
 }
 
-/** One team's QR join card: QR code (data-URL), join URL, copy button. */
-function TeamQrCard({ team, joinUrl }: { team: TeamSetup; joinUrl: string }) {
+// ---------------------------------------------------------------------------
+// One flippable team card: front = greeting + roster, back = QR + join link.
+// ---------------------------------------------------------------------------
+
+function TeamFlipCard({
+  team,
+  joinUrl,
+  greetingText,
+  members,
+  onKick,
+  onEditGreeting,
+  onRegenGreeting,
+}: {
+  team: TeamSetup;
+  joinUrl: string;
+  greetingText: string;
+  members: Array<{ id: string; nickname: string; connected: boolean }>;
+  onKick: (playerId: string) => void;
+  onEditGreeting: (teamId: string, text: string) => Promise<GreetingMutationResult>;
+  onRegenGreeting: (teamId: string) => Promise<GreetingMutationResult>;
+}) {
+  const [flipped, setFlipped] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [regenBusy, setRegenBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [qr, setQr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -97,27 +134,179 @@ function TeamQrCard({ team, joinUrl }: { team: TeamSetup; joinUrl: string }) {
     });
   }, [joinUrl]);
 
+  function startEditing(): void {
+    setDraft(greetingText);
+    setError(null);
+    setEditing(true);
+  }
+
+  async function save(): Promise<void> {
+    const text = draft.trim();
+    if (text.length === 0) {
+      setError("Greeting text can't be empty.");
+      return;
+    }
+    setError(null);
+    const res = await onEditGreeting(team.id, text);
+    if (!res.ok) {
+      setError(res.error ?? "Could not save the greeting.");
+      return;
+    }
+    setEditing(false);
+  }
+
+  async function regenerate(): Promise<void> {
+    setError(null);
+    setRegenBusy(true);
+    try {
+      const res = await onRegenGreeting(team.id);
+      if (!res.ok) setError(res.error ?? "Could not regenerate.");
+    } finally {
+      setRegenBusy(false);
+    }
+  }
+
+  const toggle = () => {
+    setFlipped((f) => !f);
+    setError(null);
+    setEditing(false);
+  };
+
   return (
-    <div className="cc-card cc-qr-card" aria-label={`team ${team.label} join card`}>
-      <h3>
-        {team.name} <span className="cc-muted">({team.label})</span>
-      </h3>
-      {qr ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={qr} alt={`QR code to join ${team.name}`} width={200} height={200} />
-      ) : (
-        <div className="cc-qr-placeholder" aria-hidden="true" />
-      )}
-      <p className="cc-join-url">{joinUrl}</p>
-      <button
-        type="button"
-        className="cc-btn"
-        onClick={copy}
-        aria-label={`copy join link for ${team.name}`}
-      >
-        {copied ? "Copied ✓" : "Copy join link"}
-      </button>
-      <p className="cc-hint">Scan to join this team (max {MAX_TEAM_MEMBERS} players)</p>
+    <div className="cc-team" aria-label={`team ${team.label} card`}>
+      <div className="cc-flip-head">
+        <h3>
+          {team.name} <span className="cc-muted">({team.label})</span>
+        </h3>
+        <button
+          type="button"
+          className="cc-btn cc-btn-small"
+          aria-pressed={flipped}
+          aria-label={flipped ? `show greeting for ${team.name}` : `show QR code for ${team.name}`}
+          onClick={toggle}
+        >
+          {flipped ? "Show greeting" : "Show QR"}
+        </button>
+      </div>
+
+      <div className={`cc-flip${flipped ? " is-flipped" : ""}`}>
+        <div className="cc-flip-inner">
+          {/* FRONT — greeting + join status/roster */}
+          <div className="cc-flip-face cc-flip-front cc-card">
+            {regenBusy ? (
+              <p className="cc-greeting cc-shimmer" aria-live="polite">
+                Rolling a fresh greeting…
+              </p>
+            ) : greetingText ? (
+              <p className="cc-greeting" aria-live="polite">
+                “{greetingText}”
+              </p>
+            ) : (
+              <p className="cc-greeting cc-shimmer" aria-live="polite">
+                Writing the first draft…
+              </p>
+            )}
+
+            {editing ? (
+              <div className="cc-edit-block">
+                <label htmlFor={`greet-${team.id}`}>
+                  Greeting text (max 60 characters)
+                  <textarea
+                    id={`greet-${team.id}`}
+                    value={draft}
+                    maxLength={60}
+                    rows={2}
+                    onChange={(e) => setDraft(e.target.value)}
+                  />
+                </label>
+                <div className="cc-btn-row">
+                  <button type="button" className="cc-btn cc-btn-primary cc-btn-small" onClick={() => void save()}>
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    className="cc-btn cc-btn-small"
+                    onClick={() => {
+                      setEditing(false);
+                      setError(null);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="cc-btn-row">
+                <button type="button" className="cc-btn cc-btn-small" onClick={startEditing}>
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  className="cc-btn cc-btn-small"
+                  disabled={regenBusy}
+                  onClick={() => void regenerate()}
+                >
+                  {regenBusy ? "Regenerating…" : "Regenerate"}
+                </button>
+              </div>
+            )}
+            {error ? (
+              <p role="alert" className="cc-error">
+                {error}
+              </p>
+            ) : null}
+
+            <p className="cc-hint" aria-label={`team ${team.label} join status`}>
+              {members.length}/{MAX_TEAM_MEMBERS} joined
+            </p>
+            <div className="cc-dots" aria-hidden="true">
+              {Array.from({ length: MAX_TEAM_MEMBERS }, (_, i) => (
+                <span key={i} className={`cc-dot-chip${i < members.length ? " is-in" : ""}`} />
+              ))}
+            </div>
+
+            {members.length === 0 ? (
+              <p className="cc-hint">Nobody yet — share the QR!</p>
+            ) : (
+              <ul className="cc-player-list">
+                {members.map((m) => (
+                  <li key={m.id}>
+                    <span aria-hidden="true">{m.connected ? "●" : "○"}</span> {m.nickname}
+                    <button
+                      type="button"
+                      className="cc-btn cc-btn-small"
+                      aria-label={`kick ${m.nickname}`}
+                      onClick={() => onKick(m.id)}
+                    >
+                      Kick
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {/* BACK — QR + join link */}
+          <div className="cc-flip-face cc-flip-back cc-card cc-qr-card">
+            {qr ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={qr} alt={`QR code to join ${team.name}`} width={200} height={200} />
+            ) : (
+              <div className="cc-qr-placeholder" aria-hidden="true" />
+            )}
+            <p className="cc-join-url">{joinUrl}</p>
+            <button
+              type="button"
+              className="cc-btn"
+              onClick={copy}
+              aria-label={`copy join link for ${team.name}`}
+            >
+              {copied ? "Copied ✓" : "Copy join link"}
+            </button>
+            <p className="cc-hint">Scan to join this team (max {MAX_TEAM_MEMBERS} players)</p>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -126,27 +315,38 @@ function TeamQrCard({ team, joinUrl }: { team: TeamSetup; joinUrl: string }) {
 // Console (post-creation view) — socket + store wiring
 // ---------------------------------------------------------------------------
 
-function Console({ game, initialTheme }: { game: CreatedGame; initialTheme: string }) {
+function Console({ game }: { game: CreatedGame }) {
   const { snapshot, dispatch } = useGameStore();
-  const [themeDraft, setThemeDraft] = useState(initialTheme);
   const [actionError, setActionError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<ReturnType<typeof createGameSocket> | null>(null);
 
-  const gmAction = useCallback(async (event: string, payload: Record<string, unknown>) => {
-    setActionError(null);
-    try {
-      const socket = socketRef.current;
-      if (!socket) {
-        setActionError("Not connected yet.");
-        return;
+  /** Core ack emitter — returns the result without touching the banner. */
+  const emitGm = useCallback(
+    async (event: string, payload: Record<string, unknown>): Promise<GreetingMutationResult> => {
+      try {
+        const socket = socketRef.current;
+        if (!socket) return { ok: false, error: "Not connected yet." };
+        const ack: AckResult = await emitAck<AckResult>(socket, event, payload);
+        if (!ack.ok) return { ok: false, error: ack.error ?? "Action failed." };
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : "Action failed." };
       }
-      const ack: AckResult = await emitAck<AckResult>(socket, event, payload);
-      if (!ack.ok) setActionError(ack.error ?? "Action failed.");
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Action failed.");
-    }
-  }, []);
+    },
+    [],
+  );
+
+  /** Generic GM action with ack — errors surface once, in the banner. */
+  const gmAction = useCallback(
+    async (event: string, payload: Record<string, unknown>): Promise<GreetingMutationResult> => {
+      setActionError(null);
+      const res = await emitGm(event, payload);
+      if (!res.ok) setActionError(res.error ?? "Action failed.");
+      return res;
+    },
+    [emitGm],
+  );
 
   // Socket lifecycle: connect, join as GM, feed every event into the store.
   useEffect(() => {
@@ -157,15 +357,8 @@ function Console({ game, initialTheme }: { game: CreatedGame; initialTheme: stri
     socket.on("connect", () => {
       void emitAck<AckResult>(socket, "join", joinPayload({ role: "gm", joinToken: game.code }))
         .then((ack) => {
-          if (!ack.ok) {
-            setActionError(friendlyJoinError(ack.error));
-            return;
-          }
-          setConnected(true);
-          // Optional opening theme chosen on the landing form.
-          if (initialTheme.trim().length > 0) {
-            void emitAck<AckResult>(socket, "gm:setTheme", { theme: initialTheme.trim() });
-          }
+          if (!ack.ok) setActionError(friendlyJoinError(ack.error));
+          else setConnected(true);
         })
         .catch((err: unknown) =>
           setActionError(friendlyJoinError(err instanceof Error ? err.message : undefined)),
@@ -187,18 +380,36 @@ function Console({ game, initialTheme }: { game: CreatedGame; initialTheme: stri
       onEvent<{ playerId: string; reason?: string }>(socket, "player:left", (p) =>
         dispatch({ type: "playerLeft", playerId: p.playerId, kicked: p.reason === "kick" }),
       ),
+      // Live greeting updates (edits, regens, background generation).
+      onEvent<{ teamId: string; text: string; status: string; round?: number }>(
+        socket,
+        "greeting:updated",
+        (p) => dispatch({ type: "greetingUpdated", teamId: p.teamId, text: p.text, status: p.status, round: p.round }),
+      ),
     );
 
     socket.connect();
     return () => {
-      for (const off of unsubscribers) off();
+      for ( const off of unsubscribers) off();
       socket.close();
       socketRef.current = null;
     };
-  }, [dispatch, game.code, initialTheme]);
+  }, [dispatch, game.code]);
 
   const phase = snapshot?.phase ?? null;
   const round = snapshot?.round ?? null;
+
+  // Greetings ready = every team has a non-empty greeting row.
+  const teams = game.teams.map((t) => {
+    const live = snapshot?.teams.find((s) => s.id === t.id);
+    return {
+      ...t,
+      greetingText: live?.greeting.text ?? "",
+      members: live?.members ?? [],
+    };
+  });
+  const pendingTeams = teams.filter((t) => t.greetingText.trim().length === 0);
+  const building = phase !== null && phase !== "GREETINGS" && phase !== "LOBBY";
 
   return (
     <div>
@@ -219,77 +430,48 @@ function Console({ game, initialTheme }: { game: CreatedGame; initialTheme: stri
         </p>
       ) : null}
 
-      {/* Phase controls — GM events with acks over the socket. */}
-      <section className="cc-controls" aria-label="phase controls">
-        <label htmlFor="gm-theme">
-          Theme
-          <input
-            id="gm-theme"
-            value={themeDraft}
-            onChange={(e) => setThemeDraft(e.target.value)}
-            maxLength={100}
-            placeholder="e.g. Dog birthday"
-          />
-        </label>
-        <button
-          type="button"
-          className="cc-btn"
-          disabled={themeDraft.trim().length === 0}
-          onClick={() => void gmAction("gm:setTheme", { theme: themeDraft.trim() })}
-        >
-          Set theme (LOBBY → GREETINGS)
-        </button>
-        <button
-          type="button"
-          className="cc-btn cc-btn-primary"
-          disabled={phase !== "GREETINGS"}
-          onClick={() => void gmAction("gm:approveGreetings", {})}
-        >
-          Approve greetings → BUILD
-        </button>
-        <p className="cc-hint">Approving starts BUILD; greeting generation lands in a later build.</p>
-      </section>
-
-      {/* Teams: QR join cards + live rosters. */}
+      {/* Teams: flippable greeting/QR cards. */}
       <section aria-label="teams" className="cc-team-grid">
-        {game.teams.map((team) => {
-          const live = snapshot?.teams.find((t) => t.id === team.id);
-          const members = live?.members ?? [];
+        {teams.map((team) => {
           const joinUrl = `${window.location.origin}/join/${team.joinToken}`;
           return (
-            <div key={team.id} className="cc-team">
-              <TeamQrCard team={team} joinUrl={joinUrl} />
-              <div className="cc-card cc-roster" aria-label={`team ${team.label} players`}>
-                <h4>
-                  Players{" "}
-                  <span className="cc-muted">
-                    {members.length}/{MAX_TEAM_MEMBERS}
-                  </span>
-                </h4>
-                {members.length === 0 ? (
-                  <p className="cc-hint">Nobody yet — share the QR!</p>
-                ) : (
-                  <ul className="cc-player-list">
-                    {members.map((m) => (
-                      <li key={m.id}>
-                        <span aria-hidden="true">{m.connected ? "●" : "○"}</span> {m.nickname}
-                        <button
-                          type="button"
-                          className="cc-btn cc-btn-small"
-                          aria-label={`kick ${m.nickname}`}
-                          onClick={() => void gmAction("gm:kick", { playerId: m.id })}
-                        >
-                          Kick
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            </div>
+            <TeamFlipCard
+              key={team.id}
+              team={team}
+              joinUrl={joinUrl}
+              greetingText={team.greetingText}
+              members={team.members}
+              onKick={(playerId) => void gmAction("gm:kick", { playerId })}
+              // Greeting mutations surface their ack errors INLINE on the card
+              // (the card's own error slot), not in the global banner.
+              onEditGreeting={(teamId, text) => emitGm("gm:updateGreeting", { teamId, text })}
+              onRegenGreeting={(teamId) => emitGm("gm:regenGreeting", { teamId })}
+            />
           );
         })}
       </section>
+
+      {/* Single prominent Start control below all cards. Hidden once BUILD is underway. */}
+      {!building ? (
+        <section className="cc-start" aria-label="start building">
+          <button
+            type="button"
+            className="cc-btn cc-btn-primary cc-btn-start"
+            disabled={pendingTeams.length > 0}
+            onClick={() => void gmAction("gm:approveGreetings", {})}
+          >
+            Start building
+          </button>
+          {pendingTeams.length > 0 ? (
+            <p className="cc-hint" aria-live="polite">
+              Still writing greetings for:{" "}
+              <strong>{pendingTeams.map((t) => t.label).join(", ")}</strong>
+            </p>
+          ) : (
+            <p className="cc-hint">All greetings are ready — starting hands each team its card brief.</p>
+          )}
+        </section>
+      ) : null}
     </div>
   );
 }
@@ -325,6 +507,11 @@ export default function GmPage() {
   }, []);
 
   async function createGame(): Promise<void> {
+    const themeTrim = theme.trim();
+    if (themeTrim.length === 0) {
+      setError("Please enter a theme — it drives each team's card text.");
+      return;
+    }
     setError(null);
     setCreating(true);
     try {
@@ -332,7 +519,7 @@ export default function GmPage() {
       const res = await fetch("/api/games", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(Number.isInteger(count) ? { teamCount: count } : {}),
+        body: JSON.stringify({ teamCount: Number.isInteger(count) ? count : undefined, theme: themeTrim }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -354,7 +541,7 @@ export default function GmPage() {
       <h1>Card Crafters — Game Master</h1>
       {game ? (
         <GameStoreProvider>
-          <Console game={game} initialTheme={theme.trim()} />
+          <Console game={game} />
           <p className="cc-hint">
             Presenter view:{" "}
             <a className="cc-link" href={`/present/${game.code}`}>
@@ -371,7 +558,7 @@ export default function GmPage() {
           }}
         >
           <label htmlFor="team-count">
-            Team count (1–{MAX_TEAMS})
+            No. of teams (1-{MAX_TEAMS})
             <input
               id="team-count"
               type="number"
@@ -382,19 +569,21 @@ export default function GmPage() {
               required
             />
           </label>
-          <label htmlFor="opening-theme">
-            Opening theme (optional)
+          <label htmlFor="game-theme">
+            Theme
             <input
-              id="opening-theme"
+              id="game-theme"
               value={theme}
-              maxLength={100}
-              placeholder="e.g. Dog birthday"
+              maxLength={120}
+              required
+              placeholder="e.g. Happy retirement, Linda!"
               onChange={(e) => setTheme(e.target.value)}
             />
           </label>
           <button type="submit" className="cc-btn cc-btn-primary" disabled={creating}>
             {creating ? "Creating…" : "Create game"}
           </button>
+          <p className="cc-hint">The theme drives each team&apos;s opening card text.</p>
           {error ? (
             <p role="alert" className="cc-error">
               {error}

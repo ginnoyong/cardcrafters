@@ -83,6 +83,8 @@ export interface SyncFullPayload extends Record<string, unknown> {
     itemCount: number;
     items: unknown[];
     layout: unknown;
+    /** Current-round greeting (empty text + null status until generated). */
+    greeting: { text: string; status: string | null };
   }>;
   myScores?: Array<{ targetTeamId: string; value: number }>;
 }
@@ -98,12 +100,19 @@ export async function buildSyncFull(
   const round = state.round;
   const teams = await repo.listTeams(gameId);
 
+  // Per-team greeting for the current round (UI: GM console cards + player
+  // waiting screen). Missing row → empty text + null status.
+  const greetings = new Map(
+    (await repo.listGreetings(gameId, round)).map((g) => [g.teamId, g]),
+  );
+
   const teamSnapshots = [];
   for (const team of teams) {
     // Repo-backed membership (excludes soft-removed players; survives restarts).
     const members = await hub.listTeamMembers(team.id);
     const items = await repo.listItems(team.id, round);
     const layout = await repo.getLayoutState(team.id, round);
+    const greeting = greetings.get(team.id);
     teamSnapshots.push({
       id: team.id,
       name: team.name,
@@ -113,6 +122,7 @@ export async function buildSyncFull(
       itemCount: items.length,
       items,
       layout,
+      greeting: { text: greeting?.text ?? "", status: greeting?.status ?? null },
     });
   }
 
