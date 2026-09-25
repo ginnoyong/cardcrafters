@@ -246,8 +246,14 @@ export default function JoinClient({ token }: { token: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // GameStoreProvider wraps both screens — WaitingScreen's hooks and any
+  // future store consumers live under it.
   if (identity) {
-    return <WaitingScreen identity={identity} />;
+    return (
+      <GameStoreProvider>
+        <WaitingScreen identity={identity} />
+      </GameStoreProvider>
+    );
   }
 
   return (
