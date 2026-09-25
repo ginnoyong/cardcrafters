@@ -301,14 +301,19 @@ describe("illegal transitions", () => {
     }
   });
 
-  it("rejoin allowed in every phase; new joins rejected after LOBBY", () => {
+  it("new player join in GREETINGS allowed (players trickle in while GM sets theme)", () => {
+    const state = mkState({ phase: PHASE.GREETINGS });
+    expect(transition(state, { type: "player:join", playerId: "p9", isNewPlayer: true, now: NOW }).ok).toBe(true);
+  });
+
+  it("rejoin allowed in every phase; new joins rejected from BUILD onward", () => {
     for (const phase of PHASE_ORDER) {
       const state = mkState({ phase });
       expect(transition(state, { type: "player:join", playerId: "p1", isNewPlayer: false, now: NOW }).ok).toBe(true);
-      if (phase !== PHASE.LOBBY) {
-        expect(transition(state, { type: "player:join", playerId: "p9", isNewPlayer: true, now: NOW }).ok).toBe(false);
-      } else {
+      if (phase === PHASE.LOBBY || phase === PHASE.GREETINGS) {
         expect(transition(state, { type: "player:join", playerId: "p9", isNewPlayer: true, now: NOW }).ok).toBe(true);
+      } else {
+        expect(transition(state, { type: "player:join", playerId: "p9", isNewPlayer: true, now: NOW }).ok).toBe(false);
       }
     }
   });

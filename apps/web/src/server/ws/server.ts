@@ -220,7 +220,10 @@ export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repositor
     // ---------------------------------------------------------------------
     // sync:resync — client asks for a fresh full snapshot.
     // ---------------------------------------------------------------------
-    socket.on("sync:resync", async (ack?: unknown) => {
+    socket.on("sync:resync", async (raw?: unknown, maybeAck?: unknown) => {
+      // Tolerate both call shapes: emit('sync:resync', ack) or
+      // emit('sync:resync', payload, ack).
+      const ack = typeof raw === "function" ? raw : maybeAck;
       const identity = data.identity;
       if (!identity) {
         ackFail(ack, "not_joined", "join first");

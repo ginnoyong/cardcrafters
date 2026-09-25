@@ -87,7 +87,7 @@ export function friendlyJoinError(error: string | undefined): string {
   const e = error ?? "";
   if (/joinToken required|invalid joinToken/i.test(e)) return "This join link is not valid — ask your host for a fresh QR code.";
   if (/is full/i.test(e)) return "That team is full (12 players max) — pick another team's QR code.";
-  if (/LOBBY/i.test(e)) return "The round already started — ask your host to start a new round.";
+  if (/game_in_progress|LOBBY/i.test(e)) return "The game is already underway — ask your host to start a new round.";
   if (/stale session/i.test(e)) return "Your saved session expired. Join again with your team's QR code.";
   return e || "Join failed — please try again.";
 }

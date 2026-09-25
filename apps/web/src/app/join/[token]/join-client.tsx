@@ -75,11 +75,24 @@ function ConnectionDot({ connected }: { connected: boolean }) {
   );
 }
 
-/** Wait for the socket's `connect` (or reject on connect_error). */
-function onceConnected(socket: ReturnType<typeof createGameSocket>): Promise<void> {
+/** Wait for the socket's `connect` (or reject on connect_error / timeout). */
+function onceConnected(
+  socket: ReturnType<typeof createGameSocket>,
+  timeoutMs = 15_000,
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    socket.once("connect", () => resolve());
-    socket.once("connect_error", (err: Error) => reject(err));
+    const timer = setTimeout(
+      () => reject(new Error("could not reach the game server — check your connection")),
+      timeoutMs,
+    );
+    socket.once("connect", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    socket.once("connect_error", (err: Error) => {
+      clearTimeout(timer);
+      reject(err);
+    });
   });
 }
 
@@ -200,6 +213,7 @@ export default function JoinClient({ token }: { token: string }) {
       setBusy(true);
       const socket = createGameSocket({ role: "player", ...(sessionToken ? { sessionToken } : {}) });
       try {
+        socket.connect(); // autoConnect is false — connecting is required before any ack
         await onceConnected(socket);
         const ack = await emitAck<AckResult>(socket, "join", joinPayload(payload));
         if (!ack.ok || !ack.identity) {

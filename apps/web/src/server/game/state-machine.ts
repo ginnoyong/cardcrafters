@@ -293,10 +293,12 @@ export function transition(
 
     // ---------------------------------------------------------------------
     // player:join — rejoining is allowed in ANY phase; brand-new players may
+    // join during LOBBY and GREETINGS (players trickle in while the GM sets
+    // the theme), but not once the game is underway.
     // only enter during LOBBY.
     // ---------------------------------------------------------------------
     case "player:join": {
-      if (event.isNewPlayer && state.phase !== PHASE.LOBBY) {
+      if (event.isNewPlayer && state.phase !== PHASE.LOBBY && state.phase !== PHASE.GREETINGS) {
         return { ok: false, reason: "game_in_progress" };
       }
       return { ok: true, state, effects: [] };

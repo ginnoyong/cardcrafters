@@ -104,11 +104,16 @@ describe("player join flow", () => {
     ).rejects.toThrow(/full/);
   });
 
-  it("rejects brand-new players outside LOBBY", async () => {
+  it("rejects brand-new players in BUILD (allowed in LOBBY/GREETINGS)", async () => {
     const { hub } = makeHub();
     const { teams, game } = await hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 1 });
     await hub.applyEvent(game.id, { type: "gm:setTheme", theme: "Birthday", now: NOW });
 
+    // GREETINGS: players may still trickle in while the GM prepares greetings.
+    const inGreetings = await hub.joinPlayer({ joinToken: teams[0]!.joinToken, nickname: "Early" });
+    expect(inGreetings.isNewPlayer).toBe(true);
+
+    await hub.applyEvent(game.id, { type: "gm:approveGreetings", now: NOW });
     await expect(
       hub.joinPlayer({ joinToken: teams[0]!.joinToken, nickname: "Late" }),
     ).rejects.toThrow(RepoError);
