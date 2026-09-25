@@ -1,0 +1,3 @@
+# Card Crafters
+
+Card Crafters is a team-based, real-time AI greeting-card design game: players form teams, write short prompts to generate AI greeting-card elements, arrange them on a shared canvas, and compete in rounds scored by peers and an AI game master. This repository is a Step-0 scaffold (monorepo, database, containers, minimal health-check server); full game logic and UI arrive in later steps.

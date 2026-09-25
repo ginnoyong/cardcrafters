@@ -1,0 +1,13 @@
+# deps/build artifacts (rebuilt inside the image)
+node_modules/
+.next/
+out/
+dist/
+*.tsbuildinfo
+
+# local-only
+.git/
+.env
+.env.local
+npm-debug.log*
+.gitignore

@@ -1,0 +1,194 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Phase {
+  LOBBY
+  GREETINGS
+  BUILD
+  SCORING
+  JUDGING
+  REVEAL
+  RESULTS
+}
+
+enum ItemStatus {
+  PENDING
+  VALIDATING
+  GENERATING
+  READY
+  FAILED
+  REJECTED
+  REMOVED
+}
+
+enum CallStatus {
+  OK
+  FALLBACK_OK
+  ERROR
+  TIMEOUT_BLOCKED
+}
+
+enum RoundRole {
+  PEOPLES_CHOICE
+  GM_WINNER
+  NONE
+}
+
+model Game {
+  id          String      @id @default(cuid())
+  code        String      @unique
+  phase       Phase       @default(LOBBY)
+  round       Int         @default(1)
+  theme       String?
+  config      Json
+  phaseEndsAt DateTime?
+  cutoffAt    DateTime?
+  createdAt   DateTime    @default(now())
+  teams       Team[]
+  players     Player[]
+  scores      Score[]
+  aiCalls     AiCall[]
+  winnerPicks WinnerPick[]
+
+  @@index([phase])
+}
+
+model Team {
+  id             String        @id @default(cuid())
+  gameId         String
+  game           Game          @relation(fields: [gameId], references: [id])
+  name           String
+  label          String
+  joinToken      String        @unique
+  players        Player[]
+  items          Item[]
+  layouts        LayoutState[]
+  greetings      Greeting[]
+  scoresReceived Score[]       @relation("targetTeam")
+  votesCast      Score[]       @relation("voterTeam")
+  winnerPicks    WinnerPick[]
+
+  @@unique([gameId, label])
+  @@index([gameId])
+}
+
+model Player {
+  id           String     @id @default(cuid())
+  teamId       String
+  team         Team       @relation(fields: [teamId], references: [id])
+  gameId       String
+  game         Game       @relation(fields: [gameId], references: [id])
+  nickname     String
+  sessionToken String     @unique
+  connected    Boolean    @default(false)
+  removedAt    DateTime?
+  scoresGiven  Score[]    @relation("voterScores")
+  items        Item[]
+
+  @@unique([gameId, nickname])
+  @@index([sessionToken])
+}
+
+model Greeting {
+  id        String  @id @default(cuid())
+  teamId    String
+  team      Team    @relation(fields: [teamId], references: [id])
+  round     Int
+  text      String
+  status    String  @default("proposed")
+  styleHint Json?
+
+  @@unique([teamId, round])
+}
+
+model Item {
+  id           String     @id @default(cuid())
+  teamId       String
+  team         Team       @relation(fields: [teamId], references: [id])
+  playerId     String
+  player       Player     @relation(fields: [playerId], references: [id])
+  round        Int
+  promptRaw    String
+  subject      String?
+  status       ItemStatus @default(PENDING)
+  imageUrl     String?
+  width        Int?
+  height       Int?
+  visualWeight Float?
+  failReason   String?
+  createdAt    DateTime   @default(now())
+  placedAt     DateTime?
+
+  @@unique([teamId, round, promptRaw, playerId])
+  @@index([teamId, status])
+  @@index([playerId, status])
+}
+
+model LayoutState {
+  id           String   @id @default(cuid())
+  teamId       String
+  team         Team     @relation(fields: [teamId], references: [id])
+  round        Int
+  version      Int      @default(1)
+  greetingStyle Json?
+  placements   Json
+  source       String   @default("solver")
+  updatedAt    DateTime @default(now())
+
+  @@unique([teamId, round])
+}
+
+model Score {
+  id             String   @id @default(cuid())
+  gameId         String
+  game           Game     @relation(fields: [gameId], references: [id])
+  round          Int
+  voterPlayerId  String
+  voterPlayer    Player   @relation("voterScores", fields: [voterPlayerId], references: [id])
+  voterTeamId    String
+  voterTeam      Team     @relation("voterTeam", fields: [voterTeamId], references: [id])
+  targetTeamId   String
+  targetTeam     Team     @relation("targetTeam", fields: [targetTeamId], references: [id])
+  value          Int
+  locked         Boolean  @default(false)
+
+  @@unique([round, voterPlayerId, targetTeamId])
+  @@index([gameId, round, targetTeamId])
+}
+
+model WinnerPick {
+  id     String    @id @default(cuid())
+  gameId String
+  game   Game      @relation(fields: [gameId], references: [id])
+  round  Int
+  teamId String
+  team   Team      @relation(fields: [teamId], references: [id])
+  role   RoundRole
+
+  @@unique([gameId, round, role])
+}
+
+model AiCall {
+  id           String     @id @default(cuid())
+  gameId       String?
+  game         Game?      @relation(fields: [gameId], references: [id])
+  task         String
+  model        String
+  status       CallStatus
+  latencyMs    Int
+  costUsd      Float      @default(0)
+  usage        Json?
+  retries      Int        @default(0)
+  fallbackUsed Boolean    @default(false)
+  error        String?
+  createdAt    DateTime   @default(now())
+
+  @@index([gameId, task])
+  @@index([createdAt])
+}
