@@ -170,6 +170,12 @@ export type GmSetThemePayload = z.infer<typeof gmSetThemeSchema>;
 export const gmApproveGreetingsSchema = z.object({}).strict();
 export type GmApproveGreetingsPayload = z.infer<typeof gmApproveGreetingsSchema>;
 export const gmRegenGreetingSchema = z.object({ teamId: z.string().min(1) }).strict();
+export type GmRegenGreetingPayload = z.infer<typeof gmRegenGreetingSchema>;
+/** GM hand-edits a team's greeting text (persists status "edited"). */
+export const gmUpdateGreetingSchema = z
+  .object({ teamId: z.string().min(1), text: z.string().trim().min(1).max(60) })
+  .strict();
+export type GmUpdateGreetingPayload = z.infer<typeof gmUpdateGreetingSchema>;
 export const judgePickSchema = z.object({ teamId: z.string().min(1) }).strict();
 export const revealAckSchema = z.object({}).strict();
 

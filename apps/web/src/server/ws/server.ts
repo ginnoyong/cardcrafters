@@ -20,10 +20,15 @@ import {
   canSubmit,
   gmApproveGreetingsSchema,
   gmKickSchema,
+  gmRegenGreetingSchema,
   gmSetThemeSchema,
+  gmUpdateGreetingSchema,
   joinSchema,
   promptSubmitSchema,
 } from "@cardcrafters/shared";
+
+import type { AiRouter } from "../ai/router";
+import { regenerateGreeting } from "../flows/greetings";
 
 import type { GameHub } from "../game/hub";
 import type { PlayerRow, Repository, TeamRow } from "../repo/repository";
@@ -136,8 +141,23 @@ export async function buildSyncFull(
   };
 }
 
-/** Register connection-level handlers + auth middleware on the io server. */
-export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repository): void {
+/** Broadcast `greeting:updated` {teamId, text, status} to the gm + team rooms
+ *  with a hub-stamped envelope (direct socket-layer emit, like sync:full). */
+function emitGreetingUpdated(
+  io: Server,
+  hub: GameHub,
+  gameId: string,
+  payload: { teamId: string; text: string; status: string },
+): void {
+  const enveloped = { ...hub.stamp(gameId), ...payload };
+  io.to(gmRoom(gameId)).emit("greeting:updated", enveloped);
+  io.to(teamRoom(gameId, payload.teamId)).emit("greeting:updated", enveloped);
+}
+
+/** Register connection-level handlers + auth middleware on the io server.
+ *  `ai` is optional for backward compatibility; when omitted the greeting
+ *  handlers (gm:updateGreeting / gm:regenGreeting) ack ai_unavailable. */
+export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repository, ai?: AiRouter): void {
   io.use(socketAuthMiddleware(repo));
 
   // playerId → live sockets (kick evicts ALL of a victim's sockets in the game).
@@ -380,6 +400,89 @@ export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repositor
         ackOk(ack);
       } catch (err) {
         ackFail(ack, "kick_failed", err instanceof Error ? err.message : "kick failed");
+      }
+    });
+
+    // ---------------------------------------------------------------------
+    // gm:updateGreeting — GM hand-edits one team's greeting text. Persists
+    // status "edited" and broadcasts greeting:updated to gm + team rooms.
+    // ---------------------------------------------------------------------
+    socket.on("gm:updateGreeting", async (raw: unknown, ack?: unknown) => {
+      const identity = data.identity;
+      if (!identity || identity.role !== "gm") {
+        ackFail(ack, "forbidden", "GM only");
+        return;
+      }
+      const parsed = gmUpdateGreetingSchema.safeParse(raw);
+      if (!parsed.success) {
+        ackFail(ack, "invalid_payload", `invalid greeting payload: ${parsed.error.issues[0]?.message ?? "unknown"}`);
+        return;
+      }
+      try {
+        // Own-game-only: resolve the team through THIS game's team list.
+        const teams = await repo.listTeams(identity.gameId);
+        const team = teams.find((t) => t.id === parsed.data.teamId);
+        if (!team) {
+          ackFailReason(ack, "team_mismatch", "team belongs to a different game", "wrong_game");
+          return;
+        }
+        const state = await hub.runtimeState(identity.gameId);
+        const text = parsed.data.text.trim();
+        // Server-side revalidation after trim (schema already trimmed, but
+        // belt-and-braces per the plan).
+        if (text.length < 1 || text.length > 60) {
+          ackFail(ack, "invalid_payload", "greeting text must be 1..60 characters");
+          return;
+        }
+        try {
+          await repo.updateGreeting(team.id, state.round, { text, status: "edited" });
+        } catch {
+          // No row for [teamId, round] yet → create it as edited.
+          await repo.createGreeting({ teamId: team.id, round: state.round, text, status: "edited" });
+        }
+        ackOk(ack, { teamId: team.id, text, status: "edited" });
+        emitGreetingUpdated(io, hub, identity.gameId, { teamId: team.id, text, status: "edited" });
+      } catch (err) {
+        ackFail(ack, "update_greeting_failed", err instanceof Error ? err.message : "update failed");
+      }
+    });
+
+    // ---------------------------------------------------------------------
+    // gm:regenGreeting — GM re-rolls one team's greeting (AI round-trip,
+    // awaited inline). Broadcasts greeting:updated with the new text.
+    // ---------------------------------------------------------------------
+    socket.on("gm:regenGreeting", async (raw: unknown, ack?: unknown) => {
+      const identity = data.identity;
+      if (!identity || identity.role !== "gm") {
+        ackFail(ack, "forbidden", "GM only");
+        return;
+      }
+      const parsed = gmRegenGreetingSchema.safeParse(raw);
+      if (!parsed.success) {
+        ackFail(ack, "invalid_payload", `invalid regen payload: ${parsed.error.issues[0]?.message ?? "unknown"}`);
+        return;
+      }
+      if (!ai) {
+        ackFail(ack, "ai_unavailable", "AI router not wired into this server");
+        return;
+      }
+      try {
+        const teams = await repo.listTeams(identity.gameId);
+        if (!teams.some((t) => t.id === parsed.data.teamId)) {
+          ackFailReason(ack, "team_mismatch", "team belongs to a different game", "wrong_game");
+          return;
+        }
+        // NOTE: regenerate replaces the text even when the current status is
+        // "edited" — regeneration is an explicit GM intent (see flows).
+        const text = await regenerateGreeting(hub, repo, ai, identity.gameId, parsed.data.teamId);
+        ackOk(ack, { teamId: parsed.data.teamId, text, status: "proposed" });
+        emitGreetingUpdated(io, hub, identity.gameId, {
+          teamId: parsed.data.teamId,
+          text,
+          status: "proposed",
+        });
+      } catch (err) {
+        ackFail(ack, "regen_failed", err instanceof Error ? err.message : "regen failed");
       }
     });
 

@@ -130,7 +130,7 @@ export interface LayoutState {
 // Greetings, scoring, teams
 // ---------------------------------------------------------------------------
 
-export type GreetingStatus = "pending" | "ready" | "failed";
+export type GreetingStatus = "proposed" | "approved" | "edited";
 
 /** The team's greeting text overlay (AI-generated variations, GM/player pick). */
 export interface Greeting {

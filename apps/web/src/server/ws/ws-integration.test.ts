@@ -11,21 +11,29 @@ import { io, type Socket } from "socket.io-client";
 
 import { DEFAULT_CARD_CONFIG, MAX_PROMPT_WORDS } from "@cardcrafters/shared";
 
+import { createAiRouter, type AiRouter } from "../ai/router";
 import { createServer, type CardCraftersServer } from "../../../server";
 import { MemoryRepo } from "../repo/memory-repo";
 
 let srv: CardCraftersServer;
+let repo: MemoryRepo;
+let ai: AiRouter;
+let hub: CardCraftersServer["hub"];
 let port: number;
 let gameId: string;
 let gameCode: string;
 let joinTokenA: string;
 
 beforeEach(async () => {
-  const repo = new MemoryRepo();
-  srv = await createServer({ repo, enableNext: false });
+  repo = new MemoryRepo();
+  // Force mock mode so tests never hit a real provider even when a local
+  // OPENROUTER_API_KEY is present.
+  ai = await createAiRouter({ repo, env: { AI_MODE: "mock", NODE_ENV: "test" } as unknown as NodeJS.ProcessEnv });
+  srv = await createServer({ repo, enableNext: false, ai });
+  hub = srv.hub;
   await new Promise<void>((resolve) => srv.httpServer.listen(0, "127.0.0.1", resolve));
   port = (srv.httpServer.address() as AddressInfo).port;
-  const setup = await srv.hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 3 });
+  const setup = await hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 3 });
   gameId = setup.game.id;
   gameCode = setup.game.code;
   joinTokenA = setup.teams[0]!.joinToken;
@@ -34,7 +42,6 @@ beforeEach(async () => {
 afterEach(async () => {
   await srv.close();
 });
-
 function connect(auth: Record<string, unknown> = {}): Socket {
   return io(`http://127.0.0.1:${port}`, {
     path: "/socket.io",
@@ -284,6 +291,104 @@ describe("ws integration (memory repo, ephemeral port)", () => {
 
     // The server force-disconnects the victim's socket.
     await disconnected;
+    gm.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Greeting handlers (gm:updateGreeting / gm:regenGreeting) — Step 6 server.
+// ---------------------------------------------------------------------------
+
+import { generateGreetingsForGame } from "../flows/greetings";
+import type { GreetingRow } from "../repo/repository";
+
+describe("greeting handlers (gm:updateGreeting / gm:regenGreeting)", () => {
+  it("gm:updateGreeting persists status 'edited' and emits greeting:updated", async () => {
+    await hub.applyEvent(gameId, { type: "gm:setTheme", theme: "Cats", now: Date.now() });
+    const gm = connect({ role: "gm", joinToken: gameCode });
+    await emitAck(gm, "join", { role: "gm", joinToken: gameCode });
+    const teams = await repo.listTeams(gameId);
+
+    const updated = waitFor<Record<string, unknown>>(gm, "greeting:updated");
+    const ack = await emitAck<{ ok: boolean; status?: string }>(gm, "gm:updateGreeting", {
+      teamId: teams[0]!.id,
+      text: "  Happy 30th, Sam!  ",
+    });
+    expect(ack.ok).toBe(true);
+    expect(ack.status).toBe("edited");
+
+    const evt = await updated;
+    expect(evt).toMatchObject({ teamId: teams[0]!.id, text: "Happy 30th, Sam!", status: "edited" });
+
+    // Persisted (trim applied server-side).
+    const rows = await repo.listGreetings(gameId, 1);
+    const row = rows.find((g) => g.teamId === teams[0]!.id);
+    expect(row?.text).toBe("Happy 30th, Sam!");
+    expect(row?.status).toBe("edited");
+    gm.close();
+  });
+
+  it("gm:regenGreeting returns new text + emits greeting:updated (status proposed)", async () => {
+    await hub.applyEvent(gameId, { type: "gm:setTheme", theme: "Cats", now: Date.now() });
+    await generateGreetingsForGame(hub, repo, ai, gameId);
+    const teams = await repo.listTeams(gameId);
+
+    const gm = connect({ role: "gm", joinToken: gameCode });
+    await emitAck(gm, "join", { role: "gm", joinToken: gameCode });
+
+    const updated = waitFor<Record<string, unknown>>(gm, "greeting:updated");
+    const ack = await emitAck<{ ok: boolean; text?: string; status?: string }>(
+      gm,
+      "gm:regenGreeting",
+      { teamId: teams[1]!.id },
+    );
+    expect(ack.ok).toBe(true);
+    expect(ack.text).toBeTruthy();
+    expect(ack.status).toBe("proposed");
+
+    const evt = await updated;
+    expect(evt).toMatchObject({ teamId: teams[1]!.id, text: ack.text, status: "proposed" });
+    const rows = await repo.listGreetings(gameId, 1);
+    expect(rows.find((g) => g.teamId === teams[1]!.id)?.text).toBe(ack.text);
+    gm.close();
+  });
+
+  it("player socket cannot emit gm:updateGreeting → ack forbidden", async () => {
+    await hub.applyEvent(gameId, { type: "gm:setTheme", theme: "Cats", now: Date.now() });
+    const player = connect();
+    await emitAck(player, "join", { role: "player", joinToken: joinTokenA, nickname: "Alex" });
+    const teams = await repo.listTeams(gameId);
+
+    const ack = await emitAck<{ ok: boolean; error?: string }>(player, "gm:updateGreeting", {
+      teamId: teams[0]!.id,
+      text: "nope",
+    });
+    expect(ack.ok).toBe(false);
+    expect(ack.error).toBe("GM only");
+    player.close();
+  });
+
+  it("GM of game A updating a team of game B → ack ok:false wrong_game", async () => {
+    await hub.applyEvent(gameId, { type: "gm:setTheme", theme: "Cats", now: Date.now() });
+    // Second game with its own teams + theme.
+    const other = await hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 1 });
+    await hub.applyEvent(other.game.id, { type: "gm:setTheme", theme: "Dogs", now: Date.now() });
+
+    const gm = connect({ role: "gm", joinToken: gameCode });
+    await emitAck(gm, "join", { role: "gm", joinToken: gameCode });
+
+    const ack = await emitAck<{ ok: boolean; reason?: string }>(gm, "gm:updateGreeting", {
+      teamId: other.teams[0]!.id,
+      text: "cross game",
+    });
+    expect(ack.ok).toBe(false);
+    expect(ack.reason).toBe("wrong_game");
+
+    const ackRegen = await emitAck<{ ok: boolean; reason?: string }>(gm, "gm:regenGreeting", {
+      teamId: other.teams[0]!.id,
+    });
+    expect(ackRegen.ok).toBe(false);
+    expect(ackRegen.reason).toBe("wrong_game");
     gm.close();
   });
 });

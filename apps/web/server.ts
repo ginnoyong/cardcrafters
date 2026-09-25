@@ -36,6 +36,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { Server as SocketServer } from "socket.io";
 
+import { createAiRouter, type AiRouter } from "./src/server/ai/router";
 import { GameHub } from "./src/server/game/hub";
 import { hydrateTimers } from "./src/server/game/timer-service";
 import { handleApiRequest } from "./src/server/http/api";
@@ -49,6 +50,8 @@ const here = path.dirname(fileURLToPath(import.meta.url)); // apps/web
 export interface CreateServerOptions {
   /** Repository override (tests inject a MemoryRepo). Defaults by env. */
   repo?: Repository;
+  /** AiRouter override (tests inject a mock-mode router). Default: createAiRouter(env). */
+  ai?: AiRouter;
   /** Attach the Next.js request handler (default: true; tests pass false). */
   enableNext?: boolean;
   /** Next dev mode override; defaults to NODE_ENV !== "production". */
@@ -60,6 +63,8 @@ export interface CardCraftersServer {
   io: SocketServer;
   hub: GameHub;
   repo: Repository;
+  /** AI router (mock mode by default) — greeting generation + gm:regenGreeting. */
+  ai: AiRouter;
   /** Stops Socket.IO + http server and disconnects the owned Prisma client. */
   close(): Promise<void>;
 }
@@ -113,6 +118,8 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Card
   const nextHandlerRef: { handler: http.RequestListener | null } = { handler: null };
   // Filled in below (hub needs the io server which needs the http server).
   const hubRef: { hub: GameHub | null } = { hub: null };
+  const aiRef: { ai: AiRouter | null } = { ai: null };
+  const ioRef: { io: SocketServer | null } = { io: null };
 
   /** Non-API request: Next when available, 404 otherwise. */
   const fallthrough = (req: http.IncomingMessage, res: http.ServerResponse): void => {
@@ -137,12 +144,12 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Card
     // Tiny JSON API (game create/summary) — handled BEFORE Next so the GM
     // console can create games even while Next is still compiling.
     if (url.startsWith("/api/games")) {
-      if (!hubRef.hub) {
+      if (!hubRef.hub || !aiRef.ai || !ioRef.io) {
         res.writeHead(503, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "starting_up" }));
         return;
       }
-      void handleApiRequest(req, res, hubRef.hub, repo).then((consumed) => {
+      void handleApiRequest(req, res, hubRef.hub, repo, aiRef.ai, ioRef.io).then((consumed) => {
         if (!consumed) fallthrough(req, res);
       });
       return;
@@ -153,7 +160,12 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Card
   const io = new SocketServer(httpServer, { path: "/socket.io" });
   const hub = new GameHub(repo, io);
   hubRef.hub = hub;
-  registerSocketHandlers(io, hub, repo);
+  // AI router (mock mode unless OPENROUTER_API_KEY works) — powers greeting
+  // generation at game creation + the gm:regenGreeting handler.
+  const ai = opts.ai ?? (await createAiRouter({ repo }));
+  aiRef.ai = ai;
+  ioRef.io = io;
+  registerSocketHandlers(io, hub, repo, ai);
 
   // Boot reconciliation: re-arm future phase timers / fire expired ones.
   await hydrateTimers(hub.timers, hub, repo);
@@ -171,6 +183,7 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Card
     io,
     hub,
     repo,
+    ai,
     async close() {
       hub.shutdown();
       await new Promise<void>((resolve) => io.close(() => resolve()));
