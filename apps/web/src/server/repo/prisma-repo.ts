@@ -112,6 +112,15 @@ export class PrismaRepo implements Repository {
     return g ? this.mapGame(g) : null;
   }
 
+  async listGames(): Promise<GameRow[]> {
+    try {
+      const rows = await this.prisma.game.findMany({ orderBy: { createdAt: "asc" } });
+      return rows.map((g) => this.mapGame(g));
+    } catch (e) {
+      throw wrap(e);
+    }
+  }
+
   async updateGame(id: string, patch: GamePatch): Promise<GameRow> {
     try {
       const g = await this.prisma.game.update({

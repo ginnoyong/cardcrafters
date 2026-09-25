@@ -292,6 +292,8 @@ export interface Repository {
   getGame(id: string): Promise<GameRow | null>;
   /** Fetch a game by its 6-char join code, or null. */
   getGameByCode(code: string): Promise<GameRow | null>;
+  /** All games (used by the timer service's boot reconciliation). */
+  listGames(): Promise<GameRow[]>;
   /** Partial update of phase/round/theme/config/timers; returns the new row. */
   updateGame(id: string, patch: GamePatch): Promise<GameRow>;
 

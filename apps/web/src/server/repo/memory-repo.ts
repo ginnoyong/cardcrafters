@@ -138,6 +138,12 @@ export class MemoryRepo implements Repository {
     return null;
   }
 
+  async listGames(): Promise<GameRow[]> {
+    return [...this.games.values()]
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((g) => ({ ...g }));
+  }
+
   async updateGame(id: string, patch: GamePatch): Promise<GameRow> {
     const row = this.games.get(id);
     if (!row) throw new RepoError(`game ${id} not found`);
