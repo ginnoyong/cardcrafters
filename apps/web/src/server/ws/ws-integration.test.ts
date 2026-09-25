@@ -9,7 +9,7 @@ import { type AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { io, type Socket } from "socket.io-client";
 
-import { DEFAULT_CARD_CONFIG } from "@cardcrafters/shared";
+import { DEFAULT_CARD_CONFIG, MAX_PROMPT_WORDS } from "@cardcrafters/shared";
 
 import { createServer, type CardCraftersServer } from "../../../server";
 import { MemoryRepo } from "../repo/memory-repo";
@@ -194,5 +194,96 @@ describe("ws integration (memory repo, ephemeral port)", () => {
     gm.close();
     player.close();
     second.close();
+  });
+
+  it("(f) prompt with too many words → ack ok:false reason 'too_many_words'", async () => {
+    const socket = connect();
+    await emitAck(socket, "join", {
+      role: "player",
+      joinToken: joinTokenA,
+      nickname: "Alex",
+    });
+
+    // MAX_PROMPT_WORDS + 1 words — rejected by the shared word-count rules
+    // BEFORE any hub/phase logic runs.
+    const words = Array.from({ length: MAX_PROMPT_WORDS + 1 }, (_, i) => `w${i}`).join(" ");
+    const ack = await emitAck<{ ok: boolean; reason?: string; count?: number }>(
+      socket,
+      "player:submitPrompt",
+      { text: words },
+    );
+    expect(ack.ok).toBe(false);
+    expect(ack.reason).toBe("too_many_words");
+    expect(ack.count).toBe(MAX_PROMPT_WORDS + 1);
+    socket.close();
+  });
+
+  it("(g) whitespace-only prompt → ack ok:false reason 'empty_prompt'", async () => {
+    const socket = connect();
+    await emitAck(socket, "join", {
+      role: "player",
+      joinToken: joinTokenA,
+      nickname: "Alex",
+    });
+
+    const ack = await emitAck<{ ok: boolean; reason?: string }>(
+      socket,
+      "player:submitPrompt",
+      { text: "   " },
+    );
+    expect(ack.ok).toBe(false);
+    expect(ack.reason).toBe("empty_prompt");
+    socket.close();
+  });
+
+  it("(h) GM of game A cannot kick a player of game B → reason 'wrong_game'", async () => {
+    // A second, independent game with its own player.
+    const other = await srv.hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 1 });
+    const outsider = connect();
+    const outsiderAck = await emitAck<{ identity: { playerId: string } }>(outsider, "join", {
+      role: "player",
+      joinToken: other.teams[0]!.joinToken,
+      nickname: "Outsider",
+    });
+    const outsiderId = outsiderAck.identity.playerId;
+
+    // GM of game A (created in beforeEach) tries to kick that player.
+    const gm = connect({ role: "gm" });
+    await emitAck(gm, "join", { role: "gm", joinToken: gameCode });
+    const ack = await emitAck<{ ok: boolean; reason?: string }>(gm, "gm:kick", {
+      playerId: outsiderId,
+    });
+    expect(ack.ok).toBe(false);
+    expect(ack.reason).toBe("wrong_game");
+
+    // The victim is untouched (not soft-kicked).
+    expect(await srv.hub.isKicked(outsiderId)).toBe(false);
+    outsider.close();
+    gm.close();
+  });
+
+  it("(i) gm:kick of an own-game player evicts the victim's socket", async () => {
+    const gm = connect({ role: "gm" });
+    await emitAck(gm, "join", { role: "gm", joinToken: gameCode });
+
+    const victim = connect();
+    const victimAck = await emitAck<{ identity: { playerId: string } }>(victim, "join", {
+      role: "player",
+      joinToken: joinTokenA,
+      nickname: "Victim",
+    });
+
+    const disconnected = new Promise<void>((resolve) => {
+      victim.on("disconnect", () => resolve());
+    });
+
+    const ack = await emitAck<{ ok: boolean }>(gm, "gm:kick", {
+      playerId: victimAck.identity.playerId,
+    });
+    expect(ack.ok).toBe(true);
+
+    // The server force-disconnects the victim's socket.
+    await disconnected;
+    gm.close();
   });
 });

@@ -163,6 +163,12 @@ export type ScoreSubmitPayload = z.infer<typeof scoreSubmitSchema>;
 
 export const gmRemoveItemSchema = z.object({ itemId: z.string().min(1) }).strict();
 export const gmKickSchema = z.object({ playerId: z.string().min(1) }).strict();
+/** GM proposes/changes the round theme (LOBBY → GREETINGS, or re-propose). */
+export const gmSetThemeSchema = z.object({ theme: z.string().min(1).max(100) }).strict();
+export type GmSetThemePayload = z.infer<typeof gmSetThemeSchema>;
+/** GM approves the greetings step → BUILD. */
+export const gmApproveGreetingsSchema = z.object({}).strict();
+export type GmApproveGreetingsPayload = z.infer<typeof gmApproveGreetingsSchema>;
 export const gmRegenGreetingSchema = z.object({ teamId: z.string().min(1) }).strict();
 export const judgePickSchema = z.object({ teamId: z.string().min(1) }).strict();
 export const revealAckSchema = z.object({}).strict();

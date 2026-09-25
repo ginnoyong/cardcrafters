@@ -200,3 +200,103 @@ describe("applyEvent", () => {
     expect(result).toEqual({ ok: false, reason: "before_theme" });
   });
 });
+
+describe("capacity + persistence", () => {
+  it("rejects the 13th player even when rows were inserted directly via the repo", async () => {
+    const { hub, repo } = makeHub();
+    const { teams, game } = await hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 1 });
+
+    // Fill the team to capacity WITHOUT going through hub.joinPlayer —
+    // capacity must be counted from the Repository, not from hub caches.
+    for (let i = 1; i <= MAX_TEAM_MEMBERS; i++) {
+      await repo.createPlayer({
+        gameId: game.id,
+        teamId: teams[0]!.id,
+        nickname: `P${i}`,
+        sessionToken: `st-${game.id}-${i}`,
+      });
+    }
+    expect(await repo.countTeamMembers(teams[0]!.id)).toBe(MAX_TEAM_MEMBERS);
+
+    await expect(
+      hub.joinPlayer({ joinToken: teams[0]!.joinToken, nickname: "Onemore" }),
+    ).rejects.toThrow(/full/);
+  });
+
+  it("winner pick survives a full hub restart (hydrate from repo)", async () => {
+    const { repo, hub } = makeHub();
+    const { game, teams } = await hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 2 });
+    const winnerId = teams[1]!.id;
+
+    // Drive the full round: LOBBY→GREETINGS→BUILD→SCORING→JUDGING→REVEAL.
+    const events = [
+      { type: "gm:setTheme", theme: "Underwater bakery", now: NOW },
+      { type: "gm:approveGreetings", now: NOW },
+      { type: "gm:stopBuild", now: NOW },
+      { type: "gm:stopScoring", now: NOW },
+      { type: "gm:pickWinner", teamId: winnerId, now: NOW },
+    ] as const;
+    let last;
+    for (const event of events) {
+      last = await hub.applyEvent(game.id, event);
+      expect(last.ok).toBe(true);
+    }
+    if (!last?.ok) throw new Error("pickWinner should have succeeded");
+    expect(last.state.phase).toBe("REVEAL");
+    hub.shutdown(); // clear the armed BUILD/SCORING timers
+
+    // A FRESH hub over the same repo restores the winner from WinnerPick rows.
+    const revived = new GameHub(repo, fakeIo().io, { now: () => NOW });
+    const state = await revived.hydrateGame(game.id);
+    expect(state).not.toBeNull();
+    expect(state!.phase).toBe("REVEAL");
+    expect(state!.winnerTeamId).toBe(winnerId);
+    expect(state!.scoresLocked).toBe(true);
+    revived.shutdown();
+  });
+
+  it("stopScoring locks the round's score rows; further upsertScore throws 'scores_locked'", async () => {
+    const { repo, hub } = makeHub();
+    const { game, teams } = await hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 2 });
+
+    const voter = await repo.createPlayer({
+      gameId: game.id,
+      teamId: teams[0]!.id,
+      nickname: "Voter",
+      sessionToken: `st-${game.id}-voter`,
+    });
+    await repo.upsertScore({
+      gameId: game.id,
+      round: 1,
+      voterPlayerId: voter.id,
+      voterTeamId: teams[0]!.id,
+      targetTeamId: teams[1]!.id,
+      value: 8,
+    });
+
+    await hub.applyEvent(game.id, { type: "gm:setTheme", theme: "Space zoo", now: NOW });
+    await hub.applyEvent(game.id, { type: "gm:approveGreetings", now: NOW });
+    await hub.applyEvent(game.id, { type: "gm:stopBuild", now: NOW });
+    await hub.applyEvent(game.id, { type: "gm:stopScoring", now: NOW });
+
+    // Every score row of the round is locked at JUDGING entry.
+    const rows = await repo.listScores(game.id, 1);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.locked).toBe(true);
+    expect(await repo.areScoresLocked(game.id, 1)).toBe(true);
+
+    // A further write for the locked round is refused by the repo.
+    await expect(
+      repo.upsertScore({
+        gameId: game.id,
+        round: 1,
+        voterPlayerId: voter.id,
+        voterTeamId: teams[0]!.id,
+        targetTeamId: teams[1]!.id,
+        value: 3,
+      }),
+    ).rejects.toThrow(/scores_locked/);
+
+    hub.shutdown();
+  });
+});

@@ -454,3 +454,128 @@ describe("ai calls — per-task stats + total cost", () => {
     expect(summary.perTask).toHaveLength(2);
   });
 });
+// ---------------------------------------------------------------------------
+// Step-5 review backfill: lock isolation, getPlayer, capacity counting,
+// aggregate corruption guards.
+// ---------------------------------------------------------------------------
+
+describe("scores — lockScores/areScoresLocked round isolation", () => {
+  it("locking round 1 does not touch round 2; writes follow the lock", async () => {
+    const { repo, game, teamA, teamB } = await mkGame();
+    const voter = await repo.createPlayer({
+      gameId: game.id,
+      teamId: teamA.id,
+      nickname: "V",
+      sessionToken: uniq("sess"),
+    });
+    const base = {
+      gameId: game.id,
+      voterPlayerId: voter.id,
+      voterTeamId: teamA.id,
+      targetTeamId: teamB.id,
+    };
+    await repo.upsertScore({ ...base, round: 1, value: 5 });
+    await repo.upsertScore({ ...base, round: 2, value: 6 });
+
+    expect(await repo.areScoresLocked(game.id, 1)).toBe(false);
+    expect(await repo.areScoresLocked(game.id, 2)).toBe(false);
+
+    const locked = await repo.lockScores(game.id, 1);
+    expect(locked).toBe(1); // only round 1's row
+
+    expect(await repo.areScoresLocked(game.id, 1)).toBe(true);
+    expect(await repo.areScoresLocked(game.id, 2)).toBe(false);
+    expect((await repo.listScores(game.id, 1))[0]!.locked).toBe(true);
+    expect((await repo.listScores(game.id, 2))[0]!.locked).toBe(false);
+
+    // Round 1 writes refused (even overwrite), round 2 still writable.
+    await expect(repo.upsertScore({ ...base, round: 1, value: 9 })).rejects.toThrow(RepoError);
+    await repo.upsertScore({ ...base, round: 2, value: 9 });
+    expect((await repo.listScores(game.id, 2))[0]!.value).toBe(9);
+  });
+
+  it("lockScores is idempotent and counts rows, locked or not", async () => {
+    const { repo, game, teamA, teamB } = await mkGame();
+    const voter = await repo.createPlayer({
+      gameId: game.id,
+      teamId: teamA.id,
+      nickname: "V",
+      sessionToken: uniq("sess"),
+    });
+    await repo.upsertScore({
+      gameId: game.id,
+      round: 1,
+      voterPlayerId: voter.id,
+      voterTeamId: teamA.id,
+      targetTeamId: teamB.id,
+      value: 7,
+    });
+    expect(await repo.lockScores(game.id, 1)).toBe(1);
+    // Idempotent: still 1 row, still locked, no duplicate.
+    expect(await repo.lockScores(game.id, 1)).toBe(1);
+    expect(await repo.listScores(game.id, 1)).toHaveLength(1);
+    expect(await repo.areScoresLocked(game.id, 1)).toBe(true);
+  });
+});
+
+describe("players — getPlayer + countTeamMembers", () => {
+  it("getPlayer returns the row (or null for unknown ids)", async () => {
+    const { repo, game, teamA } = await mkGame();
+    const player = await repo.createPlayer({
+      gameId: game.id,
+      teamId: teamA.id,
+      nickname: "Alex",
+      sessionToken: uniq("sess"),
+    });
+    const fetched = await repo.getPlayer(player.id);
+    expect(fetched).toEqual(player);
+    expect(await repo.getPlayer("missing-id")).toBeNull();
+  });
+
+  it("countTeamMembers excludes soft-removed players", async () => {
+    const { repo, game, teamA } = await mkGame();
+    const keep = await repo.createPlayer({
+      gameId: game.id,
+      teamId: teamA.id,
+      nickname: "Keep",
+      sessionToken: uniq("sess"),
+    });
+    const gone = await repo.createPlayer({
+      gameId: game.id,
+      teamId: teamA.id,
+      nickname: "Gone",
+      sessionToken: uniq("sess"),
+    });
+    expect(await repo.countTeamMembers(teamA.id)).toBe(2);
+    await repo.kickPlayer(gone.id, 1000);
+    expect(await repo.countTeamMembers(teamA.id)).toBe(1);
+    expect((await repo.listTeamPlayers(teamA.id)).map((p) => p.nickname)).toEqual(["Keep"]);
+    void keep;
+  });
+});
+
+describe("aggregateScores — corruption guards", () => {
+  it.each([0, 11, 3.5, "abc"])(
+    "throws RepoError on a corrupt value (%s) instead of poisoning buckets",
+    async (bad) => {
+      const { repo, game, teamA, teamB } = await mkGame();
+      const voter = await repo.createPlayer({
+        gameId: game.id,
+        teamId: teamA.id,
+        nickname: "V",
+        sessionToken: uniq("sess"),
+      });
+      await repo.upsertScore({
+        gameId: game.id,
+        round: 1,
+        voterPlayerId: voter.id,
+        voterTeamId: teamA.id,
+        targetTeamId: teamB.id,
+        value: bad as unknown as number, // upsert trusts upstream validation
+      });
+      await expect(repo.aggregateScores(game.id, 1)).rejects.toThrow(RepoError);
+      // Other rounds/games are unaffected by the corrupt row's isolation.
+      expect(await repo.aggregateScores(game.id, 2)).toEqual([]);
+    },
+  );
+});

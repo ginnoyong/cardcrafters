@@ -180,6 +180,29 @@ describe.skipIf(!DB_OK)("PrismaRepo (postgres)", () => {
     });
   });
 
+  it("duplicate sessionToken throws RepoError (fails fast, NOT auto-suffixed)", async () => {
+    await withGame(async (gameId) => {
+      const team = await mkTeam(gameId, "A");
+      const sharedToken = `st-${testId}-dup`;
+      await repo.createPlayer({
+        gameId,
+        teamId: team.id,
+        nickname: `Alpha-${testId}`,
+        sessionToken: sharedToken,
+      });
+      // Same sessionToken, different nickname → the sessionToken unique
+      // constraint must reject the second row (session identity is 1:1).
+      await expect(
+        repo.createPlayer({
+          gameId,
+          teamId: team.id,
+          nickname: `Beta-${testId}`,
+          sessionToken: sharedToken,
+        }),
+      ).rejects.toThrow(RepoError);
+    });
+  });
+
   it("items: create/update/status filter + duplicate prompt rejection", async () => {
     await withGame(async (gameId) => {
       const team = await mkTeam(gameId, "T");

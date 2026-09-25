@@ -18,7 +18,9 @@ import type { Server, Socket } from "socket.io";
 import {
   MAX_PROMPT_WORDS,
   canSubmit,
+  gmApproveGreetingsSchema,
   gmKickSchema,
+  gmSetThemeSchema,
   joinSchema,
   promptSubmitSchema,
 } from "@cardcrafters/shared";
@@ -281,6 +283,61 @@ export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repositor
         else ackFailReason(ack, "rejected", result.reason, result.reason);
       } catch (err) {
         ackFail(ack, "submit_failed", err instanceof Error ? err.message : "submit failed");
+      }
+    });
+
+    // ---------------------------------------------------------------------
+    // gm:setTheme — GM-only; LOBBY→GREETINGS (or re-propose in GREETINGS).
+    // ---------------------------------------------------------------------
+    socket.on("gm:setTheme", async (raw: unknown, ack?: unknown) => {
+      const identity = data.identity;
+      if (!identity || identity.role !== "gm") {
+        ackFail(ack, "forbidden", "GM only");
+        return;
+      }
+      const parsed = gmSetThemeSchema.safeParse(raw);
+      if (!parsed.success) {
+        ackFail(ack, "invalid_payload", `invalid theme payload: ${parsed.error.issues[0]?.message ?? "unknown"}`);
+        return;
+      }
+      try {
+        const result = await hub.applyEvent(identity.gameId, {
+          type: "gm:setTheme",
+          theme: parsed.data.theme,
+          now: Date.now(),
+        });
+        if (result.ok) ackOk(ack, { phase: result.state.phase });
+        else ackFailReason(ack, "rejected", result.reason, result.reason);
+      } catch (err) {
+        ackFail(ack, "theme_failed", err instanceof Error ? err.message : "setTheme failed");
+      }
+    });
+
+    // ---------------------------------------------------------------------
+    // gm:approveGreetings — GM approves greetings → BUILD (arms the BUILD
+    // timer when configured). Greeting generation itself lands in Step 6; for
+    // now approval simply moves the game to BUILD with no generation yet.
+    // ---------------------------------------------------------------------
+    socket.on("gm:approveGreetings", async (raw: unknown, ack?: unknown) => {
+      const identity = data.identity;
+      if (!identity || identity.role !== "gm") {
+        ackFail(ack, "forbidden", "GM only");
+        return;
+      }
+      const parsed = gmApproveGreetingsSchema.safeParse(raw ?? {});
+      if (!parsed.success) {
+        ackFail(ack, "invalid_payload", "invalid approve payload");
+        return;
+      }
+      try {
+        const result = await hub.applyEvent(identity.gameId, {
+          type: "gm:approveGreetings",
+          now: Date.now(),
+        });
+        if (result.ok) ackOk(ack, { phase: result.state.phase });
+        else ackFailReason(ack, "rejected", result.reason, result.reason);
+      } catch (err) {
+        ackFail(ack, "approve_failed", err instanceof Error ? err.message : "approveGreetings failed");
       }
     });
 

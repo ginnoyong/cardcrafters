@@ -38,6 +38,7 @@ import { Server as SocketServer } from "socket.io";
 
 import { GameHub } from "./src/server/game/hub";
 import { hydrateTimers } from "./src/server/game/timer-service";
+import { handleApiRequest } from "./src/server/http/api";
 import { MemoryRepo } from "./src/server/repo/memory-repo";
 import type { Repository } from "./src/server/repo/repository";
 import { PrismaRepo } from "./src/server/repo/prisma-repo";
@@ -110,16 +111,11 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Card
   const repo = opts.repo ?? defaultRepo();
 
   const nextHandlerRef: { handler: http.RequestListener | null } = { handler: null };
+  // Filled in below (hub needs the io server which needs the http server).
+  const hubRef: { hub: GameHub | null } = { hub: null };
 
-  const httpServer = http.createServer((req, res) => {
-    const url = req.url ?? "/";
-    if (url === "/api/health" || url.startsWith("/api/health?")) {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true, service: "card-crafters" }));
-      return;
-    }
-    // nextHandlerRef.handler is filled in asynchronously; until then (or when
-    // Next is disabled/unavailable) non-health requests 404.
+  /** Non-API request: Next when available, 404 otherwise. */
+  const fallthrough = (req: http.IncomingMessage, res: http.ServerResponse): void => {
     const handler = nextHandlerRef.handler;
     if (handler) {
       handler(req, res);
@@ -129,10 +125,34 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Card
     res.end(
       JSON.stringify({ ok: false, error: "not_found", hint: "next handler not ready (or disabled)" }),
     );
+  };
+
+  const httpServer = http.createServer((req, res) => {
+    const url = req.url ?? "/";
+    if (url === "/api/health" || url.startsWith("/api/health?")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, service: "card-crafters" }));
+      return;
+    }
+    // Tiny JSON API (game create/summary) — handled BEFORE Next so the GM
+    // console can create games even while Next is still compiling.
+    if (url.startsWith("/api/games")) {
+      if (!hubRef.hub) {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "starting_up" }));
+        return;
+      }
+      void handleApiRequest(req, res, hubRef.hub, repo).then((consumed) => {
+        if (!consumed) fallthrough(req, res);
+      });
+      return;
+    }
+    fallthrough(req, res);
   });
 
   const io = new SocketServer(httpServer, { path: "/socket.io" });
   const hub = new GameHub(repo, io);
+  hubRef.hub = hub;
   registerSocketHandlers(io, hub, repo);
 
   // Boot reconciliation: re-arm future phase timers / fire expired ones.
