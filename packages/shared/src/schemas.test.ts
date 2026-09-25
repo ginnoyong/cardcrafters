@@ -1,0 +1,334 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  errorSchema,
+  gmKickSchema,
+  gmRegenGreetingSchema,
+  gmRemoveItemSchema,
+  greetingVariationsSchema,
+  joinSchema,
+  judgePickSchema,
+  layoutCompositionSchema,
+  layoutUpdatedSchema,
+  moderationSchema,
+  phaseChangedSchema,
+  promptSubmitSchema,
+  promptValidationSchema,
+  revealAckSchema,
+  scoreSubmitSchema,
+  styleDerivationSchema,
+  winnerAnnouncedSchema,
+  itemPendingSchema,
+  itemReadySchema,
+  itemRejectedSchema,
+  itemFailedSchema,
+  itemRemovedSchema,
+} from "./schemas";
+
+/** JSON round-trip helper: serialize, parse, re-parse through the schema. */
+function roundTrip<T>(schema: { parse: (v: unknown) => T }, value: unknown): T {
+  return schema.parse(JSON.parse(JSON.stringify(value)));
+}
+
+// ---------------------------------------------------------------------------
+// AI output schemas
+// ---------------------------------------------------------------------------
+
+describe("promptValidationSchema", () => {
+  const valid = {
+    valid: true,
+    reason: "",
+    normalized_subject: "birthday cake",
+  };
+
+  it("accepts a valid fixture", () => {
+    expect(promptValidationSchema.parse(valid)).toEqual(valid);
+  });
+
+  it("accepts optional example_fix", () => {
+    expect(
+      promptValidationSchema.parse({ ...valid, example_fix: "a cake for a birthday" }),
+    ).toEqual({ ...valid, example_fix: "a cake for a birthday" });
+  });
+
+  it("rejects missing reason", () => {
+    expect(() =>
+      promptValidationSchema.parse({ valid: true, normalized_subject: "x" }),
+    ).toThrow();
+  });
+
+  it("rejects wrong-typed and extra fields", () => {
+    expect(() => promptValidationSchema.parse({ ...valid, valid: "yes" })).toThrow();
+    expect(() => promptValidationSchema.parse({ ...valid, extra: 1 })).toThrow();
+  });
+
+  it("round-trips through JSON", () => {
+    expect(roundTrip(promptValidationSchema, valid)).toEqual(valid);
+  });
+});
+
+describe("moderationSchema", () => {
+  const valid = { safe: true, category: "none", reason: "ok" };
+
+  it("accepts a valid fixture", () => {
+    expect(moderationSchema.parse(valid)).toEqual(valid);
+  });
+
+  it("allows contentious_figure (blocked) and none", () => {
+    expect(moderationSchema.parse({ safe: false, category: "contentious_figure", reason: "politician" }).category).toBe("contentious_figure");
+  });
+
+  it("rejects unknown category 'politics'", () => {
+    expect(() => moderationSchema.parse({ safe: true, category: "politics", reason: "" })).toThrow();
+  });
+
+  it("rejects missing category", () => {
+    expect(() => moderationSchema.parse({ safe: true, reason: "" })).toThrow();
+  });
+
+  it("round-trips through JSON", () => {
+    expect(roundTrip(moderationSchema, valid)).toEqual(valid);
+  });
+});
+
+describe("greetingVariationsSchema", () => {
+  const valid = { variations: ["Happy birthday!", "Many happy returns!"] };
+
+  it("accepts a valid fixture", () => {
+    expect(greetingVariationsSchema.parse(valid)).toEqual(valid);
+  });
+
+  it("rejects empty variations array", () => {
+    expect(() => greetingVariationsSchema.parse({ variations: [] })).toThrow();
+  });
+
+  it("rejects extra fields", () => {
+    expect(() => greetingVariationsSchema.parse({ ...valid, mood: "happy" })).toThrow();
+  });
+
+  it("round-trips through JSON", () => {
+    expect(roundTrip(greetingVariationsSchema, valid)).toEqual(valid);
+  });
+});
+
+describe("styleDerivationSchema", () => {
+  const valid = {
+    styleName: "Retro Pastel",
+    palette: ["#ff6b9d", "#ffe66d", "#4ecdc4"],
+    lineWeight: "medium",
+    mood: "playful",
+    imagePromptSuffix: "flat pastel illustration, bold outlines",
+  };
+
+  it("accepts a valid fixture", () => {
+    expect(styleDerivationSchema.parse(valid)).toEqual(valid);
+  });
+
+  it("rejects bad lineWeight and bad palette hex", () => {
+    expect(() => styleDerivationSchema.parse({ ...valid, lineWeight: "thick" })).toThrow();
+    expect(() => styleDerivationSchema.parse({ ...valid, palette: ["red"] })).toThrow();
+  });
+
+  it("rejects missing imagePromptSuffix", () => {
+    const { imagePromptSuffix: _drop, ...rest } = valid;
+    expect(() => styleDerivationSchema.parse(rest)).toThrow();
+  });
+
+  it("round-trips through JSON", () => {
+    expect(roundTrip(styleDerivationSchema, valid)).toEqual(valid);
+  });
+});
+
+describe("layoutCompositionSchema", () => {
+  const valid = {
+    focalPoint: { x: 500, y: 400 },
+    groups: [{ itemIds: ["i1", "i2"], cx: 300, cy: 300, spread: 120 }],
+    textZone: { x: 100, y: 800, w: 800, h: 120 },
+    suggestedGreetingStyle: { align: "center", y: 850 },
+  };
+
+  it("accepts a valid fixture", () => {
+    expect(layoutCompositionSchema.parse(valid)).toEqual(valid);
+  });
+
+  it("rejects missing focalPoint", () => {
+    const { focalPoint: _drop, ...rest } = valid;
+    expect(() => layoutCompositionSchema.parse(rest)).toThrow();
+  });
+
+  it("rejects out-of-space coordinates and empty groups", () => {
+    expect(() =>
+      layoutCompositionSchema.parse({ ...valid, focalPoint: { x: 1200, y: 0 } }),
+    ).toThrow();
+    expect(() => layoutCompositionSchema.parse({ ...valid, groups: [] })).toThrow();
+  });
+
+  it("round-trips through JSON", () => {
+    expect(roundTrip(layoutCompositionSchema, valid)).toEqual(valid);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WebSocket C→S payloads
+// ---------------------------------------------------------------------------
+
+describe("joinSchema", () => {
+  it("accepts each role", () => {
+    expect(joinSchema.parse({ role: "player", nickname: "Ada" })).toEqual({
+      role: "player",
+      nickname: "Ada",
+    });
+    expect(joinSchema.parse({ role: "gm" })).toEqual({ role: "gm" });
+    expect(joinSchema.parse({ role: "presenter", joinToken: "t" })).toEqual({
+      role: "presenter",
+      joinToken: "t",
+    });
+  });
+
+  it("rejects a bad role", () => {
+    expect(() => joinSchema.parse({ role: "admin" })).toThrow();
+    expect(() => joinSchema.parse({})).toThrow();
+  });
+});
+
+describe("promptSubmitSchema", () => {
+  it("accepts text", () => {
+    expect(promptSubmitSchema.parse({ text: "a grumpy cat" })).toEqual({
+      text: "a grumpy cat",
+    });
+  });
+  it("rejects empty text and extra fields", () => {
+    expect(() => promptSubmitSchema.parse({ text: "" })).toThrow();
+    expect(() => promptSubmitSchema.parse({ text: "hi", teamId: "t1" })).toThrow();
+  });
+});
+
+describe("scoreSubmitSchema", () => {
+  const base = { label: "Team A" };
+  it("accepts values 1 and 10", () => {
+    expect(scoreSubmitSchema.parse({ ...base, value: 1 })).toEqual({ ...base, value: 1 });
+    expect(scoreSubmitSchema.parse({ ...base, value: 10 })).toEqual({ ...base, value: 10 });
+  });
+  it("rejects 0 and 11 and non-integers", () => {
+    expect(() => scoreSubmitSchema.parse({ ...base, value: 0 })).toThrow();
+    expect(() => scoreSubmitSchema.parse({ ...base, value: 11 })).toThrow();
+    expect(() => scoreSubmitSchema.parse({ ...base, value: 2.5 })).toThrow();
+  });
+});
+
+describe("gm / judge / reveal payloads", () => {
+  it("gmRemoveItemSchema", () => {
+    expect(gmRemoveItemSchema.parse({ itemId: "i1" })).toEqual({ itemId: "i1" });
+    expect(() => gmRemoveItemSchema.parse({})).toThrow();
+  });
+  it("gmKickSchema", () => {
+    expect(gmKickSchema.parse({ playerId: "p1" })).toEqual({ playerId: "p1" });
+    expect(() => gmKickSchema.parse({ itemId: "i1" })).toThrow();
+  });
+  it("gmRegenGreetingSchema and judgePickSchema", () => {
+    expect(gmRegenGreetingSchema.parse({ teamId: "t1" })).toEqual({ teamId: "t1" });
+    expect(judgePickSchema.parse({ teamId: "t1" })).toEqual({ teamId: "t1" });
+    expect(() => gmRegenGreetingSchema.parse({})).toThrow();
+  });
+  it("revealAckSchema accepts empty object only", () => {
+    expect(revealAckSchema.parse({})).toEqual({});
+    expect(() => revealAckSchema.parse({ teamId: "t1" })).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WebSocket S→C events
+// ---------------------------------------------------------------------------
+
+describe("phaseChangedSchema", () => {
+  const valid = { phase: "BUILD", phaseEndsAt: 1000, serverNow: 500 };
+
+  it("accepts with and without timers", () => {
+    expect(phaseChangedSchema.parse(valid)).toEqual(valid);
+    expect(phaseChangedSchema.parse({ phase: "LOBBY", serverNow: 0 })).toEqual({
+      phase: "LOBBY",
+      serverNow: 0,
+    });
+  });
+
+  it("rejects unknown phase", () => {
+    expect(() => phaseChangedSchema.parse({ phase: "PAUSED", serverNow: 0 })).toThrow();
+  });
+
+  it("is passthrough (extra fields survive)", () => {
+    const parsed = phaseChangedSchema.parse({ ...valid, extraNote: "hi" });
+    expect((parsed as Record<string, unknown>).extraNote).toBe("hi");
+  });
+});
+
+describe("item* event schemas", () => {
+  it("itemPendingSchema", () => {
+    const v = { itemId: "i1", promptRaw: "a cat", nickname: "Ada", createdAt: 1 };
+    expect(itemPendingSchema.parse(v)).toEqual(v);
+    expect(() => itemPendingSchema.parse({ itemId: "i1" })).toThrow();
+  });
+  it("itemReadySchema", () => {
+    const v = { itemId: "i1", imageUrl: "https://x/y.png", width: 512, height: 512 };
+    expect(itemReadySchema.parse(v)).toEqual(v);
+    expect(() => itemReadySchema.parse({ itemId: "i1" })).toThrow();
+  });
+  it("itemRejectedSchema / itemFailedSchema / itemRemovedSchema", () => {
+    expect(itemRejectedSchema.parse({ itemId: "i1", reason: "moderation" })).toEqual({
+      itemId: "i1",
+      reason: "moderation",
+    });
+    expect(itemFailedSchema.parse({ itemId: "i1", reason: "timeout" })).toEqual({
+      itemId: "i1",
+      reason: "timeout",
+    });
+    expect(itemRemovedSchema.parse({ itemId: "i1" })).toEqual({ itemId: "i1" });
+    expect(() => itemFailedSchema.parse({ itemId: 3 })).toThrow();
+  });
+});
+
+describe("layoutUpdatedSchema", () => {
+  const valid = {
+    version: 3,
+    placements: [{ itemId: "i1", x: 10.5, y: 20.25, scale: 1.2, rotation: 0, zIndex: 1 }],
+    greetingStyle: { align: "center" },
+    source: "manual",
+  };
+  it("accepts a valid fixture", () => {
+    expect(layoutUpdatedSchema.parse(valid)).toEqual(valid);
+  });
+  it("rejects missing version or bad placement", () => {
+    const { version: _drop, ...rest } = valid;
+    expect(() => layoutUpdatedSchema.parse(rest)).toThrow();
+    expect(() =>
+      layoutUpdatedSchema.parse({ ...valid, placements: [{ itemId: "i1", scale: 0 }] }),
+    ).toThrow();
+  });
+  it("round-trips through JSON", () => {
+    expect(roundTrip(layoutUpdatedSchema, valid)).toEqual(valid);
+  });
+});
+
+describe("winnerAnnouncedSchema", () => {
+  const valid = { winnerTeamId: "t1", label: "Team A", peoplesChoiceTeamId: "t2" };
+  it("accepts with and without peoplesChoiceTeamId", () => {
+    expect(winnerAnnouncedSchema.parse(valid)).toEqual(valid);
+    expect(winnerAnnouncedSchema.parse({ winnerTeamId: "t1", label: "Team A" })).toEqual({
+      winnerTeamId: "t1",
+      label: "Team A",
+    });
+  });
+  it("rejects missing label", () => {
+    expect(() => winnerAnnouncedSchema.parse({ winnerTeamId: "t1" })).toThrow();
+  });
+});
+
+describe("errorSchema", () => {
+  const valid = { code: "RATE_LIMITED", message: "slow down" };
+  it("accepts and round-trips", () => {
+    expect(errorSchema.parse(valid)).toEqual(valid);
+    expect(roundTrip(errorSchema, valid)).toEqual(valid);
+  });
+  it("rejects missing code", () => {
+    expect(() => errorSchema.parse({ message: "x" })).toThrow();
+  });
+});
