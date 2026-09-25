@@ -75,6 +75,21 @@ const EXAMPLE_FIXES: readonly string[] = [
   "a paper boat on waves",
 ];
 
+/** Contentious public figures (politicians + criminals): prompts referencing
+ *  them are blocked as category 'contentious_figure'. Single words match on
+ *  word boundaries, multi-word phrases as substrings (case-insensitive).
+ *  Celebrities (Elvis, etc.) are deliberately NOT on this list. */
+const CONTENTIOUS_FIGURES: readonly string[] = [
+  "putin",
+  "biden",
+  "trump",
+  "hitler",
+  "stalin",
+  "bin laden",
+  "epstein",
+  "manson",
+];
+
 export interface MockProviderOptions {
   env?: NodeJS.ProcessEnv;
 }
@@ -230,6 +245,19 @@ function mockModeration(input: Record<string, unknown>): unknown {
       safe: false,
       category: "other",
       reason: "Mock moderation: prompt contains the 'unsafe test' sentinel.",
+    });
+  }
+  const lower = prompt.toLowerCase();
+  const figure = CONTENTIOUS_FIGURES.find((entry) =>
+    entry.includes(" ")
+      ? lower.includes(entry)
+      : new RegExp(`\\b${escapeRegex(entry)}\\b`, "i").test(lower),
+  );
+  if (figure) {
+    return moderationSchema.parse({
+      safe: false,
+      category: "contentious_figure",
+      reason: `Mock moderation: "${figure}" is a contentious public figure — prompts referencing them are blocked.`,
     });
   }
   return moderationSchema.parse({
@@ -590,8 +618,9 @@ function mockLayoutComposition(input: Record<string, unknown>): unknown {
 
   const groups: { itemIds: string[]; cx: number; cy: number; spread: number }[] = [];
   if (ids.length === 0) {
-    // Schema requires ≥1 group with ≥1 id; flows always pass items — this is a
-    // placeholder group so the mock stays schema-valid on degenerate input.
+    // NOTE: no current caller passes an empty items array (flows always submit
+    // ≥1 item); this placeholder group only exists so the mock stays
+    // schema-valid on degenerate input instead of throwing a zod error.
     groups.push({ itemIds: ["__no_items__"], cx: focalX, cy: focalY, spread: 60 });
   } else if (ids.length >= 4 && rnd() > 0.5) {
     const mid = Math.ceil(ids.length / 2);

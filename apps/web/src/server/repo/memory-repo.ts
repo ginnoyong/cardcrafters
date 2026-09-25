@@ -238,6 +238,11 @@ export class MemoryRepo implements Repository {
       .sort();
   }
 
+  async getPlayer(playerId: string): Promise<PlayerRow | null> {
+    const row = this.players.get(playerId);
+    return row ? { ...row } : null;
+  }
+
   async getPlayerBySessionToken(token: string): Promise<PlayerRow | null> {
     for (const row of this.players.values()) {
       if (row.sessionToken === token) return { ...row };
@@ -259,6 +264,23 @@ export class MemoryRepo implements Repository {
     const next: PlayerRow = { ...row, removedAt: now, connected: false };
     this.players.set(playerId, next);
     return { ...next };
+  }
+
+  async countTeamMembers(teamId: string): Promise<number> {
+    this.assertTeam(teamId);
+    let count = 0;
+    for (const row of this.players.values()) {
+      if (row.teamId === teamId && row.removedAt === null) count += 1;
+    }
+    return count;
+  }
+
+  async listTeamPlayers(teamId: string): Promise<PlayerRow[]> {
+    this.assertTeam(teamId);
+    return [...this.players.values()]
+      .filter((p) => p.teamId === teamId && p.removedAt === null)
+      .sort((a, b) => a.nickname.localeCompare(b.nickname))
+      .map((p) => ({ ...p }));
   }
 
   // -- Greetings -------------------------------------------------------------
@@ -387,6 +409,11 @@ export class MemoryRepo implements Repository {
 
   async upsertScore(input: UpsertScoreInput): Promise<ScoreRow> {
     this.requireGame(input.gameId);
+    // Round-level lock: once any score of the round is locked, the round is
+    // frozen — refuse ALL writes (new rows and overwrites alike).
+    if (await this.areScoresLocked(input.gameId, input.round)) {
+      throw new RepoError(`scores_locked: round ${input.round} of game ${input.gameId} is locked`);
+    }
     const existing = this.scores.get(
       this.scoreKey(input.round, input.voterPlayerId, input.targetTeamId),
     );
@@ -407,7 +434,30 @@ export class MemoryRepo implements Repository {
     return { ...row };
   }
 
-  async listScores(gameId: string, round: number, targetTeamId?: string) {
+  /** Lock every score row of a game+round; returns how many rows were locked. */
+  async lockScores(gameId: string, round: number): Promise<number> {
+    this.requireGame(gameId);
+    let count = 0;
+    for (const [key, s] of this.scores) {
+      if (s.gameId === gameId && s.round === round) {
+        if (!s.locked) {
+          this.scores.set(key, { ...s, locked: true });
+        }
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  /** True when any score row of the game+round carries locked=true. */
+  async areScoresLocked(gameId: string, round: number): Promise<boolean> {
+    for (const s of this.scores.values()) {
+      if (s.gameId === gameId && s.round === round && s.locked) return true;
+    }
+    return false;
+  }
+
+  async listScores(gameId: string, round: number, targetTeamId?: string): Promise<ScoreRow[]> {
     // Map preserves insertion order — deterministic without a timestamp column.
     return [...this.scores.values()]
       .filter(
@@ -420,6 +470,13 @@ export class MemoryRepo implements Repository {
     const byTarget = new Map<string, number[]>();
     for (const s of this.scores.values()) {
       if (s.gameId !== gameId || s.round !== round) continue;
+      // Data-corruption guard: a value outside 1..10 would silently poison the
+      // distribution buckets — fail loudly instead.
+      if (!Number.isInteger(s.value) || s.value < 1 || s.value > 10) {
+        throw new RepoError(
+          `corrupt score row: value ${s.value} outside 1..10 (game ${gameId}, round ${round}, target ${s.targetTeamId})`,
+        );
+      }
       const bucket = byTarget.get(s.targetTeamId) ?? [];
       bucket.push(s.value);
       byTarget.set(s.targetTeamId, bucket);

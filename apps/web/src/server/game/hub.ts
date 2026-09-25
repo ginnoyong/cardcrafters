@@ -15,13 +15,10 @@
  *    clients treat seq as an ordering hint within one connection session).
  *
  * Known Step-3 limitations (documented, resolved in later steps):
- *  - Team membership is tracked in-memory per process (the Repository has no
- *    player-list query yet). Capacity enforcement and sync:full snapshots
- *    therefore only see players that joined through THIS hub instance; after
- *    a restart the 12-per-team cap under-counts until a `listPlayers` repo
- *    query exists (TODO Step 4+).
- *  - `scoresLocked` is runtime-only (no Game column); actual score writes are
- *    guarded at the repo layer via Score.locked.
+ *  - Team membership/capacity is enforced through the Repository
+ *    (`countTeamMembers` excludes soft-removed players), so capacity and
+ *    sync:full snapshots survive restarts and kicks. A small in-memory
+ *    player cache (this.players) is only a read-through accelerator.
  *  - GM/presenter auth is "knows the game code" — fine for a local party
  *    game; a GM token on Game would require a schema change (README TODO).
  */
@@ -36,7 +33,7 @@ import {
 
 import { gameRoom, playerRoom, teamRoom } from "../ws/rooms";
 import { RepoError } from "../repo/memory-repo";
-import type { GamePatch, GameRow, PlayerRow, Repository, TeamRow } from "../repo/repository";
+import type { GamePatch, GameRow, PlayerRow, Repository, RoundRole, TeamRow } from "../repo/repository";
 import { transition } from "./state-machine";
 import { createInitialRuntimeState } from "./types";
 import type { Effect, GameEvent, GameRuntimeState, TransitionResult } from "./types";
@@ -153,10 +150,12 @@ export class GameHub {
   private runtime = new Map<string, GameRuntimeState>();
   /** Per-game monotonic seq counter for outbound envelopes (resets on hydrate). */
   private seq = new Map<string, number>();
-  /** In-process team membership: teamId → playerIds (see limitations above). */
-  private teamMembers = new Map<string, Set<string>>();
-  /** Every player this hub instance created/rehydrated, by id. */
+  /** Every player this hub instance created/rehydrated, by id (read-through
+   *  cache; the Repository remains the source of truth for membership). */
   private players = new Map<string, PlayerRow>();
+  /** Players this hub has observed as kicked (fast path for submit guards;
+   *  unknown ids fall back to a repo lookup). */
+  private kickedPlayers = new Set<string>();
 
   readonly timers: TimerService;
 
@@ -200,7 +199,6 @@ export class GameHub {
         joinToken: randomUUID(),
       });
       teams.push(team);
-      this.teamMembers.set(team.id, new Set());
     }
     return { game, teams };
   }
@@ -209,6 +207,15 @@ export class GameHub {
   async hydrateGame(gameId: string): Promise<GameRuntimeState | null> {
     const game = await this.repo.getGame(gameId);
     if (!game) return null;
+    // scoresLocked is not a Game column: it is restored from the phase
+    // (JUDGING/REVEAL/RESULTS lock scores) and from locked Score rows.
+    const phaseImpliesLock =
+      game.phase === "JUDGING" || game.phase === "REVEAL" || game.phase === "RESULTS";
+    const lockedRows = await this.repo.areScoresLocked(gameId, game.round);
+    // Winner picks restore the round's announced winners.
+    const picks = await this.repo.listWinnerPicks(gameId, game.round);
+    const gmWinner = picks.find((p) => p.role === "GM_WINNER");
+    const peoplesChoice = picks.find((p) => p.role === "PEOPLES_CHOICE");
     const state: GameRuntimeState = {
       ...createInitialRuntimeState(game.id, game.config),
       phase: game.phase,
@@ -216,9 +223,9 @@ export class GameHub {
       theme: game.theme ?? undefined,
       phaseEndsAt: game.phaseEndsAt ?? undefined,
       cutoffAt: game.cutoffAt ?? undefined,
-      // NOTE: no persisted column for scoresLocked; repo-level Score.locked
-      // rows still guard writes. See header comment.
-      scoresLocked: false,
+      scoresLocked: phaseImpliesLock || lockedRows,
+      ...(gmWinner ? { winnerTeamId: gmWinner.teamId } : {}),
+      ...(peoplesChoice ? { peoplesChoiceTeamId: peoplesChoice.teamId } : {}),
     };
     this.runtime.set(gameId, state);
     this.seq.set(gameId, 0); // per-game seq resets on hydrate (documented)
@@ -270,14 +277,31 @@ export class GameHub {
 
     this.runtime.set(gameId, next);
 
-    for (const effect of result.effects) {
-      await this.runEffect(gameId, next, effect);
+    try {
+      for (const effect of result.effects) {
+        const outcome = await this.runEffect(gameId, next, effect);
+        // An effect that cannot be completed (e.g. the submitting player has
+        // vanished from the repo) surfaces as an event rejection so callers
+        // (WS handlers) can ack ok:false instead of silently dropping work.
+        if (outcome && outcome.ok === false) return outcome;
+      }
+    } catch (err) {
+      console.error(`[hub] effect execution failed for ${gameId}:`, err);
+      return { ok: false, reason: err instanceof RepoError ? err.message : "effect_failed" };
     }
     return result;
   }
 
-  /** Execute one Effect on behalf of the pure state machine. */
-  private async runEffect(gameId: string, state: GameRuntimeState, effect: Effect): Promise<void> {
+  /**
+   * Execute one Effect on behalf of the pure state machine. Returns
+   * `{ ok: false, reason }` when the effect could not be completed (the event
+   * is then reported as rejected); void on success.
+   */
+  private async runEffect(
+    gameId: string,
+    state: GameRuntimeState,
+    effect: Effect,
+  ): Promise<{ ok: false; reason: string } | void> {
     switch (effect.type) {
       case "emit":
         this.emitToRooms(gameId, state.round, effect.event, effect.payload, effect.rooms);
@@ -289,8 +313,9 @@ export class GameHub {
         this.timers.clear(gameId);
         return;
       case "lockScores":
-        // Runtime-only in Step 3: the state's scoresLocked flag is set by the
-        // machine; Score rows themselves carry `locked` at the repo layer.
+        // Persistently lock every Score row of the round at JUDGING entry;
+        // the repo's upsertScore refuses writes for locked rounds.
+        await this.repo.lockScores(gameId, state.round);
         return;
       case "setCutoff":
         // Already persisted via updateGame (state.cutoffAt diff, above).
@@ -303,9 +328,26 @@ export class GameHub {
           playerRoom(gameId, effect.playerId),
         ]);
         return;
-      case "accept-submission":
-        await this.persistAcceptedSubmission(gameId, state, effect.playerId, effect.text);
+      case "announceWinner": {
+        await this.persistWinnerPicks(gameId, state.round, effect.teamId, effect.peoplesChoiceTeamId);
+        const teams = await this.repo.listTeams(gameId);
+        const winner = teams.find((t) => t.id === effect.teamId);
+        this.emitToRooms(
+          gameId,
+          state.round,
+          "winnerAnnounced",
+          {
+            winnerTeamId: effect.teamId,
+            label: winner?.label ?? null,
+            ...(effect.peoplesChoiceTeamId ? { peoplesChoiceTeamId: effect.peoplesChoiceTeamId } : {}),
+            revealToken: randomUUID(),
+          },
+          [gameRoom(gameId)],
+        );
         return;
+      }
+      case "accept-submission":
+        return this.persistAcceptedSubmission(gameId, state, effect.playerId, effect.text);
       default: {
         const exhaustive: never = effect;
         void exhaustive;
@@ -314,19 +356,47 @@ export class GameHub {
     }
   }
 
-  /** persist + broadcast an accepted BUILD prompt (AI pipeline lands in Step 4+). */
+  /** Persist GM_WINNER (+ optional PEOPLES_CHOICE) picks, idempotently. */
+  private async persistWinnerPicks(
+    gameId: string,
+    round: number,
+    winnerTeamId: string,
+    peoplesChoiceTeamId?: string,
+  ): Promise<void> {
+    const existing = await this.repo.listWinnerPicks(gameId, round);
+    const has = (role: RoundRole) => existing.some((p) => p.role === role);
+    if (!has("GM_WINNER")) {
+      await this.repo.insertWinnerPick({ gameId, round, teamId: winnerTeamId, role: "GM_WINNER" });
+    }
+    if (peoplesChoiceTeamId && !has("PEOPLES_CHOICE")) {
+      await this.repo.insertWinnerPick({
+        gameId,
+        round,
+        teamId: peoplesChoiceTeamId,
+        role: "PEOPLES_CHOICE",
+      });
+    }
+  }
+
+  /** persist + broadcast an accepted BUILD prompt (AI pipeline lands in Step 4+).
+   *  Throws RepoError when the player cannot be resolved (event is rejected). */
   private async persistAcceptedSubmission(
     gameId: string,
     state: GameRuntimeState,
     playerId: string,
     text: string,
   ): Promise<void> {
-    const player = this.players.get(playerId);
+    // Read-through: memory cache first, then the repo (hub may have restarted
+    // mid-game; submissions from unknown players must not be silently lost).
+    const player = this.players.get(playerId) ?? (await this.repo.getPlayer(playerId));
     if (!player) {
-      // Player unknown to this process (e.g. hub restarted mid-game). The
-      // prompt would be lost; surface loudly rather than silently dropping.
-      console.error(`[hub] cannot persist submission — player ${playerId} not registered`);
-      return;
+      throw new RepoError(`player_not_found: ${playerId}`);
+    }
+    if (player.removedAt !== null) {
+      throw new RepoError("kicked");
+    }
+    if (player.gameId !== gameId) {
+      throw new RepoError(`wrong_game: player ${playerId} belongs to game ${player.gameId}`);
     }
     const item = await this.repo.createItem({
       teamId: player.teamId,
@@ -373,7 +443,7 @@ export class GameHub {
           now: this.now(),
         });
         const player = { ...existing, connected: true };
-        this.registerPlayer(player, team);
+        this.registerPlayer(player);
         this.emitToRooms(
           game.id,
           game.round,
@@ -399,9 +469,10 @@ export class GameHub {
     if (!game) throw new RepoError("game not found for team");
     const state = await this.getOrCreateHubGame(team.gameId);
 
-    // Capacity: at most MAX_TEAM_MEMBERS (12) non-removed players per team.
-    const members = this.teamMembers.get(team.id) ?? new Set();
-    if (members.size >= MAX_TEAM_MEMBERS) {
+    // Capacity: at most MAX_TEAM_MEMBERS (12) non-removed players per team,
+    // counted from the REPOSITORY so restarts and kicks are reflected.
+    const memberCount = await this.repo.countTeamMembers(team.id);
+    if (memberCount >= MAX_TEAM_MEMBERS) {
       throw new RepoError(`team ${team.label} is full (max ${MAX_TEAM_MEMBERS})`);
     }
 
@@ -432,7 +503,7 @@ export class GameHub {
       now: this.now(),
     });
 
-    this.registerPlayer(connected, team);
+    this.registerPlayer(connected);
     this.emitToRooms(
       game.id,
       state.round,
@@ -471,15 +542,49 @@ export class GameHub {
 
   // -- Membership / snapshots ------------------------------------------------------
 
-  /** Players registered with this hub instance on a team (see limitations). */
-  listTeamMembers(teamId: string): PlayerRow[] {
-    const ids = this.teamMembers.get(teamId) ?? new Set();
-    const members: PlayerRow[] = [];
-    for (const id of ids) {
-      const row = this.players.get(id);
-      if (row && row.removedAt === null) members.push({ ...row });
+  /**
+   * Players on a team, resolved through the Repository (excludes soft-removed
+   * players). The in-memory cache is only a fast path for known players.
+   */
+  async listTeamMembers(teamId: string): Promise<PlayerRow[]> {
+    return this.repo.listTeamPlayers(teamId);
+  }
+
+  /**
+   * Soft-kick a player: repo row kept (removedAt), presence cleared,
+   * `player:left {reason:'kick'}` broadcast to the game room. The WS layer
+   * additionally force-disconnects the victim's sockets.
+   */
+  async kickPlayer(playerId: string): Promise<PlayerRow> {
+    const kicked = await this.repo.kickPlayer(playerId, this.now());
+    this.kickedPlayers.add(playerId);
+    this.players.set(playerId, kicked);
+    this.emitToRooms(
+      kicked.gameId,
+      this.runtime.get(kicked.gameId)?.round ?? 1,
+      "player:left",
+      { playerId, nickname: kicked.nickname, reason: "kick" },
+      [gameRoom(kicked.gameId)],
+    );
+    return kicked;
+  }
+
+  /**
+   * Whether a player has been kicked: checked against the in-memory kicked
+   * set first, falling back to a repo lookup (with caching) for unknown ids.
+   */
+  async isKicked(playerId: string): Promise<boolean> {
+    if (this.kickedPlayers.has(playerId)) return true;
+    try {
+      const row = await this.repo.getPlayer(playerId);
+      if (row?.removedAt != null) {
+        this.kickedPlayers.add(playerId);
+        return true;
+      }
+    } catch {
+      // unknown player → not kicked
     }
-    return members.sort((a, b) => a.nickname.localeCompare(b.nickname));
+    return false;
   }
 
   /** Resolve a player by session token (used by the WS auth layer). */
@@ -511,13 +616,8 @@ export class GameHub {
 
   // -- internals ------------------------------------------------------------
 
-  private registerPlayer(player: PlayerRow, team: TeamRow): void {
+  private registerPlayer(player: PlayerRow): void {
     this.players.set(player.id, player);
-    const members = this.teamMembers.get(team.id) ?? new Set<string>();
-    members.add(player.id);
-    this.teamMembers.set(team.id, members);
-    // Ensure the registry knows every team of the game (hydrate path).
-    if (!this.teamMembers.has(team.id)) this.teamMembers.set(team.id, members);
   }
 
   private async teamOf(player: PlayerRow): Promise<TeamRow | null> {

@@ -90,7 +90,10 @@ export type Effect =
   /** Direct message to a single player. */
   | { type: "notify"; playerId: string; message: string }
   /** Prompt accepted by the phase guard — caller should persist + queue it. */
-  | { type: "accept-submission"; playerId: string; text: string };
+  | { type: "accept-submission"; playerId: string; text: string }
+  /** GM picked the round winner(s) — caller persists WinnerPick rows and
+   *  broadcasts `winnerAnnounced` (with a fresh revealToken). */
+  | { type: "announceWinner"; teamId: string; peoplesChoiceTeamId?: string };
 
 // ---------------------------------------------------------------------------
 // Snapshot — what the hub serializes to clients

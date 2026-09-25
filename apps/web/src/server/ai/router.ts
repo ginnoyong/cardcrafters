@@ -37,6 +37,24 @@ import {
   type TaskConfig,
 } from "./provider";
 
+// ---------------------------------------------------------------------------
+// Cost estimation (optimistic budget reservation)
+// ---------------------------------------------------------------------------
+
+/** Conservative pre-call cost estimate for a non-image call, in USD. */
+const DEFAULT_CALL_ESTIMATE_USD = 0.05;
+/** Conservative pre-call cost estimate for an image-generation call, in USD. */
+const DEFAULT_IMAGE_CALL_ESTIMATE_USD = 0.1;
+
+/**
+ * Optimistic cost estimate for one call, reserved BEFORE the provider runs so
+ * concurrent runs cannot jointly overshoot the budget (check-then-act race).
+ * Reconciled against the actual cost (from usage) once the call completes.
+ */
+function estimateCallCostUsd(task: string): number {
+  return task === "item_image" ? DEFAULT_IMAGE_CALL_ESTIMATE_USD : DEFAULT_CALL_ESTIMATE_USD;
+}
+
 export interface AiRouterOptions {
   repo: Repository;
   mode: AiMode;
@@ -55,8 +73,10 @@ export class AiRouter {
   private readonly config: Record<AiTaskName, TaskConfig>;
   private readonly budgetUsd: number | null;
   private readonly provider: AiProvider;
-  /** gameId → known spend (USD); populated lazily from repo, kept fresh on insert. */
+  /** gameId → committed spend (USD); populated lazily from repo, kept fresh on insert. */
   private readonly spend = new Map<string, number>();
+  /** gameId → sum of estimates reserved for calls currently in flight. */
+  private readonly inflight = new Map<string, number>();
 
   constructor(opts: AiRouterOptions) {
     this.repo = opts.repo;
@@ -91,18 +111,51 @@ export class AiRouter {
       });
     }
 
-    // -- budget guard (BEFORE any call; mock costs 0 so it never trips) ------
-    if (this.budgetUsd !== null && opts?.gameId) {
-      const spent = await this.currentSpend(opts.gameId);
-      if (spent >= this.budgetUsd) {
+    // -- budget guard (BEFORE any call) --------------------------------------
+    // Optimistic reservation: reserve an estimated cost up-front so concurrent
+    // runs for the same game cannot jointly overshoot the budget; reconcile
+    // with the actual cost (repo-logged) after the call completes.
+    // Calls WITHOUT a gameId deliberately bypass the budget: they are
+    // game-less (boot-time warmups, config checks) and have nothing to charge
+    // against — documented here so the exclusion stays intentional.
+    const reserve =
+      this.budgetUsd !== null && opts?.gameId && !(this.provider instanceof MockProvider);
+    const estimate = reserve ? estimateCallCostUsd(task) : 0;
+    if (reserve && opts?.gameId) {
+      const gameId = opts.gameId;
+      const committed = await this.currentSpend(gameId);
+      const reserved = this.inflight.get(gameId) ?? 0;
+      if (committed + reserved + estimate > this.budgetUsd!) {
         throw new AiBudgetExceededError({
-          gameId: opts.gameId,
-          spentUsd: spent,
-          budgetUsd: this.budgetUsd,
+          gameId,
+          spentUsd: committed + reserved,
+          budgetUsd: this.budgetUsd!,
         });
       }
+      this.inflight.set(gameId, reserved + estimate);
     }
 
+    try {
+      return await this.runChain(task, input, opts, cfg);
+    } finally {
+      // Reconcile: release the reservation. The actual cost (from usage) is
+      // already folded into the committed-spend cache by log(); concurrent
+      // callers now see real spend instead of our estimate.
+      if (reserve && opts?.gameId) {
+        const gameId = opts.gameId;
+        const reserved = this.inflight.get(gameId) ?? 0;
+        this.inflight.set(gameId, Math.max(0, reserved - estimate));
+      }
+    }
+  }
+
+  /** The retry/fallback loop (extracted so budget reservation wraps it). */
+  private async runChain(
+    task: string,
+    input: Record<string, unknown>,
+    opts: { gameId?: string } | undefined,
+    cfg: TaskConfig,
+  ): Promise<AiCallResult> {
     const models = [cfg.primary, ...cfg.fallbacks];
     let lastError: AiTaskError | undefined;
     let failedAttempts = 0;
@@ -131,7 +184,7 @@ export class AiRouter {
           await this.log(task, model, "ERROR", {
             latencyMs: 0,
             costUsd: 0,
-            retries: attempt,
+            retries: failedAttempts, // cumulative failed attempts across ALL models
             fallbackUsed,
             error: lastError.message,
             gameId: opts?.gameId,
@@ -154,7 +207,7 @@ export class AiRouter {
             latencyMs: result.latencyMs,
             costUsd: result.usage?.costUsd ?? 0,
             usage: result.usage,
-            retries: attempt,
+            retries: failedAttempts, // cumulative failed attempts across ALL models
             fallbackUsed,
             error: lastError.message,
             gameId: opts?.gameId,
@@ -202,7 +255,9 @@ export class AiRouter {
     return summary.totalCostUsd;
   }
 
-  /** Persist one attempt row and keep the per-game spend cache in sync. */
+  /** Persist one attempt row and keep the per-game spend cache in sync.
+   *  A logging failure must NEVER discard a successful AI result — it is
+   *  swallowed (with console.error) instead of propagating to the caller. */
   private async log(
     task: string,
     model: string,
@@ -217,23 +272,30 @@ export class AiRouter {
       gameId?: string;
     },
   ): Promise<void> {
-    await this.repo.insertAiCall({
-      gameId: fields.gameId ?? null,
-      task,
-      model,
-      status,
-      latencyMs: fields.latencyMs,
-      costUsd: fields.costUsd,
-      usage: fields.usage ?? null,
-      retries: fields.retries,
-      fallbackUsed: fields.fallbackUsed,
-      error: fields.error,
-    });
-    if (fields.gameId) {
-      const cached = this.spend.get(fields.gameId);
-      if (cached !== undefined) {
-        this.spend.set(fields.gameId, cached + fields.costUsd);
+    try {
+      await this.repo.insertAiCall({
+        gameId: fields.gameId ?? null,
+        task,
+        model,
+        status,
+        latencyMs: fields.latencyMs,
+        costUsd: fields.costUsd,
+        usage: fields.usage ?? null,
+        retries: fields.retries,
+        fallbackUsed: fields.fallbackUsed,
+        error: fields.error,
+      });
+      if (fields.gameId) {
+        const cached = this.spend.get(fields.gameId);
+        if (cached !== undefined) {
+          this.spend.set(fields.gameId, cached + fields.costUsd);
+        }
       }
+    } catch (err) {
+      console.error(
+        `[ai-router] failed to persist AI call log (task=${task}, model=${model}, status=${status}):`,
+        err,
+      );
     }
   }
 }

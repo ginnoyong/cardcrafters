@@ -200,6 +200,8 @@ describe("AiRouter — openrouter (mocked fetch)", () => {
     expect(rows.map((r) => r.status)).toEqual(["ERROR", "ERROR", "FALLBACK_OK"]);
     expect(rows[2]!.fallbackUsed).toBe(true);
     expect(rows[2]!.model).toBe(fallback);
+    // retries is CUMULATIVE across all models in the run, on every row.
+    expect(rows.map((r) => r.retries)).toEqual([1, 2, 2]);
   });
 
   it("schema-invalid output is retried across the chain; exhaustion throws AiTaskError", async () => {
@@ -246,7 +248,8 @@ describe("AiRouter — openrouter (mocked fetch)", () => {
     const rows = (await repo.listAiCalls(gameId)).rows;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.status).toBe("ERROR");
-    expect(rows[0]!.retries).toBe(0);
+    // retries is the cumulative failed-attempt count (1 failed attempt here).
+    expect(rows[0]!.retries).toBe(1);
   });
 
   it("fatal 400 skips remaining retries but still tries fallback models", async () => {

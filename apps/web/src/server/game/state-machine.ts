@@ -206,10 +206,18 @@ export function transition(
         winnerTeamId: event.teamId,
         peoplesChoiceTeamId: event.peoplesChoiceTeamId,
       });
+      const winnerEffect: Effect = {
+        type: "announceWinner",
+        teamId: event.teamId,
+        ...(event.peoplesChoiceTeamId !== undefined
+          ? { peoplesChoiceTeamId: event.peoplesChoiceTeamId }
+          : {}),
+      };
       return {
         ok: true,
         state: next,
         effects: [
+          winnerEffect,
           phaseChangedEmit(state.gameId, { phase: PHASE.REVEAL, round: state.round, serverNow: event.now }),
         ],
       };

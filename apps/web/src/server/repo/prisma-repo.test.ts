@@ -246,27 +246,6 @@ describe.skipIf(!DB_OK)("PrismaRepo (postgres)", () => {
       expect(agg.avg).toBeCloseTo(4.75, 10);
       expect(agg.distribution).toEqual([1, 0, 0, 1, 0, 0, 2, 0, 0, 0]);
 
-      // Lock then refuse further writes.
-      await repo.upsertScore({
-        gameId,
-        round: 1,
-        voterPlayerId: voters[0]!,
-        voterTeamId: teamB.id,
-        targetTeamId: teamA.id,
-        value: 4,
-        locked: true,
-      });
-      await expect(
-        repo.upsertScore({
-          gameId,
-          round: 1,
-          voterPlayerId: voters[0]!,
-          voterTeamId: teamB.id,
-          targetTeamId: teamA.id,
-          value: 2,
-        }),
-      ).rejects.toThrow(RepoError);
-
       // Same voter may score the other team in the same round → 2 aggregates.
       await repo.upsertScore({
         gameId,
@@ -277,6 +256,44 @@ describe.skipIf(!DB_OK)("PrismaRepo (postgres)", () => {
         value: 5,
       });
       expect(await repo.aggregateScores(gameId, 1)).toHaveLength(2);
+
+      // Round-level lock: lockScores(gameId, round) freezes ALL writes of the
+      // round — new rows and overwrites alike.
+      expect(await repo.areScoresLocked(gameId, 1)).toBe(false);
+      const lockedCount = await repo.lockScores(gameId, 1);
+      expect(lockedCount).toBe(5); // 4 teamA scores + 1 teamB score
+      expect(await repo.areScoresLocked(gameId, 1)).toBe(true);
+      await expect(
+        repo.upsertScore({
+          gameId,
+          round: 1,
+          voterPlayerId: voters[0]!,
+          voterTeamId: teamB.id,
+          targetTeamId: teamA.id,
+          value: 2,
+        }),
+      ).rejects.toThrow(/scores_locked/);
+      await expect(
+        repo.upsertScore({
+          gameId,
+          round: 1,
+          voterPlayerId: voters[1]!,
+          voterTeamId: teamB.id,
+          targetTeamId: teamB.id,
+          value: 9,
+        }),
+      ).rejects.toThrow(/scores_locked/);
+      // Round 2 stays writable (lock is round-scoped).
+      expect(await repo.areScoresLocked(gameId, 2)).toBe(false);
+      await repo.upsertScore({
+        gameId,
+        round: 2,
+        voterPlayerId: voters[1]!,
+        voterTeamId: teamB.id,
+        targetTeamId: teamA.id,
+        value: 9,
+      });
+      expect(await repo.listScores(gameId, 2)).toHaveLength(1);
     });
   });
 

@@ -114,8 +114,11 @@ describe("happy path: full round LOBBY → RESULTS → GREETINGS (round 2)", () 
     expect(state.phase).toBe(PHASE.REVEAL);
     expect(state.winnerTeamId).toBe("team-a");
     expect(state.peoplesChoiceTeamId).toBe("team-b");
-    expect(effectTypes(r.effects)).toEqual(["emit"]);
+    expect(effectTypes(r.effects)).toEqual(["announceWinner", "emit"]);
     expect(emitOf(r.effects).payload).toMatchObject({ phase: PHASE.REVEAL, serverNow: NOW });
+    // The announceWinner effect carries the picks for the hub to persist/broadcast.
+    const winner = r.effects.find((e) => e.type === "announceWinner");
+    expect(winner).toMatchObject({ type: "announceWinner", teamId: "team-a", peoplesChoiceTeamId: "team-b" });
   });
 
   it("REVEAL + reveal:ack → RESULTS", () => {

@@ -315,8 +315,14 @@ export interface Repository {
   /** All nicknames ever used in a game (including kicked players — the DB
    *  unique [gameId, nickname] covers soft-deleted rows too); for auto-suffix. */
   findNicknames(gameId: string): Promise<string[]>;
+  /** Resolve a player by id (kick authz, membership fallback), or null. */
+  getPlayer(playerId: string): Promise<PlayerRow | null>;
   /** Resolve a player by their session token (auth), or null. */
   getPlayerBySessionToken(token: string): Promise<PlayerRow | null>;
+  /** Number of ACTIVE (removedAt === null) players on a team — capacity checks. */
+  countTeamMembers(teamId: string): Promise<number>;
+  /** All ACTIVE (removedAt === null) players on a team, ordered by nickname. */
+  listTeamPlayers(teamId: string): Promise<PlayerRow[]>;
   /** Mark a player connected/disconnected (presence). */
   setPlayerConnected(playerId: string, connected: boolean): Promise<PlayerRow>;
   /** Soft-kick: sets removedAt, keeps the row for history. */
@@ -354,6 +360,12 @@ export interface Repository {
    * (unique: round+voterPlayerId+targetTeamId). Throws once scores are locked.
    */
   upsertScore(input: UpsertScoreInput): Promise<ScoreRow>;
+  /** Persistently lock every Score row of a game+round (JUDGING entry);
+   *  returns the number of rows locked. */
+  lockScores(gameId: string, round: number): Promise<number>;
+  /** True when any Score row of the game+round is locked (or the game phase
+   *  implies locking — callers may combine this with a phase check). */
+  areScoresLocked(gameId: string, round: number): Promise<boolean>;
   /** Score rows of a game+round, optionally only those targeting one team. */
   listScores(gameId: string, round: number, targetTeamId?: string): Promise<ScoreRow[]>;
   /** Per-target count/avg/distribution for a game+round. */

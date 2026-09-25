@@ -36,6 +36,9 @@ export function roomsForIdentity(identity: WsIdentity): string[] {
   const rooms = [gameRoom(identity.gameId)];
   if (identity.role === "player") {
     rooms.push(teamRoom(identity.gameId, identity.teamId));
+    // Direct room so hub `notify` effects (and other player-targeted emits)
+    // are deliverable to this socket.
+    rooms.push(playerRoom(identity.gameId, identity.playerId));
   } else if (identity.role === "gm") {
     rooms.push(gmRoom(identity.gameId));
   } else {

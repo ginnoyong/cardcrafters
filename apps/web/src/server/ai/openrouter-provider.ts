@@ -17,7 +17,7 @@
  */
 
 import { AiTaskError } from "./errors";
-import { PromptTemplates } from "./templates";
+import { PromptTemplates, TemplateError } from "./templates";
 import type { AiCallResult, AiProvider, AiTaskName, TaskConfig } from "./provider";
 import { validateTaskOutput } from "./provider";
 
@@ -48,6 +48,10 @@ export class OpenRouterProvider implements AiProvider {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly templates: PromptTemplates;
+  /** Set after the first successful template load; .md files are NOT re-read
+   *  on every call (they are startup deliverables — restart to apply edits).
+   *  Use reload() to re-read them explicitly. */
+  private templatesLoaded = false;
 
   constructor(opts: OpenRouterProviderOptions) {
     if (!opts.apiKey) throw new Error("OpenRouterProvider requires an API key");
@@ -57,9 +61,41 @@ export class OpenRouterProvider implements AiProvider {
     this.templates = opts.templates ?? new PromptTemplates();
   }
 
+  /** Re-read prompt templates from disk (e.g. after editing config/prompts). */
+  async reload(): Promise<void> {
+    await this.templates.load();
+    this.templatesLoaded = true;
+  }
+
+  /** Load templates once per provider instance (cached after first success). */
+  private async ensureTemplates(): Promise<void> {
+    if (!this.templatesLoaded) {
+      await this.templates.load();
+      this.templatesLoaded = true;
+    }
+  }
+
   async run(task: AiTaskName, input: Record<string, unknown>, cfg: TaskConfig): Promise<AiCallResult> {
     const started = Date.now();
-    const messages = await this.buildMessages(task, input);
+    // Template/config-shape errors are FATAL for this model: retrying the same
+    // model with the same (broken) template cannot help — mark non-retryable
+    // so the router moves on to the next fallback model instead of burning
+    // this model's retry chain.
+    let messages: { role: "system" | "user"; content: string }[];
+    try {
+      messages = await this.buildMessages(task, input);
+    } catch (cause) {
+      if (cause instanceof TemplateError) {
+        throw new AiTaskError({
+          task,
+          model: cfg.primary,
+          cause,
+          retryable: false,
+          message: `template error: ${cause.message}`,
+        });
+      }
+      throw cause;
+    }
     const body: Record<string, unknown> = {
       model: cfg.primary,
       messages,
@@ -186,7 +222,7 @@ export class OpenRouterProvider implements AiProvider {
     task: AiTaskName,
     input: Record<string, unknown>,
   ): Promise<{ role: "system" | "user"; content: string }[]> {
-    await this.templates.load(); // idempotent-ish: reloads config/prompts
+    await this.ensureTemplates(); // loaded once per provider instance
     const messages: { role: "system" | "user"; content: string }[] = [];
     if (task === "item_image") {
       // Binary image task — no text template; prompt is synthesized from input.

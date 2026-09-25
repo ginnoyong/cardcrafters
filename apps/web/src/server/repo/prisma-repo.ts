@@ -218,6 +218,26 @@ export class PrismaRepo implements Repository {
   // -- Players ---------------------------------------------------------------
 
   async createPlayer(input: CreatePlayerInput): Promise<PlayerRow> {
+    /** True only when the P2002 targets the (gameId, nickname) unique — i.e.
+     *  a nickname collision that auto-suffix can fix. SessionToken (or any
+     *  other) collisions must fail fast. */
+    const isNicknameUniqueViolation = (err: unknown): boolean => {
+      if (
+        !(err instanceof Prisma.PrismaClientKnownRequestError) ||
+        err.code !== "P2002"
+      ) {
+        return false;
+      }
+      const target = err.meta?.target;
+      const targetStr = Array.isArray(target)
+        ? target.join(",")
+        : String(target ?? "");
+      return (
+        targetStr.includes("Player_gameId_nickname_key") ||
+        (targetStr.includes("gameId") && targetStr.includes("nickname"))
+      );
+    };
+
     try {
       const p = await this.prisma.player.create({
         data: {
@@ -230,7 +250,9 @@ export class PrismaRepo implements Repository {
       return this.mapPlayer(p);
     } catch (e) {
       // Auto-suffix: "Alex" taken → try "Alex 2", "Alex 3", ... (max 99).
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002" && input.autoSuffix) {
+      // Only retry when the violation is the (gameId, nickname) unique; a
+      // sessionToken collision (or any other P2002) is rethrown as-is.
+      if (input.autoSuffix && isNicknameUniqueViolation(e)) {
         for (let i = 2; i <= 99; i++) {
           try {
             const p = await this.prisma.player.create({
@@ -243,10 +265,7 @@ export class PrismaRepo implements Repository {
             });
             return this.mapPlayer(p);
           } catch (retry) {
-            if (
-              retry instanceof Prisma.PrismaClientKnownRequestError &&
-              retry.code === "P2002"
-            ) {
+            if (isNicknameUniqueViolation(retry)) {
               continue; // nickname collision — try next suffix
             }
             throw wrap(retry);
@@ -265,6 +284,11 @@ export class PrismaRepo implements Repository {
       orderBy: { nickname: "asc" },
     });
     return players.map((p) => p.nickname);
+  }
+
+  async getPlayer(playerId: string): Promise<PlayerRow | null> {
+    const p = await this.prisma.player.findUnique({ where: { id: playerId } });
+    return p ? this.mapPlayer(p) : null;
   }
 
   async getPlayerBySessionToken(token: string): Promise<PlayerRow | null> {
@@ -294,6 +318,18 @@ export class PrismaRepo implements Repository {
     } catch (e) {
       throw wrap(e);
     }
+  }
+
+  async countTeamMembers(teamId: string): Promise<number> {
+    return this.prisma.player.count({ where: { teamId, removedAt: null } });
+  }
+
+  async listTeamPlayers(teamId: string): Promise<PlayerRow[]> {
+    const players = await this.prisma.player.findMany({
+      where: { teamId, removedAt: null },
+      orderBy: { nickname: "asc" },
+    });
+    return players.map((p) => this.mapPlayer(p));
   }
 
   private mapPlayer(p: {
@@ -526,6 +562,17 @@ export class PrismaRepo implements Repository {
 
   async upsertScore(input: UpsertScoreInput): Promise<ScoreRow> {
     try {
+      // Round-level lock: once ANY score row of the round is locked, the round
+      // is frozen — refuse all writes (new rows and overwrites alike).
+      const lockedRow = await this.prisma.score.findFirst({
+        where: { gameId: input.gameId, round: input.round, locked: true },
+        select: { id: true },
+      });
+      if (lockedRow) {
+        throw new RepoError(
+          `scores_locked: round ${input.round} of game ${input.gameId} is locked`,
+        );
+      }
       // Locked check: if the target score row exists and is locked, refuse.
       const existing = await this.prisma.score.findUnique({
         where: {
@@ -563,8 +610,32 @@ export class PrismaRepo implements Repository {
       });
       return this.mapScore(s);
     } catch (e) {
+      // The round-locked RepoError must not be swallowed/rethrown as a wrap();
+      // it is not a Prisma error so wrap() passes it through unchanged.
       throw wrap(e);
     }
+  }
+
+  /** Lock every score row of a game+round; returns how many rows were locked. */
+  async lockScores(gameId: string, round: number): Promise<number> {
+    try {
+      const r = await this.prisma.score.updateMany({
+        where: { gameId, round },
+        data: { locked: true },
+      });
+      return r.count;
+    } catch (e) {
+      throw wrap(e);
+    }
+  }
+
+  /** True when any score row of the game+round carries locked=true. */
+  async areScoresLocked(gameId: string, round: number): Promise<boolean> {
+    const row = await this.prisma.score.findFirst({
+      where: { gameId, round, locked: true },
+      select: { id: true },
+    });
+    return row !== null;
   }
 
   async listScores(gameId: string, round: number, targetTeamId?: string): Promise<ScoreRow[]> {
@@ -582,6 +653,13 @@ export class PrismaRepo implements Repository {
     });
     const byTarget = new Map<string, number[]>();
     for (const s of scores) {
+      // Data-corruption guard: a value outside 1..10 would silently poison the
+      // distribution buckets — fail loudly instead.
+      if (!Number.isInteger(s.value) || s.value < 1 || s.value > 10) {
+        throw new RepoError(
+          `corrupt score row: value ${s.value} outside 1..10 (game ${gameId}, round ${round}, target ${s.targetTeamId})`,
+        );
+      }
       const bucket = byTarget.get(s.targetTeamId) ?? [];
       bucket.push(s.value);
       byTarget.set(s.targetTeamId, bucket);

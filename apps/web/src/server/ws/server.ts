@@ -15,7 +15,13 @@
 
 import type { Server, Socket } from "socket.io";
 
-import { joinSchema, promptSubmitSchema, gmKickSchema } from "@cardcrafters/shared";
+import {
+  MAX_PROMPT_WORDS,
+  canSubmit,
+  gmKickSchema,
+  joinSchema,
+  promptSubmitSchema,
+} from "@cardcrafters/shared";
 
 import type { GameHub } from "../game/hub";
 import type { PlayerRow, Repository, TeamRow } from "../repo/repository";
@@ -25,7 +31,7 @@ import { gameRoom, gmRoom, presenterRoom, roomsForIdentity, teamRoom, type WsIde
 /** Standard ack shape for every client→server call. */
 export type Ack<T = Record<string, unknown>> =
   | ({ ok: true } & T)
-  | { ok: false; error: string; code?: string };
+  | { ok: false; error: string; code?: string; reason?: string; count?: number };
 
 function ackOk(ack: unknown, payload: Record<string, unknown> = {}): void {
   if (typeof ack === "function") (ack as (res: Ack) => void)({ ok: true, ...payload });
@@ -33,6 +39,19 @@ function ackOk(ack: unknown, payload: Record<string, unknown> = {}): void {
 
 function ackFail(ack: unknown, code: string, error: string): void {
   if (typeof ack === "function") (ack as (res: Ack) => void)({ ok: false, error, code });
+}
+
+/** Ack failure with a machine-readable reason (+ optional word count). */
+function ackFailReason(
+  ack: unknown,
+  code: string,
+  error: string,
+  reason: string,
+  count?: number,
+): void {
+  if (typeof ack === "function") {
+    (ack as (res: Ack) => void)({ ok: false, error, code, reason, ...(count !== undefined ? { count } : {}) });
+  }
 }
 
 /** Full-state snapshot assembled from the hub + repo (sync:full payload body). */
@@ -74,7 +93,8 @@ export async function buildSyncFull(
 
   const teamSnapshots = [];
   for (const team of teams) {
-    const members = hub.listTeamMembers(team.id);
+    // Repo-backed membership (excludes soft-removed players; survives restarts).
+    const members = await hub.listTeamMembers(team.id);
     const items = await repo.listItems(team.id, round);
     const layout = await repo.getLayoutState(team.id, round);
     teamSnapshots.push({
@@ -118,6 +138,19 @@ export async function buildSyncFull(
 export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repository): void {
   io.use(socketAuthMiddleware(repo));
 
+  // playerId → live sockets (kick evicts ALL of a victim's sockets in the game).
+  const playerSockets = new Map<string, Set<Socket>>();
+
+  /** Force-disconnect every live socket of a kicked player. */
+  function evictPlayerSockets(playerId: string): void {
+    const sockets = playerSockets.get(playerId);
+    if (!sockets) return;
+    for (const s of sockets) {
+      s.disconnect(true); // close the underlying connection immediately
+    }
+    playerSockets.delete(playerId);
+  }
+
   io.on("connection", (socket) => {
     const data = socket.data as SocketData;
 
@@ -149,6 +182,10 @@ export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repositor
           data.identity = identity;
           const rooms = roomsForIdentity(identity);
           for (const room of rooms) void socket.join(room);
+          // Track the socket for kick eviction.
+          const sockets = playerSockets.get(identity.playerId) ?? new Set<Socket>();
+          sockets.add(socket);
+          playerSockets.set(identity.playerId, sockets);
           ackOk(ack, { identity, rooms });
           const sync = await buildSyncFull(hub, repo, identity.gameId, identity);
           socket.emit("sync:full", { ...sync, ...hub.stamp(identity.gameId) });
@@ -211,7 +248,29 @@ export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repositor
         ackFail(ack, "invalid_payload", "invalid prompt payload");
         return;
       }
+      // Cheap zod pre-filter (1..200 chars) passed — now enforce the SHARED
+      // word-count rules so client and server can never disagree.
+      const check = canSubmit(parsed.data.text);
+      if (!check.ok) {
+        const reason = check.count === 0 ? "empty_prompt" : "too_many_words";
+        ackFailReason(
+          ack,
+          reason,
+          reason === "empty_prompt"
+            ? "prompt is empty — describe something visible"
+            : `prompt has ${check.count} words (max ${MAX_PROMPT_WORDS})`,
+          reason,
+          check.count,
+        );
+        return;
+      }
       try {
+        // Kicked players must not be able to mutate the game even if their
+        // socket survived (or re-connected before eviction).
+        if (await hub.isKicked(identity.playerId)) {
+          ackFailReason(ack, "kicked", "you were removed from this game", "kicked");
+          return;
+        }
         const result = await hub.applyEvent(identity.gameId, {
           type: "player:submitPrompt",
           playerId: identity.playerId,
@@ -219,7 +278,7 @@ export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repositor
           now: Date.now(),
         });
         if (result.ok) ackOk(ack);
-        else ackFail(ack, "rejected", result.reason);
+        else ackFailReason(ack, "rejected", result.reason, result.reason);
       } catch (err) {
         ackFail(ack, "submit_failed", err instanceof Error ? err.message : "submit failed");
       }
@@ -240,8 +299,24 @@ export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repositor
         return;
       }
       try {
-        const kicked = await repo.kickPlayer(parsed.data.playerId, Date.now());
-        await hub.markPlayerDisconnected(kicked.id);
+        // Authorization: the GM may only kick players of THEIR OWN game.
+        const target = await repo.getPlayer(parsed.data.playerId);
+        if (!target) {
+          ackFail(ack, "kick_failed", "player not found");
+          return;
+        }
+        if (target.gameId !== identity.gameId) {
+          ackFailReason(ack, "wrong_game", "player belongs to a different game", "wrong_game");
+          return;
+        }
+        if (target.removedAt !== null) {
+          ackOk(ack); // already kicked — idempotent
+          return;
+        }
+        // Hub kick: persists removedAt, clears presence, broadcasts
+        // player:left {reason:'kick'}; then evict the victim's live sockets.
+        await hub.kickPlayer(target.id);
+        evictPlayerSockets(target.id);
         ackOk(ack);
       } catch (err) {
         ackFail(ack, "kick_failed", err instanceof Error ? err.message : "kick failed");
@@ -254,6 +329,11 @@ export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repositor
     socket.on("disconnect", () => {
       const identity = data.identity;
       if (identity?.role === "player") {
+        const sockets = playerSockets.get(identity.playerId);
+        if (sockets) {
+          sockets.delete(socket);
+          if (sockets.size === 0) playerSockets.delete(identity.playerId);
+        }
         void hub.markPlayerDisconnected(identity.playerId).catch((err) =>
           console.error(`[ws] failed to mark ${identity.playerId} disconnected:`, err),
         );
