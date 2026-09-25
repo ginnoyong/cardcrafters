@@ -1,0 +1,82 @@
+{
+  "_readme": [
+    "Per-task AI configuration for Card Crafters (Step 4).",
+    "Each task has: primary model, fallback models (tried in order after the primary's retries are exhausted), temperature, maxTokens, timeoutMs, retries, and an optional structured-output schema name from @cardcrafters/shared.",
+    "mode 'auto' = use OpenRouter iff OPENROUTER_API_KEY is set, otherwise the deterministic mock provider (full game runs on mock).",
+    "ENV OVERRIDES (applied by loadTaskConfig at startup, take precedence over this file):",
+    "  AI_MODE                    mock | openrouter | auto (default auto)",
+    "  AI_BUDGET_PER_GAME_USD     number, per-game AI spend ceiling (mock calls cost 0)",
+    "  AI_TASK_<NAME>_MODEL       override the primary model, e.g. AI_TASK_PROMPT_VALIDATION_MODEL=openai/gpt-4o-mini",
+    "  AI_TASK_<NAME>_FALLBACKS   override fallbacks, comma-separated, e.g. AI_TASK_ITEM_IMAGE_FALLBACKS=openai/gpt-image-1,google/gemini-2.5-flash-image",
+    "  <NAME> is the task key upper-snake-cased: prompt_validation -> AI_TASK_PROMPT_VALIDATION_*, item_image -> AI_TASK_ITEM_IMAGE_*.",
+    "maxTokens 0 means 'omit max_tokens' (used by the image task)."
+  ],
+  "mode": "auto",
+  "defaults": { "retries": 1, "timeoutMs": 15000 },
+  "tasks": {
+    "prompt_validation": {
+      "primary": "google/gemini-2.5-flash",
+      "fallbacks": ["openai/gpt-4.1-mini", "openai/gpt-4o-mini"],
+      "temperature": 0,
+      "maxTokens": 200,
+      "timeoutMs": 8000,
+      "retries": 1,
+      "structured": "promptValidationSchema"
+    },
+    "moderation": {
+      "primary": "openai/gpt-4.1-mini",
+      "fallbacks": ["google/gemini-2.5-flash"],
+      "temperature": 0,
+      "maxTokens": 150,
+      "retries": 1,
+      "timeoutMs": 15000,
+      "structured": "moderationSchema"
+    },
+    "greeting_variations": {
+      "primary": "google/gemini-2.5-flash",
+      "fallbacks": ["openai/gpt-4.1-mini"],
+      "temperature": 0.9,
+      "maxTokens": 800,
+      "retries": 1,
+      "timeoutMs": 15000,
+      "structured": "greetingVariationsSchema"
+    },
+    "style_derivation": {
+      "primary": "google/gemini-2.5-flash",
+      "fallbacks": ["openai/gpt-4.1-mini"],
+      "temperature": 0.4,
+      "maxTokens": 400,
+      "retries": 1,
+      "timeoutMs": 15000,
+      "structured": "styleDerivationSchema"
+    },
+    "item_image": {
+      "primary": "google/gemini-2.5-flash-image",
+      "fallbacks": ["openai/gpt-image-1"],
+      "temperature": 1,
+      "maxTokens": 0,
+      "timeoutMs": 60000,
+      "retries": 1,
+      "structured": null
+    },
+    "layout_composition": {
+      "primary": "google/gemini-2.5-flash",
+      "fallbacks": ["openai/gpt-4.1-mini"],
+      "temperature": 0.3,
+      "maxTokens": 600,
+      "retries": 1,
+      "timeoutMs": 15000,
+      "structured": "layoutCompositionSchema"
+    },
+    "layout_critique": {
+      "primary": "openai/gpt-4.1-mini",
+      "fallbacks": [],
+      "temperature": 0,
+      "maxTokens": 200,
+      "retries": 1,
+      "timeoutMs": 15000,
+      "structured": null,
+      "enabled": false
+    }
+  }
+}
