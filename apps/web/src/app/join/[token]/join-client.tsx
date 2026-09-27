@@ -18,10 +18,16 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 
 import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W, PHASE } from "@cardcrafters/shared";
 
-import CardCanvas from "@/components/player/CardCanvas";
+// Client-only: react-konva throws at module load under Next's bundled React
+// (version check) — never evaluate it during SSR/prerender.
+const CardCanvas = dynamic(() => import("@/components/player/CardCanvas"), {
+  ssr: false,
+  loading: () => <div className="cc-canvas-wrap">Loading canvas…</div>,
+});
 import ActivityFeed from "@/components/player/ActivityFeed";
 import MySubmissions from "@/components/player/MySubmissions";
 import NoUndoNotice from "@/components/player/NoUndoNotice";

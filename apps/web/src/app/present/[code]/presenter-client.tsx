@@ -8,11 +8,17 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import QRCode from "qrcode";
 
 import { MAX_TEAM_MEMBERS } from "@cardcrafters/shared";
 
-import CardCanvas from "@/components/player/CardCanvas";
+// Client-only: react-konva throws at module load under Next's bundled React
+// (version check) — never evaluate it during SSR/prerender.
+const CardCanvas = dynamic(() => import("@/components/player/CardCanvas"), {
+  ssr: false,
+  loading: () => <div className="cc-canvas-wrap">Loading canvas…</div>,
+});
 
 import {
   createGameSocket,
