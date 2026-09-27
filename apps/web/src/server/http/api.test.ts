@@ -22,6 +22,9 @@ let srv: CardCraftersServer;
 let port: number;
 
 beforeEach(async () => {
+  // Force the in-memory image queue even when the dev .env exports REDIS_URL
+  // — ioredis/BullMQ would try to connect to Redis and spam teardown errors.
+  delete process.env.REDIS_URL;
   const repo = new MemoryRepo();
   const ai: AiRouter = await createAiRouter({ repo, env: { AI_MODE: "mock", NODE_ENV: "test" } as unknown as NodeJS.ProcessEnv });
   srv = await createServer({ repo, enableNext: false, ai });

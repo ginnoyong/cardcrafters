@@ -94,14 +94,22 @@ export function createItemImageHandler(
   return async function handleItemJob(job: ImageJob): Promise<void> {
     const ctx = { gameId: job.gameId, teamId: job.teamId, playerId: job.playerId };
 
-    // Status guard: only a GENERATING item may be worked on (a resurrected or
-    // REMOVED row is silently skipped — the pipeline re-enqueues on resubmit).
-    const item = await deps.repo.getItem(job.itemId);
-    if (!item || item.status !== "GENERATING") return;
-
-    // TODO(build-phase step 3): derive styleSuffix from the game/theme
-    // (style_derivation task) once the layout engine step lands.
     try {
+      // ID-FORMAT GUARD (m8): the itemId is interpolated into the storage
+      // filename below — never trust it. A malformed id (anything outside
+      // [\w-]) throws BEFORE any repo/fs use and fails through the FAILED
+      // path at the bottom of this function.
+      if (!/^[\w-]+$/.test(job.itemId)) {
+        throw new Error(`invalid itemId format: ${job.itemId}`);
+      }
+
+      // Status guard: only a GENERATING item may be worked on (a resurrected or
+      // REMOVED row is silently skipped — the pipeline re-enqueues on resubmit).
+      const item = await deps.repo.getItem(job.itemId);
+      if (!item || item.status !== "GENERATING") return;
+
+      // TODO(build-phase step 3): derive styleSuffix from the game/theme
+      // (style_derivation task) once the layout engine step lands.
       const res = await deps.ai.run(
         "item_image",
         { prompt: job.prompt, subject: job.subject },
@@ -111,6 +119,12 @@ export function createItemImageHandler(
 
       const decoded = Buffer.from(res.imageBase64, "base64");
       const { buf } = await ensureTransparentPng(decoded, res.imageMime ?? "image/png");
+
+      // Re-check the status BEFORE touching the filesystem (m9): the GM may
+      // have REMOVED the item while the image was generating — never
+      // resurrect a removed/terminal row and never orphan a PNG for one.
+      const fresh = await deps.repo.getItem(job.itemId);
+      if (!fresh || fresh.status !== "GENERATING") return;
 
       await mkdir(storageDir, { recursive: true });
       const fileName = `${job.itemId}.png`;
@@ -128,11 +142,6 @@ export function createItemImageHandler(
         // keep provider dims
       }
       const visualWeight = await computeVisualWeight(buf);
-
-      // Re-check the status: the GM may have REMOVED the item while the image
-      // was generating — never resurrect a removed/terminal row.
-      const fresh = await deps.repo.getItem(job.itemId);
-      if (!fresh || fresh.status !== "GENERATING") return;
 
       const imageUrl = `/static/items/${fileName}`;
       await deps.repo.updateItem(job.itemId, {

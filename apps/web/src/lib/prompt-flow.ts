@@ -4,7 +4,7 @@
  * (packages/shared/src/words.ts) so client and server can never disagree.
  */
 
-import { MAX_PROMPT_WORDS, canSubmit, countWords } from "@cardcrafters/shared";
+import { LIMITS, MAX_PROMPT_WORDS, canSubmit, countWords } from "@cardcrafters/shared";
 
 /** Live counter state for the prompt input. */
 export interface WordCountState {
@@ -38,6 +38,10 @@ export interface SubmitAckLike {
   error?: string;
   remainingMs?: number;
   exampleFix?: string;
+  /** Actual configured limits echoed by the server ack (card_full /
+   *  too_many_inflight). Falls back to the shared defaults when absent. */
+  maxItems?: number;
+  maxInflight?: number;
 }
 
 /** Code for each failure family (server mapSubmitAck / pipeline stages). */
@@ -64,9 +68,11 @@ export function mapSubmitError(ack: SubmitAckLike): string {
       return `Easy! Wait ${secs}s before the next one.`;
     }
     case "card_full":
-      return "The card is full (25 items).";
+      // Interpolate the limit the SERVER sent (GM-configurable); the shared
+      // default keeps old/limit-less acks (tests) sensible.
+      return `The card is full (${ack.maxItems ?? LIMITS.MAX_ITEMS_PER_CARD} items).`;
     case "too_many_inflight":
-      return "Wait for your current items to finish (max 3 at once).";
+      return `Wait for your current items to finish (max ${ack.maxInflight ?? LIMITS.MAX_INFLIGHT_PER_PLAYER} at once).`;
     case "validation": {
       const fix = ack.exampleFix ? ` Try: “${ack.exampleFix}”` : "";
       return `${ack.reason || ack.error || "The AI couldn't picture that — try describing something visible."}${fix}`;

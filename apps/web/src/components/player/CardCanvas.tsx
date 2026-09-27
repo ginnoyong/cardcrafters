@@ -59,6 +59,9 @@ const PAPER_STROKE = "#d9cdb8";
 // Image loading (cached by URL so GM minis + player canvas share elements)
 // ---------------------------------------------------------------------------
 
+/** Cache cap: drop the OLDEST stickers once we're over it (long sessions). */
+const IMAGE_CACHE_MAX = 200;
+
 const imageCache = new Map<string, HTMLImageElement>();
 
 /** Load a sticker PNG; returns the HTMLImageElement once ready (cached). */
@@ -77,6 +80,13 @@ function useKonvaImage(imageUrl: string | undefined): HTMLImageElement | null {
     const el = new window.Image();
     el.onload = () => {
       imageCache.set(imageUrl, el);
+      // Cap the cache (m10): Map preserves insertion order, so deleting first
+      // keys evicts the OLDEST entries — the cache never grows unbounded.
+      while (imageCache.size > IMAGE_CACHE_MAX) {
+        const oldest = imageCache.keys().next().value;
+        if (oldest === undefined) break;
+        imageCache.delete(oldest);
+      }
       if (alive) setImg(el);
     };
     el.onerror = () => {
@@ -196,7 +206,6 @@ export default function CardCanvas({
   const layerRef = useRef<Konva.Layer | null>(null);
   const nodesRef = useRef(new Map<string, Konva.Image>());
   const tweensRef = useRef(new Map<string, Konva.Tween>());
-  const prevGeomsRef = useRef(new Map<string, MappedPlacement>());
   const prevVersionRef = useRef<number | null>(null);
   const prevIdsRef = useRef(new Set<string>());
   const layoutRef = useRef(layout);
@@ -285,24 +294,21 @@ export default function CardCanvas({
             opacity: 1,
           });
         }
-        prevGeomsRef.current.set(placement.itemId, mapped);
         continue;
       }
 
-      // Moved item: restore the previous geometry, then tween to the target.
-      const prev = prevGeomsRef.current.get(placement.itemId);
+      // Moved item: tween FROM THE NODE'S LIVE geometry (m6) — the stored
+      // previous geometry could be stale (an intermediate render may have
+      // moved the node without a new layout version), and a stale start
+      // shows as a visible snap the instant the tween begins. Konva.Tween
+      // starts from the node's CURRENT attrs, so re-anchoring the offsets to
+      // the LIVE size is all the setup needed; x/y/width/height/rotation
+      // tween targets come from `mapped`.
       destroyTween(placement.itemId);
-      if (prev) {
-        node.setAttrs({
-          x: prev.x,
-          y: prev.y,
-          width: prev.width,
-          height: prev.height,
-          rotation: prev.rotation,
-          offsetX: prev.width / 2,
-          offsetY: prev.height / 2,
-        });
-      }
+      node.setAttrs({
+        offsetX: node.width() / 2,
+        offsetY: node.height() / 2,
+      });
       const tween = new Konva.Tween({
         node,
         x: mapped.x,
@@ -318,7 +324,6 @@ export default function CardCanvas({
       });
       tweensRef.current.set(placement.itemId, tween);
       tween.play();
-      prevGeomsRef.current.set(placement.itemId, mapped);
     }
 
     // Clean up tweens for items that left the layout.

@@ -16,7 +16,13 @@ import type { ClientItem, GameSnapshot, MyItemEvent } from "@/lib/store";
  */
 export function selectMyItems(snapshot: GameSnapshot, myTeamId: string, myPlayerId: string | null): ClientItem[] {
   const team = snapshot.teams.find((t) => t.id === myTeamId);
-  const ledger = snapshot.myItems;
+  // Round scoping: ledger entries from a PREVIOUS round are stale (the card
+  // is rebuilt fresh every round) — drop anything not tagged with the
+  // snapshot's current round.
+  const ledgerEntries = Object.entries(snapshot.myItems).filter(
+    ([, entry]) => entry.round === snapshot.round,
+  );
+  const ledger = Object.fromEntries(ledgerEntries) as typeof snapshot.myItems;
   const rows = (team?.items ?? []).filter(
     (item) => (myPlayerId != null && item.playerId === myPlayerId) || ledger[item.id] != null,
   );

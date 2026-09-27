@@ -13,7 +13,7 @@ import { createAiRouter, type AiRouter } from "../ai/router";
 import { GameHub, type RoomEmitter } from "../game/hub";
 import { MemoryRepo } from "../repo/memory-repo";
 import type { ItemRow, Repository } from "../repo/repository";
-import { createMemoryImageQueue } from "../queue/queue";
+import { createMemoryImageQueue, type ImageQueue } from "../queue/queue";
 import { createPromptPipelineDeps, submitPrompt, type PromptIdentity, type PromptPipelineDeps, type PromptSubmitResult } from "./prompt-pipeline";
 
 /** No phase timers armed (buildTimerSeconds 0) — nothing to clean up. */
@@ -383,5 +383,73 @@ describe("prompt pipeline — queue seam", () => {
     expect(res).toMatchObject({ ok: true });
     const rows = await itemsOf(s.repo, s.teamId);
     expect(rows[0]?.status).toBe("GENERATING");
+  });
+
+  it("queue enqueue REJECTION → no zombie item: FAILED row + owner-only item:failed + cooldown rolled back (immediate resubmit succeeds)", async () => {
+    const s = await setup();
+    const brokenQueue: ImageQueue = {
+      enqueue: async () => {
+        throw new Error("redis down");
+      },
+    };
+
+    const res = await s.submit("a red balloon dog", { queue: brokenQueue });
+    expect(res).toEqual({
+      ok: false,
+      stage: "ai_unavailable",
+      reason: expect.stringContaining("temporarily unavailable"),
+    });
+
+    // The GENERATING row must not survive as a zombie (permanent in-flight
+    // slot + card-capacity consumer): it is marked FAILED like any other
+    // failed attempt.
+    const rows = await itemsOf(s.repo, s.teamId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: "FAILED", failReason: "queue unavailable" });
+    expect(s.events.at(-1)).toMatchObject({
+      event: "item:failed",
+      toPlayerOnly: s.playerId,
+    });
+
+    // The cooldown anchor was rolled back → an immediate resubmit succeeds and
+    // resurrects the FAILED row for the same natural key.
+    const retry = await s.submit("a red balloon dog");
+    expect(retry).toEqual({ ok: true, itemId: expect.any(String) });
+    const after = await itemsOf(s.repo, s.teamId);
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ status: "GENERATING", failReason: null });
+  });
+});
+
+describe("prompt pipeline — submit races (per-player mutex)", () => {
+  it("two CONCURRENT submits from the SAME player → exactly one accepted, the other rejected with stage 'cooldown'", async () => {
+    const s = await setup();
+    // Delay the AI wrapper so both calls are genuinely in flight together.
+    const slowAi = {
+      run: async (
+        task: string,
+        input: Record<string, unknown>,
+        opts?: { gameId?: string },
+      ) => {
+        await new Promise((r) => setTimeout(r, 30));
+        return s.ai.run(task, input, opts);
+      },
+    };
+
+    const [first, second] = await Promise.all([
+      s.submit("a red balloon dog", { ai: slowAi }),
+      s.submit("a birthday cake with candles", { ai: slowAi }),
+    ]);
+    const results = [first, second];
+    expect(results.filter((r) => r.ok)).toHaveLength(1); // exactly one ok
+    const loser = results.find((r) => !r.ok)!;
+    expect(loser).toMatchObject({ ok: false, stage: "cooldown" });
+
+    // The loser never persisted a row (turned away before VALIDATING) — one
+    // item only, owned by the winner, already GENERATING.
+    const rows = await itemsOf(s.repo, s.teamId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe("GENERATING");
+    expect(s.events.filter((e) => e.event === "item:pending")).toHaveLength(1);
   });
 });

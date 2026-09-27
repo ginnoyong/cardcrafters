@@ -28,6 +28,9 @@ let gameCode: string;
 let joinTokenA: string;
 
 beforeEach(async () => {
+  // Force the in-memory image queue even when the dev .env exports REDIS_URL
+  // — ioredis/BullMQ would try to connect to Redis and spam teardown errors.
+  delete process.env.REDIS_URL;
   repo = new MemoryRepo();
   // Force mock mode so tests never hit a real provider even when a local
   // OPENROUTER_API_KEY is present.

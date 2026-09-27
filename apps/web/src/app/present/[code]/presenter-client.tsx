@@ -162,12 +162,9 @@ function PresenterBoard({ code }: { code: string }) {
       onEvent<Record<string, unknown>>(socket, "layout:updated", (payload) =>
         dispatch({ type: "layoutUpdated", payload }),
       ),
-      onEvent<Record<string, unknown>>(socket, "item:rejected", (payload) =>
-        dispatch({ type: "itemRejected", payload }),
-      ),
-      onEvent<Record<string, unknown>>(socket, "item:failed", (payload) =>
-        dispatch({ type: "itemFailed", payload }),
-      ),
+      // NOTE: no item:rejected / item:failed listeners here — those events
+      // are OWNER-ONLY (emitted directly to the submitting player's sockets)
+      // and never reach the presenter.
     );
 
     socket.connect();

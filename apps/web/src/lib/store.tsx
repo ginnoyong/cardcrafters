@@ -81,12 +81,19 @@ export interface ClientActivityEntry {
  * `item:failed` are only ever delivered to the owner, plus the submit ack's
  * itemId). Keyed by itemId; survives sync:full (the full snapshot rows don't
  * carry the exampleFix that owner-only events deliver).
+ *
+ * ROUND SCOPING: every entry is tagged with the snapshot round it was made
+ * in (`round`) — the card is rebuilt fresh each round, so a previous round's
+ * rows must never reappear (normalizeSyncFull/selectMyItems prune entries
+ * whose round ≠ the snapshot's round).
  */
 export interface MyItemEvent {
   promptRaw: string;
   status: ClientItemStatus;
   reason?: string;
   exampleFix?: string;
+  /** Snapshot round this entry belongs to (event time / rebuild time). */
+  round?: number;
 }
 
 export interface ClientTeam {
@@ -154,12 +161,6 @@ export type StoreAction =
   | { type: "mySubmitted"; itemId: string; promptRaw: string }
   | { type: "reset" };
 
-function patchRound(state: GameSnapshot | null, round: number): GameSnapshot | null {
-  // Envelope round guard: drop stale events from a previous round.
-  if (state && round !== state.round) return state;
-  return state;
-}
-
 // ---------------------------------------------------------------------------
 // Build-phase helpers: item status mapping + team-scoped updates
 // ---------------------------------------------------------------------------
@@ -212,13 +213,16 @@ function trimActivity(entries: ClientActivityEntry[]): ClientActivityEntry[] {
   return entries.slice(0, ACTIVITY_FEED_MAX);
 }
 
-/** Update THIS player's ledger entry (create when absent). */
+/** Update THIS player's ledger entry (create when absent). Every entry is
+ *  stamped with the CURRENT snapshot round (see MyItemEvent — round scoping
+ *  keeps previous rounds' rows from reappearing on the next card). */
 function patchMyItems(
   state: GameSnapshot,
   itemId: string,
   fn: (prev: MyItemEvent | undefined) => MyItemEvent,
 ): GameSnapshot {
-  return { ...state, myItems: { ...state.myItems, [itemId]: fn(state.myItems[itemId]) } };
+  const entry = { ...fn(state.myItems[itemId]), round: state.round };
+  return { ...state, myItems: { ...state.myItems, [itemId]: entry } };
 }
 
 /** Patch an item in EVERY team that already has it (owner-only events carry
@@ -247,7 +251,7 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
       const parsed = phaseChangedSchema.safeParse(action.payload);
       if (!parsed.success) return state;
       const p = parsed.data;
-      const base = patchRound(state, Number((action.payload as { round?: number }).round ?? state?.round ?? 1));
+      const base = state;
       if (!base) return state;
       return {
         ...base,
@@ -525,11 +529,18 @@ function normalizeSnapshot(
   myPlayerId: string | null = null,
 ): GameSnapshot {
   const teams = Array.isArray(raw.teams) ? raw.teams : [];
-  const myItems: Record<string, MyItemEvent> = { ...prevMyItems };
+  const round = Number(raw.round ?? 1);
+  // Round-scoped ledger: drop entries from ANY other round (the card is
+  // rebuilt fresh each round — stale rows must never reappear). Entries
+  // below are re-added when their row is present in this snapshot.
+  const myItems: Record<string, MyItemEvent> = {};
+  for (const [itemId, entry] of Object.entries(prevMyItems)) {
+    if (entry.round === round) myItems[itemId] = entry;
+  }
   return {
     gameId: String(raw.gameId),
     phase: String(raw.phase),
-    round: Number(raw.round ?? 1),
+    round,
     theme: typeof raw.theme === "string" ? raw.theme : null,
     phaseEndsAt: typeof raw.phaseEndsAt === "number" ? raw.phaseEndsAt : null,
     cutoffAt: typeof raw.cutoffAt === "number" ? raw.cutoffAt : null,
@@ -567,6 +578,7 @@ function normalizeSnapshot(
           myItems[item.id] = {
             promptRaw: item.promptRaw,
             status: item.status,
+            round, // rebuild is always for the snapshot's round
             ...(item.reason ? { reason: item.reason } : {}),
             ...(prevMyItems[item.id]?.exampleFix
               ? { exampleFix: prevMyItems[item.id]!.exampleFix }

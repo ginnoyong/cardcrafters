@@ -22,6 +22,18 @@
  *      `item:rejected` (OWNER ONLY) on a failed check, FAILED +
  *      `item:failed` (OWNER ONLY) when the AI is unreachable.
  *
+ * SUBMIT RACES (per-player mutex): every step up to and including the
+ * cooldown anchor is check-then-act across `await`s (repo reads, AI round-
+ * trips), so two concurrent submits from the SAME player (two tabs) could
+ * both pass the checks. submitPrompt therefore SERIALIZES the entire call
+ * per player: a Map<playerId, Promise> mutex chain in deps.submitLocks —
+ * each submit awaits the previous one for the same player before its checks
+ * run. Different players are unaffected (they each get their own chain).
+ * This serializes the AI latency per player too — fine for a party game.
+ * The VALIDATING row is persisted immediately after the checks and BEFORE
+ * the AI calls, so the row itself is the durable in-flight lock; the
+ * cooldown anchor write happens before the mutex is released.
+ *
  * ITEM CREATION OWNERSHIP: the PIPELINE (not the hub) creates Item rows.
  * hub.applyEvent(player:submitPrompt) remains exactly as the state machine
  * defines it (guard → `accept-submission` effect), but the hub executes that
@@ -30,7 +42,7 @@
  * (GM-configurable), overridable per-deps for tests.
  *
  * Resubmission note: Item has a unique [teamId, round, promptRaw, playerId].
- * A REJECTED/FAILED attempt with the same text would otherwise block the
+ * A REJECTED/FAILED/REMOVED row with the same text would otherwise block the
  * player forever, so the pipeline RESURRECTS that terminal row (back to
  * VALIDATING) instead of creating a new one — the audit trail keeps one row
  * per (team, round, player, prompt). Resubmitting text whose row is still
@@ -98,6 +110,9 @@ export interface PromptPipelineDeps {
   now: () => number;
   /** playerId → epoch ms of the last fully ACCEPTED submission. */
   cooldowns: Map<string, number>;
+  /** Per-player submit mutex (see the SUBMIT RACES note in the module doc).
+   *  Optional: absent → no serialization (only ad-hoc deps objects). */
+  submitLocks?: Map<string, Promise<void>>;
 }
 
 export type PromptSubmitResult =
@@ -105,8 +120,8 @@ export type PromptSubmitResult =
   /** Phase/cutoff/kicked guard refused the prompt (code = machine reason). */
   | { ok: false; stage: "phase"; code: string; error: string }
   | { ok: false; stage: "cooldown"; remainingMs: number }
-  | { ok: false; stage: "card_full" }
-  | { ok: false; stage: "too_many_inflight" }
+  | { ok: false; stage: "card_full"; maxItems: number }
+  | { ok: false; stage: "too_many_inflight"; maxInflight: number }
   | { ok: false; stage: "validation"; reason: string; exampleFix?: string }
   | { ok: false; stage: "moderation"; reason: string }
   | { ok: false; stage: "ai_unavailable"; reason: string };
@@ -161,6 +176,7 @@ export function createPromptPipelineDeps(
   return {
     ...base,
     cooldowns: new Map<string, number>(),
+    submitLocks: new Map<string, Promise<void>>(),
     now: base.now ?? Date.now,
     // The ws layer passes the socket-specific emitter per call; the default
     // no-op keeps the factory total for tests that never emit.
@@ -175,8 +191,40 @@ export function createPromptPipelineDeps(
 /**
  * Run one prompt through the full server-side pipeline (see module doc).
  * Never throws for game-level failures — everything is a typed result.
+ *
+ * WRAPPER = per-player mutex: concurrent submits from the SAME player run
+ * strictly one after another (deps.submitLocks chains them); different
+ * players never wait on each other. The entire check→persist→AI→anchor
+ * section runs inside the lock so the cooldown/capacity/in-flight checks
+ * and the cooldown anchor write cannot interleave with another submit from
+ * the same player.
  */
 export async function submitPrompt(
+  deps: PromptPipelineDeps,
+  identity: PromptIdentity,
+  text: string,
+): Promise<PromptSubmitResult> {
+  const locks = deps.submitLocks ?? new Map<string, Promise<void>>();
+  // The stored tail promise NEVER rejects (runSubmit never throws), so
+  // awaiting it below is safe without a catch.
+  const prev = locks.get(identity.playerId) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  locks.set(identity.playerId, gate);
+  try {
+    await prev;
+    return await runSubmit(deps, identity, text);
+  } finally {
+    release();
+    // Only the tail owner removes itself — a concurrent submit may have
+    // already replaced the map entry with its own gate.
+    if (locks.get(identity.playerId) === gate) locks.delete(identity.playerId);
+  }
+}
+
+async function runSubmit(
   deps: PromptPipelineDeps,
   identity: PromptIdentity,
   text: string,
@@ -231,7 +279,7 @@ export async function submitPrompt(
     (i) => i.status !== "REMOVED" && i.status !== "REJECTED" && i.status !== "FAILED",
   );
   if (active.length >= limits.maxItemsPerCard) {
-    return { ok: false, stage: "card_full" };
+    return { ok: false, stage: "card_full", maxItems: limits.maxItemsPerCard };
   }
 
   // 4) In-flight cap: this player's VALIDATING|GENERATING items this round.
@@ -240,7 +288,7 @@ export async function submitPrompt(
       i.playerId === player.id && (i.status === "VALIDATING" || i.status === "GENERATING"),
   );
   if (inflight.length >= limits.maxInflightPerPlayer) {
-    return { ok: false, stage: "too_many_inflight" };
+    return { ok: false, stage: "too_many_inflight", maxInflight: limits.maxInflightPerPlayer };
   }
 
   // 5) Accept → persist VALIDATING (promptRaw verbatim, subject null).
@@ -307,18 +355,41 @@ export async function submitPrompt(
     status: "GENERATING",
     subject: validation.normalized_subject,
   });
-  deps.cooldowns.set(player.id, now());
+  // Queue enqueue failure must not leave a zombie GENERATING row (a permanent
+  // in-flight slot + card-capacity consumer with no item:failed). On failure:
+  // mark FAILED, emit owner-only item:failed (same path as ai_unavailable),
+  // and treat the attempt as failed — roll the cooldown anchor back to its
+  // pre-acceptance value (the anchor was already stamped above, at
+  // acceptance; a queue hiccup must not consume the player's cooldown).
+  const prevCooldown = deps.cooldowns.get(player.id);
   if (deps.queue) {
-    await deps.queue.enqueue({
-      itemId: accepted.id,
-      gameId: identity.gameId,
-      teamId: player.teamId,
-      playerId: player.id,
-      round: state.round,
-      prompt: text,
-      subject: validation.normalized_subject,
-    });
+    try {
+      await deps.queue.enqueue({
+        itemId: accepted.id,
+        gameId: identity.gameId,
+        teamId: player.teamId,
+        playerId: player.id,
+        round: state.round,
+        prompt: text,
+        subject: validation.normalized_subject,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      await deps.repo.updateItem(accepted.id, {
+        status: "FAILED",
+        failReason: "queue unavailable",
+      });
+      if (prevCooldown === undefined) deps.cooldowns.delete(player.id);
+      else deps.cooldowns.set(player.id, prevCooldown);
+      deps.emit(
+        "item:failed",
+        { itemId: accepted.id, reason: `queue unavailable (${detail})` },
+        { toPlayerOnly: player.id },
+      );
+      return { ok: false, stage: "ai_unavailable", reason: AI_UNAVAILABLE_MESSAGE };
+    }
   }
+  deps.cooldowns.set(player.id, now());
   return { ok: true, itemId: accepted.id };
 }
 
@@ -356,7 +427,7 @@ async function persistValidatingItem(
     (i) =>
       i.playerId === player.id &&
       i.promptRaw === text &&
-      (i.status === "REJECTED" || i.status === "FAILED"),
+      (i.status === "REJECTED" || i.status === "FAILED" || i.status === "REMOVED"),
   );
   if (previous) {
     return repo.updateItem(previous.id, { status: "VALIDATING", failReason: null });

@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import { selectMyItems } from "../components/player/my-items";
 import {
   ACTIVITY_FEED_MAX,
   normalizeSyncFull,
@@ -244,6 +245,40 @@ describe("storeReducer — activity feed", () => {
     const feed = s!.teams.find((t) => t.id === TEAM_A)!.activity;
     expect(feed).toHaveLength(ACTIVITY_FEED_MAX);
     expect(feed[0]!.text).toContain("p30"); // newest survives, p0 trimmed
+  });
+});
+
+// ---------------------------------------------------------------------------
+// owner ledger round scoping (m4)
+// ---------------------------------------------------------------------------
+
+describe("owner ledger round scoping (m4)", () => {
+  it("a round-1 ledger entry survives a same-round sync:full but is pruned on a round-2 snapshot", () => {
+    const prevMyItems: Record<string, MyItemEvent> = {
+      i1: { promptRaw: "red balloon", status: "ready", round: 1 },
+    };
+
+    // Same round → entry survives untouched.
+    const sameRound = normalizeSyncFull(baseSnapshot(), prevMyItems, PLAYER_ME);
+    expect(sameRound.myItems["i1"]).toMatchObject({ status: "ready", round: 1 });
+
+    // Round 2 snapshot → previous-round entries are pruned (the card is
+    // rebuilt fresh every round).
+    const round2 = normalizeSyncFull(baseSnapshot({ round: 2 }), prevMyItems, PLAYER_ME);
+    expect(round2.round).toBe(2);
+    expect(round2.myItems["i1"]).toBeUndefined();
+  });
+
+  it("selectMyItems filters by round: only current-round ledger entries synthesize rows", () => {
+    const s = normalizeSyncFull(baseSnapshot({ round: 2 }), {}, PLAYER_ME);
+    // Simulate a ledger with a stale round-1 entry and a current round-2 one.
+    s.myItems["stale"] = { promptRaw: "old prompt", status: "rejected", round: 1 };
+    s.myItems["fresh"] = { promptRaw: "new prompt", status: "pending", round: 2 };
+
+    const mine = selectMyItems(s, TEAM_A, PLAYER_ME);
+    const ids = mine.map((i) => i.id);
+    expect(ids).toContain("fresh"); // synthesized from the current-round entry
+    expect(ids).not.toContain("stale"); // previous round → pruned
   });
 });
 

@@ -45,7 +45,7 @@ import { createImageQueue } from "../queue/create-image-queue";
 import type { ImageQueue } from "../queue/queue";
 
 import type { GameHub } from "../game/hub";
-import type { PlayerRow, Repository, TeamRow } from "../repo/repository";
+import type { ItemRow, PlayerRow, Repository, TeamRow } from "../repo/repository";
 import { socketAuthMiddleware, type SocketData } from "./auth";
 import { gameRoom, gmRoom, presenterRoom, roomsForIdentity, teamRoom, type WsIdentity } from "./rooms";
 
@@ -60,6 +60,9 @@ export type Ack<T = Record<string, unknown>> =
       count?: number;
       exampleFix?: string;
       remainingMs?: number;
+      /** Actual configured limits (card_full / too_many_inflight acks). */
+      maxItems?: number;
+      maxInflight?: number;
     };
 
 function ackOk(ack: unknown, payload: Record<string, unknown> = {}): void {
@@ -108,7 +111,13 @@ function mapSubmitAck(ack: unknown, result: PromptSubmitResult): void {
       });
       return;
     case "card_full":
-      reply({ ok: false, error: "This card is full — no room for more stickers", code: "card_full", reason: "card_full" });
+      reply({
+        ok: false,
+        error: "This card is full — no room for more stickers",
+        code: "card_full",
+        reason: "card_full",
+        maxItems: result.maxItems,
+      });
       return;
     case "too_many_inflight":
       reply({
@@ -116,6 +125,7 @@ function mapSubmitAck(ack: unknown, result: PromptSubmitResult): void {
         error: "You have too many stickers in progress — wait for one to finish",
         code: "too_many_inflight",
         reason: "too_many_inflight",
+        maxInflight: result.maxInflight,
       });
       return;
     case "validation":
@@ -164,6 +174,32 @@ export interface SyncFullPayload extends Record<string, unknown> {
   myScores?: Array<{ targetTeamId: string; value: number }>;
 }
 
+/**
+ * Snapshot privacy filter (buildSyncFull): REJECTED/FAILED/REMOVED rows and
+ * their failReasons are OWNER-ONLY intel (the pipeline emits item:rejected /
+ * item:failed to the owner's sockets alone), so the full snapshot must not
+ * leak them to teammates, the presenter, or other players' future syncs.
+ *   - GM (role 'gm') sees ALL rows — moderation duty per the spec (the GM
+ *     removes inappropriate items and needs the failure reasons).
+ *   - A player sees private rows only when the row is THEIR OWN.
+ *   - Presenter (and any unknown identity) sees only non-private rows, like
+ *     players.
+ * Exported for unit tests so the privacy rule can never drift from the
+ * pipeline's owner-only emission promise.
+ */
+export function filterItemsForIdentity(rows: ItemRow[], identity?: WsIdentity): ItemRow[] {
+  if (identity?.role === "gm") return rows;
+  const isOwner =
+    identity?.role === "player" ? (row: ItemRow) => row.playerId === identity.playerId : () => false;
+  return rows.filter(
+    (row) =>
+      !PRIVATE_ITEM_STATUSES.has(row.status) || isOwner(row),
+  );
+}
+
+/** Item statuses whose rows/failReasons are private to the owning player. */
+const PRIVATE_ITEM_STATUSES = new Set(["REJECTED", "FAILED", "REMOVED"]);
+
 /** Build the sync:full body from the hub + repository. */
 export async function buildSyncFull(
   hub: GameHub,
@@ -185,7 +221,11 @@ export async function buildSyncFull(
   for (const team of teams) {
     // Repo-backed membership (excludes soft-removed players; survives restarts).
     const members = await hub.listTeamMembers(team.id);
-    const items = await repo.listItems(team.id, round);
+    const allItems = await repo.listItems(team.id, round);
+    // Privacy: strip other players' REJECTED/FAILED/REMOVED rows (GM sees all).
+    // The visible count doubles as the card-capacity usage — the pipeline
+    // excludes these same statuses when checking maxItemsPerCard.
+    const items = filterItemsForIdentity(allItems, identity);
     const layout = await repo.getLayoutState(team.id, round);
     const greeting = greetings.get(team.id);
     teamSnapshots.push({

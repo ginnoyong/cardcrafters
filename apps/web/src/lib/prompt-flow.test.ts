@@ -79,4 +79,12 @@ describe("mapSubmitError — every failure code", () => {
     expect(mapSubmitError({ ok: false, code: "mystery" })).toBeTruthy();
     expect(mapSubmitError({ ok: false })).toBeTruthy();
   });
+
+  it("card_full / too_many_inflight interpolate the SERVER's limits (m5)", () => {
+    expect(mapSubmitError({ ok: false, code: "card_full", maxItems: 10 })).toContain("10");
+    expect(mapSubmitError({ ok: false, code: "too_many_inflight", maxInflight: 5 })).toContain("5");
+    // Defaults when the ack carries no limits: the shared LIMITS (25 / 3).
+    expect(mapSubmitError({ ok: false, code: "card_full" })).toContain("25");
+    expect(mapSubmitError({ ok: false, code: "too_many_inflight" })).toContain("3");
+  });
 });
