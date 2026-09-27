@@ -31,6 +31,11 @@ import type { AiRouter } from "../ai/router";
 import { regenerateGreeting } from "../flows/greetings";
 import { createItemImageHandler, type ItemImageEmit } from "../flows/item-image";
 import {
+  createLayoutDebouncer,
+  computeAndPersistLayout,
+  type LayoutEmit,
+} from "../layout/engine";
+import {
   createPromptPipelineDeps,
   submitPrompt,
   type PromptEmit,
@@ -282,6 +287,28 @@ export function registerSocketHandlers(
   // playerId → live sockets (kick evicts ALL of a victim's sockets in the game).
   const playerSockets = new Map<string, Set<Socket>>();
 
+  // Layout engine wiring (build-phase step 3): every item:ready schedules a
+  // debounced (1.5s trailing edge) re-layout for the team; the computed layout
+  // is emitted `layout:updated` to the team + presenter + GM rooms with a
+  // hub-stamped envelope. When `ai` is absent the engine runs solver-only
+  // (hints are best-effort and never fail the layout).
+  // TODO(layout wiring): GM item removal (gm:removeItem) does not exist yet in
+  // this codebase — when it lands it must call layoutDebouncer.schedule here
+  // too so the card re-flows after an item leaves.
+  const layoutEmit: LayoutEmit = (event, payload, ctx) => {
+    const enveloped = { ...hub.stamp(ctx.gameId), ...payload };
+    for (const room of [
+      teamRoom(ctx.gameId, ctx.teamId),
+      presenterRoom(ctx.gameId),
+      gmRoom(ctx.gameId),
+    ]) {
+      io.to(room).emit(event, enveloped);
+    }
+  };
+  const layoutDebouncer = createLayoutDebouncer((ctx) =>
+    computeAndPersistLayout({ repo, ai: ai ?? null, emit: layoutEmit }, ctx.gameId, ctx.teamId),
+  );
+
   // Queue-level emitter: item:ready → hub-stamped broadcast to the TEAM room;
   // item:failed → hub-stamped direct emit to ALL of the owner's live sockets
   // (owner offline → skipped; the state is visible on the next sync:full).
@@ -294,6 +321,8 @@ export function registerSocketHandlers(
       return;
     }
     io.to(teamRoom(ctx.gameId, ctx.teamId)).emit(event, enveloped);
+    // The team's card changed → schedule the debounced re-layout.
+    layoutDebouncer.schedule({ gameId: ctx.gameId, teamId: ctx.teamId });
   };
 
   /** Force-disconnect every live socket of a kicked player. */
@@ -659,11 +688,13 @@ export function registerSocketHandlers(
     });
   });
 
-  // Server-shutdown disposer: closes the BullMQ worker/queue when the ws layer
+  // Server-shutdown disposer: flush any pending layout computes (they would
+  // otherwise be lost) and close the BullMQ worker/queue when the ws layer
   // owns it (memory queues close as a no-op; injected test queues are the
   // caller's to dispose).
   return {
     async close() {
+      await layoutDebouncer.flushAll();
       if (ownedQueue) await ownedQueue.close();
     },
   };
