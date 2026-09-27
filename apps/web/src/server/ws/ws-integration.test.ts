@@ -5,6 +5,8 @@
  */
 
 import { type AddressInfo } from "node:net";
+import { rm } from "node:fs/promises";
+import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { io, type Socket } from "socket.io-client";
@@ -12,6 +14,7 @@ import { io, type Socket } from "socket.io-client";
 import { DEFAULT_CARD_CONFIG, MAX_PROMPT_WORDS } from "@cardcrafters/shared";
 
 import { createAiRouter, type AiRouter } from "../ai/router";
+import { DEFAULT_ITEMS_DIR } from "../flows/item-image";
 import { createServer, type CardCraftersServer } from "../../../server";
 import { MemoryRepo } from "../repo/memory-repo";
 
@@ -66,12 +69,12 @@ function emitAck<T = Record<string, unknown>>(
 }
 
 /** Wait for the next occurrence of an event. */
-function waitFor<T = Record<string, unknown>>(socket: Socket, event: string): Promise<T> {
+function waitFor<T = Record<string, unknown>>(socket: Socket, event: string, timeoutMs = 3_000): Promise<T> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => {
       socket.off(event, handler);
       reject(new Error(`timeout waiting for ${event}`));
-    }, 3_000);
+    }, timeoutMs);
     const handler = (payload: T) => {
       clearTimeout(t);
       socket.off(event, handler);
@@ -291,6 +294,71 @@ describe("ws integration (memory repo, ephemeral port)", () => {
 
     // The server force-disconnects the victim's socket.
     await disconnected;
+    gm.close();
+  });
+
+  it("(j) build flow end-to-end: submit → item:pending → item:ready → layout:updated", async () => {
+    // Theme is auto-set at creation time via the hub (the GM console does this
+    // right after creating a game) — moves LOBBY → GREETINGS so players may
+    // join before approval.
+    await hub.applyEvent(gameId, { type: "gm:setTheme", theme: "Balloon party", now: Date.now() });
+
+    // REAL image path: the default memory image queue + the real
+    // createItemImageHandler — createServer wires both automatically whenever
+    // `ai` is passed (see registerSocketHandlers; no REDIS_URL in tests →
+    // memory queue). The mock provider draws a real PNG (@napi-rs/canvas),
+    // so an actual file lands in public/static/items/{itemId}.png.
+    const gm = connect({ role: "gm", gameCode });
+    await emitAck(gm, "join", { role: "gm", joinToken: gameCode });
+
+    const maya = connect();
+    const mayaAck = await emitAck<{ ok: boolean; identity: { teamId: string } }>(maya, "join", {
+      role: "player",
+      joinToken: joinTokenA,
+      nickname: "Maya",
+    });
+    expect(mayaAck.ok).toBe(true);
+    const teamId = mayaAck.identity.teamId;
+
+    // Register listeners BEFORE the submit so nothing is missed. layout:updated
+    // needs extra headroom: the debouncer trails by 1.5s after item:ready.
+    const pendingPromise = waitFor<Record<string, unknown>>(gm, "item:pending");
+    const readyPromise = waitFor<Record<string, unknown>>(gm, "item:ready", 8_000);
+    const layoutPromise = waitFor<Record<string, unknown>>(gm, "layout:updated", 5_000);
+
+    const approve = await emitAck<{ ok: boolean; phase?: string }>(gm, "gm:approveGreetings", {});
+    expect(approve.ok).toBe(true);
+    expect(approve.phase).toBe("BUILD");
+
+    const submit = await emitAck<{ ok: boolean; itemId?: string }>(maya, "player:submitPrompt", {
+      text: "red balloon",
+    });
+    expect(submit.ok).toBe(true);
+    const itemId = submit.itemId!;
+    expect(itemId).toBeTruthy();
+
+    try {
+      const pending = await pendingPromise;
+      expect(pending).toMatchObject({ itemId, promptRaw: "red balloon", nickname: "Maya", teamId });
+
+      const ready = await readyPromise;
+      expect(ready.itemId).toBe(itemId);
+      expect(typeof ready.imageUrl).toBe("string");
+      expect((ready.imageUrl as string).length).toBeGreaterThan(0);
+
+      const layout = await layoutPromise;
+      expect(layout.teamId).toBe(teamId);
+      expect(layout.version).toBeGreaterThan(0);
+      expect(Array.isArray(layout.placements)).toBe(true);
+      expect((layout.placements as unknown[]).length).toBeGreaterThan(0);
+    } finally {
+      // The real handler wrote a real file under the Next public dir — remove
+      // it so the test leaves no artifacts behind (force:true tolerates a
+      // failed run where no file was ever written).
+      await rm(path.join(DEFAULT_ITEMS_DIR, `${itemId}.png`), { force: true });
+    }
+
+    maya.close();
     gm.close();
   });
 });

@@ -422,6 +422,26 @@ label {
   display: block;
 }
 
+/* --- GM/presenter live card minis --------------------------------------- */
+
+.cc-mini-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  align-items: flex-start;
+}
+
+.cc-mini {
+  width: 240px;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.cc-mini h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
 /* Prompt bar: input + counter + submit in one row (tap targets ≥44px). */
 
 .cc-promptbar {

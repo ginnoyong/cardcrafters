@@ -1,15 +1,18 @@
 "use client";
 
 /**
- * Presenter view — minimal lobby slice: team cards (name, player count,
- * phase via the shared snapshot, countdown when the phase is timed) plus a
- * join QR for every team. The full card-canvas grid arrives in later steps.
+ * Presenter view — team cards (name, player count, phase, countdown, join
+ * QR) plus a LIVE card grid: one read-only CardCanvas mini per team, fed by
+ * the store's build-phase events (item:pending / item:ready /
+ * layout:updated — the presenter socket joins every team room).
  */
 
 import { useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
 
 import { MAX_TEAM_MEMBERS } from "@cardcrafters/shared";
+
+import CardCanvas from "@/components/player/CardCanvas";
 
 import {
   createGameSocket,
@@ -142,6 +145,23 @@ function PresenterBoard({ code }: { code: string }) {
         "greeting:updated",
         (p) => dispatch({ type: "greetingUpdated", teamId: p.teamId, text: p.text, status: p.status, round: p.round }),
       ),
+      // Build-phase events (presenter joins every team room). GM-only events
+      // and mySubmitted don't exist for the presenter.
+      onEvent<Record<string, unknown>>(socket, "item:pending", (payload) =>
+        dispatch({ type: "itemPending", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "item:ready", (payload) =>
+        dispatch({ type: "itemReady", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "layout:updated", (payload) =>
+        dispatch({ type: "layoutUpdated", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "item:rejected", (payload) =>
+        dispatch({ type: "itemRejected", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "item:failed", (payload) =>
+        dispatch({ type: "itemFailed", payload }),
+      ),
     );
 
     socket.connect();
@@ -200,6 +220,33 @@ function PresenterBoard({ code }: { code: string }) {
           />
         ))}
       </section>
+      {/* Live card grid: one read-only mini canvas per team, right under the
+          team overview cards (GREETINGS: greeting + empty canvas; BUILD:
+          live items + layout). */}
+      {snapshot && snapshot.teams.length > 0 ? (
+        <section aria-label="live cards" className="cc-mini-grid">
+          {snapshot.teams.map((team) => {
+            const readyCount = team.items.filter((i) => i.status === "ready").length;
+            return (
+              <div key={team.id} className="cc-mini" aria-label={`live preview of ${team.name}'s card`}>
+                <h3>
+                  {team.name} <span className="cc-muted">({team.label})</span>
+                </h3>
+                <CardCanvas
+                  items={team.items}
+                  layout={team.layout}
+                  greeting={team.greeting.text}
+                  ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
+                />
+                <p className="cc-hint" aria-live="polite">
+                  {readyCount} sticker{readyCount === 1 ? "" : "s"} on the card
+                </p>
+              </div>
+            );
+          })}
+        </section>
+      ) : null}
+
       {snapshot && snapshot.teams.length === 0 ? (
         <p className="cc-hint">No teams yet…</p>
       ) : null}

@@ -18,6 +18,10 @@
  *   5. Resume: /gm?code=CODE reloads the console for an existing game
  *      (tokens + greetings come back via /api/games/:code?full=1 AND the
  *      join-time sync:full snapshot).
+ *   6. Live previews: below the flippable cards, one read-only CardCanvas
+ *      mini per team fed by the store (GREETINGS: greeting + empty canvas;
+ *      BUILD: live item:pending/ready + layout:updated updates — the GM's
+ *      socket joins every team room, so team-room events land here).
  *
  * GM auth IS knowing the game code (party-game trade-off, see ws/auth.ts).
  */
@@ -35,11 +39,13 @@ import {
   onEvent,
   type AckResult,
 } from "@/lib/socket";
+import CardCanvas from "@/components/player/CardCanvas";
 import {
   GameStoreProvider,
   normalizeSyncFull,
   phaseLabel,
   useGameStore,
+  type ClientTeam,
   type SyncFullEvent,
 } from "@/lib/store";
 
@@ -312,6 +318,30 @@ function TeamFlipCard({
 }
 
 // ---------------------------------------------------------------------------
+// Live card mini: one read-only CardCanvas per team (GM console preview).
+// ---------------------------------------------------------------------------
+
+function TeamMiniCanvas({ team }: { team: ClientTeam }) {
+  const readyCount = team.items.filter((i) => i.status === "ready").length;
+  return (
+    <div className="cc-mini" aria-label={`live preview of ${team.name}'s card`}>
+      <h3>
+        {team.name} <span className="cc-muted">({team.label})</span>
+      </h3>
+      <CardCanvas
+        items={team.items}
+        layout={team.layout}
+        greeting={team.greeting.text}
+        ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
+      />
+      <p className="cc-hint" aria-live="polite">
+        {readyCount} sticker{readyCount === 1 ? "" : "s"} on the card
+      </p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Console (post-creation view) — socket + store wiring
 // ---------------------------------------------------------------------------
 
@@ -386,6 +416,24 @@ function Console({ game }: { game: CreatedGame }) {
         "greeting:updated",
         (p) => dispatch({ type: "greetingUpdated", teamId: p.teamId, text: p.text, status: p.status, round: p.round }),
       ),
+      // Build-phase events (GM joins every team room, so team-room broadcasts
+      // land here; owner-only item:rejected / item:failed never reach the GM
+      // but the dispatch is harmless). NO mySubmitted — the GM never submits.
+      onEvent<Record<string, unknown>>(socket, "item:pending", (payload) =>
+        dispatch({ type: "itemPending", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "item:ready", (payload) =>
+        dispatch({ type: "itemReady", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "layout:updated", (payload) =>
+        dispatch({ type: "layoutUpdated", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "item:rejected", (payload) =>
+        dispatch({ type: "itemRejected", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "item:failed", (payload) =>
+        dispatch({ type: "itemFailed", payload }),
+      ),
     );
 
     socket.connect();
@@ -450,6 +498,16 @@ function Console({ game }: { game: CreatedGame }) {
           );
         })}
       </section>
+
+      {/* Live previews: one read-only mini canvas per team. GREETINGS: the
+          greeting + an empty canvas; BUILD: live items + layout. */}
+      {snapshot && snapshot.teams.length > 0 ? (
+        <section aria-label="live card previews" className="cc-mini-grid">
+          {snapshot.teams.map((team) => (
+            <TeamMiniCanvas key={team.id} team={team} />
+          ))}
+        </section>
+      ) : null}
 
       {/* Single prominent Start control below all cards. Hidden once BUILD is underway. */}
       {!building ? (
