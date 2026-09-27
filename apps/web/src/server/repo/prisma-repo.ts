@@ -436,6 +436,15 @@ export class PrismaRepo implements Repository {
     }
   }
 
+  async getItem(id: string): Promise<ItemRow | null> {
+    try {
+      const i = await this.prisma.item.findUnique({ where: { id } });
+      return i ? this.mapItem(i) : null;
+    } catch (e) {
+      throw wrap(e);
+    }
+  }
+
   async updateItem(id: string, patch: ItemPatch): Promise<ItemRow> {
     try {
       const i = await this.prisma.item.update({

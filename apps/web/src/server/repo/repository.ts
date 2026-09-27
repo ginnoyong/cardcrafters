@@ -341,6 +341,8 @@ export interface Repository {
 
   /** Create a card item; throws on duplicate teamId+round+promptRaw+playerId. */
   createItem(input: CreateItemInput): Promise<ItemRow>;
+  /** Fetch one item by id, or null (image worker status guard). */
+  getItem(id: string): Promise<ItemRow | null>;
   /** Partial update (status transitions, image, placement metadata). */
   updateItem(id: string, patch: ItemPatch): Promise<ItemRow>;
   /** Items of a team in a round, optionally filtered by status set. */

@@ -371,6 +371,7 @@ describe("prompt pipeline — queue seam", () => {
       gameId: s.gameId,
       teamId: s.teamId,
       playerId: s.playerId,
+      round: 1,
       prompt: "a red balloon dog",
       subject: "a red balloon dog",
     });

@@ -314,6 +314,7 @@ export async function submitPrompt(
       gameId: identity.gameId,
       teamId: player.teamId,
       playerId: player.id,
+      round: state.round,
       prompt: text,
       subject: validation.normalized_subject,
     });

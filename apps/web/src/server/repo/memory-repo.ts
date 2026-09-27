@@ -355,6 +355,11 @@ export class MemoryRepo implements Repository {
     return { ...row };
   }
 
+  async getItem(id: string): Promise<ItemRow | null> {
+    const row = this.items.get(id);
+    return row ? { ...row } : null;
+  }
+
   async updateItem(id: string, patch: ItemPatch): Promise<ItemRow> {
     const row = this.items.get(id);
     if (!row) throw new RepoError(`item ${id} not found`);

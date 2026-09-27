@@ -165,7 +165,10 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Card
   const ai = opts.ai ?? (await createAiRouter({ repo }));
   aiRef.ai = ai;
   ioRef.io = io;
-  registerSocketHandlers(io, hub, repo, ai);
+  // Socket handlers + image queue (BullMQ when REDIS_URL is set, memory
+  // otherwise — see registerSocketHandlers). The returned disposer shuts the
+  // queue worker down on server close.
+  const ws = registerSocketHandlers(io, hub, repo, ai);
 
   // Boot reconciliation: re-arm future phase timers / fire expired ones.
   await hydrateTimers(hub.timers, hub, repo);
@@ -186,6 +189,7 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Card
     ai,
     async close() {
       hub.shutdown();
+      await ws.close();
       await new Promise<void>((resolve) => io.close(() => resolve()));
       const owned = repo as Partial<{ disconnect: () => Promise<void> }>;
       if (typeof owned.disconnect === "function") await owned.disconnect();

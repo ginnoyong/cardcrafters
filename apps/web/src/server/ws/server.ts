@@ -29,13 +29,15 @@ import {
 
 import type { AiRouter } from "../ai/router";
 import { regenerateGreeting } from "../flows/greetings";
+import { createItemImageHandler, type ItemImageEmit } from "../flows/item-image";
 import {
   createPromptPipelineDeps,
   submitPrompt,
   type PromptEmit,
   type PromptSubmitResult,
 } from "../flows/prompt-pipeline";
-import { createMemoryImageQueue } from "../queue/queue";
+import { createImageQueue } from "../queue/create-image-queue";
+import type { ImageQueue } from "../queue/queue";
 
 import type { GameHub } from "../game/hub";
 import type { PlayerRow, Repository, TeamRow } from "../repo/repository";
@@ -235,19 +237,64 @@ function emitGreetingUpdated(
 /** Register connection-level handlers + auth middleware on the io server.
  *  `ai` is optional for backward compatibility; when omitted the greeting
  *  handlers (gm:updateGreeting / gm:regenGreeting) ack ai_unavailable. */
-export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repository, ai?: AiRouter): void {
+export function registerSocketHandlers(
+  io: Server,
+  hub: GameHub,
+  repo: Repository,
+  ai?: AiRouter,
+  opts: { queue?: ImageQueue } = {},
+): { close(): Promise<void> } {
   io.use(socketAuthMiddleware(repo));
 
   // Prompt pipeline deps — built ONCE per server: the cooldown map and the
   // image queue are process-wide state. Cooldowns are in-memory only, so a
   // server restart resets them (documented in prompt-pipeline.ts). Per-call
   // code spreads `{ ...pipelineDeps, emit }` to attach the socket emitter.
-  const pipelineDeps = ai
-    ? createPromptPipelineDeps({ hub, repo, ai, queue: createMemoryImageQueue() })
-    : null;
+  //
+  // QUEUE FLAVOR (step 2): createImageQueue(REDIS_URL) → BullMQ when Redis is
+  // configured (docker compose), else the concurrency-limited memory queue
+  // (tests, zero-infra). The handler is the real item-image worker; its emit
+  // callback is late-bound (queueEmit below) because item:failed must reach
+  // the owner's PRIVATE playerSockets map, which is only known after the map
+  // exists — the cleanest way to expose it is this closure, NOT a module-
+  // level socket registry (two servers can coexist in one test process).
+  // Tests may inject their own queue via opts.queue.
+  let queueEmit: ItemImageEmit = () => {};
+  let ownedQueue: { close(): Promise<void> } | null = null;
+  let pipelineDeps: ReturnType<typeof createPromptPipelineDeps> | null = null;
+  if (ai) {
+    const handler = createItemImageHandler({
+      repo,
+      ai,
+      emit: (event, payload, ctx) => queueEmit(event, payload, ctx),
+    });
+    let queue: ImageQueue;
+    if (opts.queue) {
+      queue = opts.queue; // test-injected — the caller owns its lifecycle
+    } else {
+      const created = createImageQueue(process.env.REDIS_URL, handler);
+      ownedQueue = created; // only close what we created
+      queue = created;
+    }
+    pipelineDeps = createPromptPipelineDeps({ hub, repo, ai, queue });
+  }
 
   // playerId → live sockets (kick evicts ALL of a victim's sockets in the game).
   const playerSockets = new Map<string, Set<Socket>>();
+
+  // Queue-level emitter: item:ready → hub-stamped broadcast to the TEAM room;
+  // item:failed → hub-stamped direct emit to ALL of the owner's live sockets
+  // (owner offline → skipped; the state is visible on the next sync:full).
+  queueEmit = (event, payload, ctx) => {
+    const enveloped = { ...hub.stamp(ctx.gameId), ...payload };
+    if (event === "item:failed") {
+      const sockets = playerSockets.get(ctx.playerId);
+      if (!sockets) return;
+      for (const s of sockets) s.emit(event, enveloped);
+      return;
+    }
+    io.to(teamRoom(ctx.gameId, ctx.teamId)).emit(event, enveloped);
+  };
 
   /** Force-disconnect every live socket of a kicked player. */
   function evictPlayerSockets(playerId: string): void {
@@ -611,6 +658,15 @@ export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repositor
       }
     });
   });
+
+  // Server-shutdown disposer: closes the BullMQ worker/queue when the ws layer
+  // owns it (memory queues close as a no-op; injected test queues are the
+  // caller's to dispose).
+  return {
+    async close() {
+      if (ownedQueue) await ownedQueue.close();
+    },
+  };
 }
 
 /**
