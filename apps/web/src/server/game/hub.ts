@@ -347,7 +347,13 @@ export class GameHub {
         return;
       }
       case "accept-submission":
-        return this.persistAcceptedSubmission(gameId, state, effect.playerId, effect.text);
+        // ITEM CREATION OWNERSHIP (build-phase step 1): Item rows are created
+        // by the prompt pipeline (../flows/prompt-pipeline.ts), NOT here. The
+        // state machine still emits this effect so the BUILD phase + cutoff
+        // guard remains the single phase authority — but persistence, AI
+        // validation/moderation and item events live in the pipeline, which
+        // is the ONE owner of item rows + item events.
+        return;
       default: {
         const exhaustive: never = effect;
         void exhaustive;
@@ -376,47 +382,6 @@ export class GameHub {
         role: "PEOPLES_CHOICE",
       });
     }
-  }
-
-  /** persist + broadcast an accepted BUILD prompt (AI pipeline lands in Step 4+).
-   *  Throws RepoError when the player cannot be resolved (event is rejected). */
-  private async persistAcceptedSubmission(
-    gameId: string,
-    state: GameRuntimeState,
-    playerId: string,
-    text: string,
-  ): Promise<void> {
-    // Read-through: memory cache first, then the repo (hub may have restarted
-    // mid-game; submissions from unknown players must not be silently lost).
-    const player = this.players.get(playerId) ?? (await this.repo.getPlayer(playerId));
-    if (!player) {
-      throw new RepoError(`player_not_found: ${playerId}`);
-    }
-    if (player.removedAt !== null) {
-      throw new RepoError("kicked");
-    }
-    if (player.gameId !== gameId) {
-      throw new RepoError(`wrong_game: player ${playerId} belongs to game ${player.gameId}`);
-    }
-    const item = await this.repo.createItem({
-      teamId: player.teamId,
-      playerId,
-      round: state.round,
-      promptRaw: text,
-      status: "PENDING",
-    });
-    this.emitToRooms(
-      gameId,
-      state.round,
-      "itemPending",
-      {
-        itemId: item.id,
-        promptRaw: item.promptRaw,
-        nickname: player.nickname,
-        createdAt: item.createdAt,
-      },
-      [gameRoom(gameId), teamRoom(gameId, player.teamId)],
-    );
   }
 
   // -- Player join flow ---------------------------------------------------------

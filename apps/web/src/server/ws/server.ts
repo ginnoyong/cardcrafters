@@ -29,6 +29,13 @@ import {
 
 import type { AiRouter } from "../ai/router";
 import { regenerateGreeting } from "../flows/greetings";
+import {
+  createPromptPipelineDeps,
+  submitPrompt,
+  type PromptEmit,
+  type PromptSubmitResult,
+} from "../flows/prompt-pipeline";
+import { createMemoryImageQueue } from "../queue/queue";
 
 import type { GameHub } from "../game/hub";
 import type { PlayerRow, Repository, TeamRow } from "../repo/repository";
@@ -38,7 +45,15 @@ import { gameRoom, gmRoom, presenterRoom, roomsForIdentity, teamRoom, type WsIde
 /** Standard ack shape for every client→server call. */
 export type Ack<T = Record<string, unknown>> =
   | ({ ok: true } & T)
-  | { ok: false; error: string; code?: string; reason?: string; count?: number };
+  | {
+      ok: false;
+      error: string;
+      code?: string;
+      reason?: string;
+      count?: number;
+      exampleFix?: string;
+      remainingMs?: number;
+    };
 
 function ackOk(ack: unknown, payload: Record<string, unknown> = {}): void {
   if (typeof ack === "function") (ack as (res: Ack) => void)({ ok: true, ...payload });
@@ -58,6 +73,59 @@ function ackFailReason(
 ): void {
   if (typeof ack === "function") {
     (ack as (res: Ack) => void)({ ok: false, error, code, reason, ...(count !== undefined ? { count } : {}) });
+  }
+}
+
+/** Map a typed PromptSubmitResult onto the player:submitPrompt ack.
+ *  Codes: phase_ended/before_theme/kicked, cooldown (+remainingMs),
+ *  card_full, too_many_inflight, validation (+reason/exampleFix),
+ *  moderation, ai_unavailable. */
+function mapSubmitAck(ack: unknown, result: PromptSubmitResult): void {
+  if (result.ok) {
+    ackOk(ack, { itemId: result.itemId });
+    return;
+  }
+  if (typeof ack !== "function") return;
+  const reply = ack as (res: Ack) => void;
+  switch (result.stage) {
+    case "phase":
+      reply({ ok: false, error: result.error, code: result.code, reason: result.code });
+      return;
+    case "cooldown":
+      reply({
+        ok: false,
+        error: `Slow down — try again in ${Math.max(1, Math.ceil(result.remainingMs / 1000))}s`,
+        code: "cooldown",
+        reason: "cooldown",
+        remainingMs: result.remainingMs,
+      });
+      return;
+    case "card_full":
+      reply({ ok: false, error: "This card is full — no room for more stickers", code: "card_full", reason: "card_full" });
+      return;
+    case "too_many_inflight":
+      reply({
+        ok: false,
+        error: "You have too many stickers in progress — wait for one to finish",
+        code: "too_many_inflight",
+        reason: "too_many_inflight",
+      });
+      return;
+    case "validation":
+      reply({
+        ok: false,
+        error: result.reason,
+        code: "validation",
+        reason: result.reason,
+        ...(result.exampleFix ? { exampleFix: result.exampleFix } : {}),
+      });
+      return;
+    case "moderation":
+      reply({ ok: false, error: result.reason, code: "moderation", reason: result.reason });
+      return;
+    case "ai_unavailable":
+      reply({ ok: false, error: result.reason, code: "ai_unavailable", reason: "ai_unavailable" });
+      return;
   }
 }
 
@@ -170,6 +238,14 @@ function emitGreetingUpdated(
 export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repository, ai?: AiRouter): void {
   io.use(socketAuthMiddleware(repo));
 
+  // Prompt pipeline deps — built ONCE per server: the cooldown map and the
+  // image queue are process-wide state. Cooldowns are in-memory only, so a
+  // server restart resets them (documented in prompt-pipeline.ts). Per-call
+  // code spreads `{ ...pipelineDeps, emit }` to attach the socket emitter.
+  const pipelineDeps = ai
+    ? createPromptPipelineDeps({ hub, repo, ai, queue: createMemoryImageQueue() })
+    : null;
+
   // playerId → live sockets (kick evicts ALL of a victim's sockets in the game).
   const playerSockets = new Map<string, Set<Socket>>();
 
@@ -269,8 +345,12 @@ export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repositor
     });
 
     // ---------------------------------------------------------------------
-    // player:submitPrompt — validated, then run through the hub's guarded
-    // transition (phase guard + cutoff live in the state machine).
+    // player:submitPrompt — cheap zod + word-count pre-filter here, then the
+    // prompt pipeline runs EVERYTHING else (phase/cutoff via the hub guard,
+    // cooldown, card capacity, in-flight cap, AI validation + moderation).
+    // The pipeline is the ONE owner of Item rows + item events; this handler
+    // only wires its emit callback to Socket.IO and maps the typed result
+    // onto the ack.
     // ---------------------------------------------------------------------
     socket.on("player:submitPrompt", async (raw: unknown, ack?: unknown) => {
       const identity = data.identity;
@@ -299,21 +379,39 @@ export function registerSocketHandlers(io: Server, hub: GameHub, repo: Repositor
         );
         return;
       }
-      try {
-        // Kicked players must not be able to mutate the game even if their
-        // socket survived (or re-connected before eviction).
-        if (await hub.isKicked(identity.playerId)) {
-          ackFailReason(ack, "kicked", "you were removed from this game", "kicked");
+      if (!pipelineDeps) {
+        ackFail(ack, "ai_unavailable", "AI router not wired into this server");
+        return;
+      }
+      // Kicked players must not be able to mutate the game even if their
+      // socket survived (or re-connected before eviction).
+      if (await hub.isKicked(identity.playerId)) {
+        ackFailReason(ack, "kicked", "you were removed from this game", "kicked");
+        return;
+      }
+      // Emit callback: item:pending goes to the TEAM room (hub-stamped
+      // envelope); owner-only events (item:rejected / item:failed) go direct
+      // to ALL of the owning player's live sockets — never the team room.
+      const emit: PromptEmit = (event, payload, opts) => {
+        const enveloped = { ...hub.stamp(identity.gameId), ...payload };
+        if (opts?.toPlayerOnly) {
+          const sockets = playerSockets.get(opts.toPlayerOnly);
+          if (sockets && sockets.size > 0) {
+            for (const s of sockets) s.emit(event, enveloped);
+          } else {
+            socket.emit(event, enveloped);
+          }
           return;
         }
-        const result = await hub.applyEvent(identity.gameId, {
-          type: "player:submitPrompt",
-          playerId: identity.playerId,
-          text: parsed.data.text,
-          now: Date.now(),
-        });
-        if (result.ok) ackOk(ack);
-        else ackFailReason(ack, "rejected", result.reason, result.reason);
+        io.to(teamRoom(identity.gameId, identity.teamId)).emit(event, enveloped);
+      };
+      try {
+        const result = await submitPrompt(
+          { ...pipelineDeps, emit },
+          { gameId: identity.gameId, playerId: identity.playerId },
+          parsed.data.text,
+        );
+        mapSubmitAck(ack, result);
       } catch (err) {
         ackFail(ack, "submit_failed", err instanceof Error ? err.message : "submit failed");
       }
