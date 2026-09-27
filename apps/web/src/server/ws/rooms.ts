@@ -31,8 +31,15 @@ export type WsIdentity =
   | { role: "gm"; gameId: string; code: string }
   | { role: "presenter"; gameId: string; code: string };
 
-/** Rooms a socket with the given identity should be a member of. */
-export function roomsForIdentity(identity: WsIdentity): string[] {
+/**
+ * Rooms a socket with the given identity should be a member of.
+ *
+ * `teamIds` (optional): for GM/presenter identities the caller passes the
+ * game's team ids so the GM console / presenter board also receive the
+ * per-team room events (item:pending, item:ready, …) for their live card
+ * previews. Players never pass it — they only ever belong to ONE team.
+ */
+export function roomsForIdentity(identity: WsIdentity, teamIds?: string[]): string[] {
   const rooms = [gameRoom(identity.gameId)];
   if (identity.role === "player") {
     rooms.push(teamRoom(identity.gameId, identity.teamId));
@@ -41,8 +48,10 @@ export function roomsForIdentity(identity: WsIdentity): string[] {
     rooms.push(playerRoom(identity.gameId, identity.playerId));
   } else if (identity.role === "gm") {
     rooms.push(gmRoom(identity.gameId));
+    for (const teamId of teamIds ?? []) rooms.push(teamRoom(identity.gameId, teamId));
   } else {
     rooms.push(presenterRoom(identity.gameId));
+    for (const teamId of teamIds ?? []) rooms.push(teamRoom(identity.gameId, teamId));
   }
   return rooms;
 }

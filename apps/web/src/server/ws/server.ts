@@ -296,7 +296,9 @@ export function registerSocketHandlers(
   // this codebase — when it lands it must call layoutDebouncer.schedule here
   // too so the card re-flows after an item leaves.
   const layoutEmit: LayoutEmit = (event, payload, ctx) => {
-    const enveloped = { ...hub.stamp(ctx.gameId), ...payload };
+    // teamId is added for GM/presenter routing (the payload itself is team-
+    // agnostic; passthrough schema keeps the extra field on players' sockets).
+    const enveloped = { ...hub.stamp(ctx.gameId), teamId: ctx.teamId, ...payload };
     for (const room of [
       teamRoom(ctx.gameId, ctx.teamId),
       presenterRoom(ctx.gameId),
@@ -313,7 +315,8 @@ export function registerSocketHandlers(
   // item:failed → hub-stamped direct emit to ALL of the owner's live sockets
   // (owner offline → skipped; the state is visible on the next sync:full).
   queueEmit = (event, payload, ctx) => {
-    const enveloped = { ...hub.stamp(ctx.gameId), ...payload };
+    // teamId is added for GM/presenter routing (see layoutEmit above).
+    const enveloped = { ...hub.stamp(ctx.gameId), teamId: ctx.teamId, ...payload };
     if (event === "item:failed") {
       const sockets = playerSockets.get(ctx.playerId);
       if (!sockets) return;
@@ -389,7 +392,11 @@ export function registerSocketHandlers(
         }
         const identity: WsIdentity = { role: payload.role, gameId: game.id, code: game.code };
         data.identity = identity;
-        const rooms = roomsForIdentity(identity);
+        // GM/presenter also join every team room so per-team events
+        // (item:pending / item:ready) reach the console/board previews.
+        // layout:updated already targets the gm/presenter rooms explicitly.
+        const teamIds = (await repo.listTeams(game.id)).map((t) => t.id);
+        const rooms = roomsForIdentity(identity, teamIds);
         for (const room of rooms) void socket.join(room);
         ackOk(ack, { identity, rooms });
         const sync = await buildSyncFull(hub, repo, game.id, identity);
