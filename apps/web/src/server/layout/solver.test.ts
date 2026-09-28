@@ -179,6 +179,73 @@ describe("solveLayout — text zone reservation", () => {
   });
 });
 
+describe("solveLayout — sizing policy (coverage-proportional targets)", () => {
+  /** Unrotated display width of a placement as a fraction of the card width. */
+  const widthPct = (p: Placement, item: LayoutItem): number =>
+    (item.imgW * p.scale * K) / card.w;
+
+  it("1 item → display width ≈ 75–85% of the card width", () => {
+    const item = mkItem("solo");
+    const res = solve([item], 7);
+    expect(res.placements).toHaveLength(1);
+    const w = widthPct(res.placements[0]!, item);
+    expect(w).toBeGreaterThanOrEqual(0.75);
+    expect(w).toBeLessThanOrEqual(0.85);
+  });
+
+  it("3 items → each clearly smaller than the solo item; 5 smaller again", () => {
+    for (const n of [3, 5]) {
+      const its = items(n, (i) => 0.9 - i * 0.1);
+      const res = solve(its, 11);
+      expect(res.placements).toHaveLength(n);
+      const avgW =
+        its.reduce(
+          (s, it) =>
+            s +
+            widthPct(
+              res.placements.find((p) => p.itemId === it.id)!,
+              it,
+            ),
+          0,
+        ) / n;
+      // Solo target ≈ 80% width; n=3 → ~sqrt(0.5/3) ≈ 41%; n=5 → ~32%.
+      expect(avgW).toBeLessThan(n === 3 ? 0.55 : 0.42);
+      expect(avgW).toBeGreaterThan(0.2);
+    }
+  });
+
+  it("average display width decreases monotonically as n grows 1→2→3→5→10", () => {
+    const avgs: number[] = [];
+    for (const n of [1, 2, 3, 5, 10]) {
+      const its = items(n, (i) => 0.5 + 0.05 * (i % 4));
+      const res = solve(its, 99);
+      expect(res.placements).toHaveLength(n);
+      avgs.push(
+        its.reduce(
+          (s, it) =>
+            s +
+            widthPct(res.placements.find((p) => p.itemId === it.id)!, it),
+          0,
+        ) / n,
+      );
+    }
+    for (let i = 1; i < avgs.length; i++) {
+      expect(avgs[i]!).toBeLessThan(avgs[i - 1]!);
+    }
+  });
+
+  it("all n still pass checkLayout (n = 1, 2, 3, 5, 10)", () => {
+    for (const n of [1, 2, 3, 5, 10]) {
+      const its = items(n, (i) => 0.9 - (i * 7) % 70 / 100);
+      const res = solve(its, 1234 + n);
+      expect(res.placements).toHaveLength(n);
+      expect(
+        checkLayout(res.placements, its, { card, k: K, textZone: TEXT_ZONE }).ok,
+      ).toBe(true);
+    }
+  });
+});
+
 describe("solveLayout — determinism", () => {
   it("same seed → byte-identical placements JSON", () => {
     const its = items(7, (i) => 0.2 + 0.1 * i);

@@ -15,7 +15,11 @@
  *                "comfort distance" = 1.1 × sqrt(avg of the two AABB areas)
  *                are penalized proportionally to the shortfall.
  *  cover 0.15  — card coverage (fraction of a 24×24 sample grid inside any
- *                AABB) is penalized outside the 25–60% sweet spot band.
+ *                AABB) is penalized outside the target band. The band is
+ *                derived from the solver's sizing policy: lower bound
+ *                TOTAL_COVERAGE_TARGET − 10pp, upper bound
+ *                SOLO_ITEM_COVERAGE + 10pp, so coverage-proportional layouts
+ *                (solo ~65% target, multi-item ~50% target) score 0 here.
  *  hiera 0.15  — size hierarchy: Spearman-style rank correlation between
  *                visualWeight and display size; penalty = (1 − corr)/2, so
  *                heavy items being big scores 0 and inverted order scores ~1.
@@ -27,6 +31,7 @@
  */
 
 import type { Placement } from "@cardcrafters/shared";
+import { SOLO_ITEM_COVERAGE, TOTAL_COVERAGE_TARGET } from "@cardcrafters/shared";
 
 import {
   boxArea,
@@ -61,6 +66,14 @@ export interface ScoreContext {
 
 /** Coverage sampling grid resolution (per axis, over the card box). */
 const COVERAGE_GRID = 24;
+/**
+ * Coverage band aligned with the solver's sizing policy: lower bound 10pp
+ * under the multi-item total target, upper bound 10pp over the solo target.
+ * A solo item at its ~65% target and a multi-item layout at ~50% both sit
+ * inside the band (AABB-measured coverage ≈ the target area fraction).
+ */
+const COVERAGE_BAND_LO = TOTAL_COVERAGE_TARGET - 0.1;
+const COVERAGE_BAND_HI = SOLO_ITEM_COVERAGE + 0.1;
 
 const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
 
@@ -137,7 +150,7 @@ export function spacingTerm(
   return pairs === 0 ? 0 : clamp01(penalty / pairs);
 }
 
-/** Coverage outside the 25–60% band, measured on a fixed 24×24 grid. */
+/** Coverage outside the target band (~40–75%), measured on a 24×24 grid. */
 export function coverageTerm(
   placements: Placement[],
   items: Map<string, LayoutItem>,
@@ -165,8 +178,8 @@ export function coverageTerm(
     }
   }
   const cov = covered / total;
-  if (cov < 0.25) return (0.25 - cov) / 0.25;
-  if (cov > 0.6) return Math.min(1, (cov - 0.6) / 0.4);
+  if (cov < COVERAGE_BAND_LO) return (COVERAGE_BAND_LO - cov) / COVERAGE_BAND_LO;
+  if (cov > COVERAGE_BAND_HI) return Math.min(1, (cov - COVERAGE_BAND_HI) / (1 - COVERAGE_BAND_HI));
   return 0;
 }
 

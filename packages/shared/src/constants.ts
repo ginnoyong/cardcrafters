@@ -59,8 +59,26 @@ export const CARD_COORD_SPACE = 1000;
 export const SAFE_MARGIN_PCT = 4;
 /** Minimum item size as % of card width. */
 export const MIN_ITEM_SIZE_PCT = 6;
-/** Maximum item size as % of card width. */
-export const MAX_ITEM_SIZE_PCT = 45;
+/**
+ * Maximum item size as % of card width. Safety ceiling only — the real size
+ * driver is the coverage-proportional target (see SOLO_ITEM_COVERAGE /
+ * TOTAL_COVERAGE_TARGET in the solver). Raised from 45 so a solo item can
+ * grow toward "occupying the card" (65% card-area ≈ 80%+ width for a square
+ * sticker on the default 5:7 card).
+ */
+export const MAX_ITEM_SIZE_PCT = 85;
+/**
+ * Target fraction of the CARD AREA a single (solo) item should occupy —
+ * "as big as possible" while still leaving visible card margins.
+ */
+export const SOLO_ITEM_COVERAGE = 0.65;
+/**
+ * Target fraction of the card area shared by ALL items once several exist.
+ * The solver splits this across items proportionally to visualWeight, so the
+ * displayed total area stays roughly constant as items arrive and each item
+ * rescales down when a new one lands.
+ */
+export const TOTAL_COVERAGE_TARGET = 0.5;
 /** Max allowed pairwise overlap ratio between two items (0–1). */
 export const MAX_PAIRWISE_OVERLAP = 0.25;
 

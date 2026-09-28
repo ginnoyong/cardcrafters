@@ -22,6 +22,7 @@ import {
   safeMargin,
   scaleFor,
   scaleWindow,
+  sizeOk,
   TEXT_ZONE_PAD_FRAC,
   textOverlapOk,
   type Aabb,
@@ -85,6 +86,18 @@ describe("cardBox + sizing model", () => {
     const mid = scaleFor(item, card, K);
     expect(displayWidth(item, mid, K) / card.w).toBeGreaterThanOrEqual(MIN_ITEM_SIZE_PCT / 100);
     expect(displayWidth(item, mid, K) / card.w).toBeLessThanOrEqual(MAX_ITEM_SIZE_PCT / 100);
+  });
+});
+
+describe("size window (raised MAX_ITEM_SIZE_PCT = 85)", () => {
+  it("an ~80%-width solo item passes sizeOk; ~90% fails", () => {
+    const item = mkItem(); // 256px square sticker
+    // displayWidth = imgW × scale × k; k makes scale 1 ≈ 25% of min dim.
+    const scaleForPct = (pct: number) => (pct / 100) * card.w / (256 * K);
+    expect(sizeOk(item, scaleForPct(80), card, K)).toBe(true);
+    expect(sizeOk(item, scaleForPct(85), card, K)).toBe(true);
+    expect(sizeOk(item, scaleForPct(90), card, K)).toBe(false);
+    expect(sizeOk(item, scaleForPct(5), card, K)).toBe(false);
   });
 });
 
