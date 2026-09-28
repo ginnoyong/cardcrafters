@@ -8,8 +8,8 @@
  *      the theme and auto-generates each team's greeting (the console never
  *      emits gm:setTheme).
  *   2. Console: one FLIPPABLE card per team — front = the generated greeting
- *      (inline edit + regenerate) plus join status/roster, back = QR join
- *      code + copyable link.
+ *      (inline edit + regenerate), back = QR join code + copyable link. The
+ *      roster ("N joined" + green dots + kick buttons) sits BELOW the card.
  *   3. A single "Start building" button below the grid emits
  *      gm:approveGreetings once every team's greeting is ready; after BUILD
  *      starts it disappears.
@@ -30,7 +30,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import QRCode from "qrcode";
 
-import { MAX_TEAMS, MAX_TEAM_MEMBERS } from "@cardcrafters/shared";
+import { MAX_TEAMS } from "@cardcrafters/shared";
 
 import {
   createGameSocket,
@@ -97,7 +97,9 @@ function PhaseBadge({ phase, round }: { phase: string | null; round: number | nu
 }
 
 // ---------------------------------------------------------------------------
-// One flippable team card: front = greeting + roster, back = QR + join link.
+// One flippable team card: front = greeting, back = QR + join link.
+// The roster ("N joined" + one green dot per player + kick buttons) renders
+// below the flip container, inside the same grid cell wrapper.
 // ---------------------------------------------------------------------------
 
 function TeamFlipCard({
@@ -267,57 +269,57 @@ function TeamFlipCard({
                 {error}
               </p>
             ) : null}
-
-            <p className="cc-hint" aria-label={`team ${team.label} join status`}>
-              {members.length}/{MAX_TEAM_MEMBERS} joined
-            </p>
-            <div className="cc-dots" aria-hidden="true">
-              {Array.from({ length: MAX_TEAM_MEMBERS }, (_, i) => (
-                <span key={i} className={`cc-dot-chip${i < members.length ? " is-in" : ""}`} />
-              ))}
-            </div>
-
-            {members.length === 0 ? (
-              <p className="cc-hint">Nobody yet — share the QR!</p>
-            ) : (
-              <ul className="cc-player-list">
-                {members.map((m) => (
-                  <li key={m.id}>
-                    <span aria-hidden="true">{m.connected ? "●" : "○"}</span> {m.nickname}
-                    <button
-                      type="button"
-                      className="cc-btn cc-btn-small"
-                      aria-label={`kick ${m.nickname}`}
-                      onClick={() => onKick(m.id)}
-                    >
-                      Kick
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
           </div>
 
-          {/* BACK — QR + join link */}
+          {/* BACK — QR + join link. Height budget (see .cc-flip in globals.css):
+              QR 190 + url ~20 + copy button ~32 + paddings ≤ ~300px total. */}
           <div className="cc-flip-face cc-flip-back cc-card cc-qr-card">
             {qr ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={qr} alt={`QR code to join ${team.name}`} width={200} height={200} />
+              <img src={qr} alt={`QR code to join ${team.name}`} width={190} height={190} />
             ) : (
               <div className="cc-qr-placeholder" aria-hidden="true" />
             )}
             <p className="cc-join-url">{joinUrl}</p>
             <button
               type="button"
-              className="cc-btn"
+              className="cc-btn cc-btn-copy"
               onClick={copy}
               aria-label={`copy join link for ${team.name}`}
             >
               {copied ? "Copied ✓" : "Copy join link"}
             </button>
-            <p className="cc-hint">Scan to join this team (max {MAX_TEAM_MEMBERS} players)</p>
           </div>
         </div>
+      </div>
+
+      {/* Roster lives BELOW the flip card (moved out of the greeting face):
+          "{n} joined" plus one filled green dot per actual player, with a
+          compact Kick button per member. Data flow unchanged. */}
+      <div className="cc-roster" aria-label={`team ${team.label} roster`}>
+        <p className="cc-hint" aria-label={`team ${team.label} join status`}>
+          {members.length} joined
+        </p>
+        {members.length === 0 ? (
+          <p className="cc-hint">Nobody yet — share the QR!</p>
+        ) : (
+          <ul className="cc-player-list">
+            {members.map((m) => (
+              <li key={m.id}>
+                <span className="cc-dot-chip is-in" aria-hidden="true" />
+                <span aria-hidden="true">{m.connected ? "●" : "○"}</span> {m.nickname}
+                <button
+                  type="button"
+                  className="cc-btn cc-btn-small"
+                  aria-label={`kick ${m.nickname}`}
+                  onClick={() => onKick(m.id)}
+                >
+                  Kick
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   );

@@ -245,7 +245,11 @@ label {
 .cc-join-url {
   font-family: ui-monospace, monospace;
   font-size: 0.75rem;
-  word-break: break-all;
+  /* One line with ellipsis so the QR face fits without page scrolling. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
   margin: 0;
 }
 
@@ -295,10 +299,6 @@ label {
   margin: 0;
 }
 
-.cc-flip {
-  perspective: 1200px;
-}
-
 .cc-flip-inner {
   position: relative;
   transform-style: preserve-3d;
@@ -330,6 +330,53 @@ label {
 .cc-flip-head .cc-btn {
   flex: 0 0 auto;
   min-width: var(--tap);
+}
+
+/* Roster below the flip card: compact rows + compact Kick buttons. */
+.cc-roster {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.cc-roster .cc-player-list li {
+  min-height: 0;
+  padding: 0.15rem 0;
+}
+
+.cc-roster .cc-btn {
+  padding: 0.15rem 0.5rem;
+  min-height: 0;
+  font-size: 0.75rem;
+}
+
+/* QR back face must fit without scrolling. Height budget: card padding
+   (2×0.75rem = 24) + QR 190 + gap 8 + url ~20 + gap 8 + button ~30 ≈ 280px,
+   so a 300px min-height covers it (1280px viewport, 2-col grid: no page
+   scroll — each grid cell is ~530px wide, card ~300px tall). */
+.cc-flip {
+  perspective: 1200px;
+  min-height: 300px;
+}
+
+.cc-qr-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem;
+}
+
+.cc-qr-card img {
+  width: 190px;
+  height: 190px;
+}
+
+/* Low-profile, compact Copy link button (full width, small footprint). */
+.cc-btn-copy {
+  width: 100%;
+  padding: 0.3rem 0.75rem;
+  min-height: 0;
+  font-size: 0.8rem;
 }
 
 /* Greeting text + highlighted greeting card (player/presenter). */
@@ -653,7 +700,7 @@ label {
   }
 }
 
-/* Roster presence dots (12 per team card). */
+/* Roster presence dots (one filled dot per actual player, below the card). */
 .cc-dots {
   display: flex;
   flex-wrap: wrap;
@@ -685,10 +732,12 @@ label {
   gap: 0.5rem;
 }
 
-/* Prominent full-width Start control below the team grid. */
+/* Prominent full-width Start control below the team grid. Extra top margin
+   keeps clear breathing room between the team-cards grid and Start. */
 .cc-start {
   display: grid;
   gap: 0.5rem;
+  margin-top: 2rem;
 }
 
 .cc-btn-start {
