@@ -11,8 +11,11 @@ import type { ClientItem, GameSnapshot, MyItemEvent } from "@/lib/store";
  * All of THIS player's items: the team's rows filtered STRICTLY to items I own
  * (row.playerId === myPlayerId) UNION the owner ledger (myItems — entries
  * whose rows haven't arrived / whose owner-only detail the snapshot rows
- * lack). Ledger fields (status, reason, exampleFix) WIN over row fields —
- * owner-only events are always the freshest authority.
+ * lack). Merge precedence: a PENDING ledger entry never downgrades a
+ * non-pending row (a lost item:ready echo must not re-stick the chip at
+ * "drawing…" forever), while a terminal ledger entry (rejected/failed) always
+ * wins — its owner-only reason/exampleFix is intel the snapshot row can
+ * never carry.
  *
  * Ledger presence is reliable ownership evidence because the reducer only
  * ever registers MY items there (item:pending/item:ready echoes are gated by
@@ -49,7 +52,12 @@ export function selectMyItems(snapshot: GameSnapshot, myTeamId: string, myPlayer
       continue;
     }
     const patch: Partial<ClientItem> = {};
-    if (entry.status !== existing.status) patch.status = entry.status;
+    // Status precedence: a PENDING ledger entry never downgrades a non-pending
+    // row (stale pending echo vs READY row → the row wins, the chip unsticks);
+    // a terminal ledger entry (rejected/failed) beats ANY row status — its
+    // owner-only reason/exampleFix must survive; both pending → either.
+    const ledgerWins = entry.status !== "pending" || existing.status === "pending";
+    if (ledgerWins && entry.status !== existing.status) patch.status = entry.status;
     if (entry.reason != null && entry.reason !== existing.reason) patch.reason = entry.reason;
     if (entry.exampleFix != null && entry.exampleFix !== existing.exampleFix) patch.exampleFix = entry.exampleFix;
     merged.set(itemId, { ...existing, ...patch });

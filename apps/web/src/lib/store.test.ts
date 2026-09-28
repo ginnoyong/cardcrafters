@@ -476,3 +476,133 @@ describe("storeReducer — itemRemoved", () => {
     expect(teamA.layout!.placements).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// selectMyItems merge precedence (stuck "drawing…" chip)
+// ---------------------------------------------------------------------------
+
+describe("selectMyItems merge precedence (stuck drawing chip)", () => {
+  /** Snapshot with one READY row attributed to me (server shape: uppercase). */
+  function readyRowSnapshot(itemId: string, prompt: string): SyncFullEvent {
+    return baseSnapshot({
+      teams: [
+        {
+          id: TEAM_A,
+          name: "Team A",
+          label: "A",
+          memberCount: 1,
+          members: [{ id: PLAYER_ME, nickname: "Me", connected: true }],
+          itemCount: 1,
+          greeting: { text: "", status: null },
+          items: [
+            {
+              id: itemId,
+              promptRaw: prompt,
+              nickname: "Me",
+              playerId: PLAYER_ME,
+              status: "READY",
+              imageUrl: `/static/items/${itemId}.png`,
+              width: 100,
+              height: 100,
+            } as unknown as never,
+          ],
+          layout: null,
+          activity: [],
+        },
+      ],
+    });
+  }
+
+  it("stale PENDING ledger + READY row → placed/ready, never drawing (direct call)", () => {
+    // Direct selectMyItems call (no normalizeSyncFull ledger rebuild in the
+    // path): a stale pending LEDGER entry must never downgrade a READY row —
+    // otherwise the chip sticks at "drawing…" until the round ends.
+    const snap = {
+      ...baseSnapshot({
+        teams: [
+          {
+            id: TEAM_A,
+            name: "Team A",
+            label: "A",
+            memberCount: 1,
+            members: [{ id: PLAYER_ME, nickname: "Me", connected: true }],
+            itemCount: 1,
+            greeting: { text: "", status: null },
+            items: [
+              {
+                id: "i1",
+                promptRaw: "red balloon",
+                nickname: "Me",
+                playerId: PLAYER_ME,
+                status: "ready",
+              } as unknown as GameSnapshot["teams"][number]["items"][number],
+            ],
+            layout: null,
+            activity: [],
+          },
+        ],
+      }),
+      myItems: { i1: { promptRaw: "red balloon", status: "pending", round: 1 } },
+    } as GameSnapshot;
+    const mine = selectMyItems(snap, TEAM_A, PLAYER_ME);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ id: "i1", status: "ready" });
+  });
+
+  it("terminal REJECTED ledger + READY row → rejected with reason (owner-only detail survives)", () => {
+    // Reverse direction: the ledger's terminal owner-only intel (reason /
+    // exampleFix) must still WIN over any row — the row can never carry it.
+    const snap = {
+      ...readyRowSnapshot("i2", "happiness"),
+      myItems: {
+        i2: {
+          promptRaw: "happiness",
+          status: "rejected" as const,
+          reason: "feelings are not drawable",
+          exampleFix: "a statue of a person hugging",
+          round: 1,
+        },
+      },
+    } as GameSnapshot;
+    const mine = selectMyItems(snap, TEAM_A, PLAYER_ME);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({
+      id: "i2",
+      status: "rejected",
+      reason: "feelings are not drawable",
+      exampleFix: "a statue of a person hugging",
+    });
+  });
+
+  it("both PENDING (ledger + row) → pending either way (no behavior change)", () => {
+    const snap = {
+      ...readyRowSnapshot("i3", "cat"),
+      teams: [
+        {
+          id: TEAM_A,
+          name: "Team A",
+          label: "A",
+          memberCount: 1,
+          members: [{ id: PLAYER_ME, nickname: "Me", connected: true }],
+          itemCount: 1,
+          greeting: { text: "", status: null },
+          items: [
+            {
+              id: "i3",
+              promptRaw: "cat",
+              nickname: "Me",
+              playerId: PLAYER_ME,
+              status: "pending",
+            } as unknown as GameSnapshot["teams"][number]["items"][number],
+          ],
+          layout: null,
+          activity: [],
+        },
+      ],
+      myItems: { i3: { promptRaw: "cat", status: "pending", round: 1 } },
+    } as GameSnapshot;
+    const mine = selectMyItems(snap, TEAM_A, PLAYER_ME);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ id: "i3", status: "pending" });
+  });
+});

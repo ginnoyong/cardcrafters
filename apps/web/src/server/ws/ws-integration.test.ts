@@ -17,6 +17,7 @@ import { createAiRouter, type AiRouter } from "../ai/router";
 import { DEFAULT_ITEMS_DIR } from "../flows/item-image";
 import { createServer, type CardCraftersServer } from "../../../server";
 import { MemoryRepo } from "../repo/memory-repo";
+import { normalizeSyncFull, type SyncFullEvent } from "../../lib/store";
 
 let srv: CardCraftersServer;
 let repo: MemoryRepo;
@@ -29,6 +30,9 @@ let joinTokenA: string;
 let joinTokenB: string;
 let teamAId: string;
 let teamBId: string;
+// Real PNGs the mock image handler writes under the Next public dir —
+// removed in afterEach so the tests leave no artifacts behind.
+const writtenFiles: string[] = [];
 
 beforeEach(async () => {
   // Force the in-memory image queue even when the dev .env exports REDIS_URL
@@ -53,6 +57,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await srv.close();
+  for (const f of writtenFiles) await rm(f, { force: true });
+  writtenFiles.length = 0;
 });
 function connect(auth: Record<string, unknown> = {}): Socket {
   return io(`http://127.0.0.1:${port}`, {
@@ -609,3 +615,187 @@ describe("greeting handlers (gm:updateGreeting / gm:regenGreeting)", () => {
     gm.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Reconnect / refresh state preservation — regression tests for the bug where
+// a page refresh (disconnect → reconnect → join → sync:full) cleared cards on
+// GM and player UIs. Round 1 covers a mid-build refresh; round 2 covers a
+// refresh after gm:newRound. Both assert the SERVER payload (buildSyncFull)
+// AND the client reducer (normalizeSyncFull) keep items + layout.
+// ---------------------------------------------------------------------------
+
+describe("reconnect state preservation (refresh regression)", () => {
+  /** Drive the game to BUILD with 2 ready items via the exact UI flow. */
+  async function buildToReady(player: Socket, player2: Socket) {
+    const gm = connect({ role: "gm" });
+    await emitAck(gm, "join", { role: "gm", joinToken: gameCode });
+
+    // approveGreetings moves GREETINGS → BUILD
+    const approve = await emitAck<{ ok: boolean; phase?: string }>(gm, "gm:approveGreetings", {});
+    if (!approve.ok) throw new Error(`approveGreetings failed: ${JSON.stringify(approve)}`);
+
+    // listen for ready + layout on the GM socket (GM joins every team room)
+    const readyA = waitFor<{ itemId: string }>(gm, "item:ready", 10_000);
+    const readyB = waitFor<{ itemId: string }>(gm, "item:ready", 10_000);
+    const layoutPromise = waitFor<{ version: number; placements: unknown[] }>(gm, "layout:updated", 10_000);
+
+    const ackA = await emitAck<{ ok: boolean; itemId?: string }>(player, "player:submitPrompt", {
+      text: "red balloon",
+    });
+    if (!ackA.ok) throw new Error(`submit A failed: ${JSON.stringify(ackA)}`);
+    const ackB = await emitAck<{ ok: boolean; itemId?: string }>(player2, "player:submitPrompt", {
+      text: "blue cake",
+    });
+    if (!ackB.ok) throw new Error(`submit B failed: ${JSON.stringify(ackB)}`);
+
+    const [rA, rB, layout] = await Promise.all([readyA, readyB, layoutPromise]);
+    writtenFiles.push(
+      path.join(DEFAULT_ITEMS_DIR, `${rA.itemId}.png`),
+      path.join(DEFAULT_ITEMS_DIR, `${rB.itemId}.png`),
+    );
+    gm.close();
+    return { itemIds: [rA.itemId, rB.itemId], layoutVersion: layout.version, placementCount: layout.placements.length };
+  }
+
+  it("(r1) player disconnect → reconnect → sync:full keeps items + layout (server + client normalize)", async () => {
+    // Theme moves LOBBY → GREETINGS so players may join before approval.
+    await hub.applyEvent(gameId, { type: "gm:setTheme", theme: "Balloon party", now: Date.now() });
+
+    // 1. Player joins (the join-link flow: joinToken + nickname).
+    const p1 = connect();
+    const p1Ack = await emitAck<{ ok: boolean; identity: { playerId: string; sessionToken: string; teamId: string } }>(
+      p1,
+      "join",
+      { role: "player", joinToken: joinTokenA, nickname: "Maya" },
+    );
+    expect(p1Ack.ok).toBe(true);
+    expect(p1Ack.identity.teamId).toBe(teamAId);
+
+    // 2. GM joins, approve greetings, submit 2 prompts (2 players — 5s
+    // per-player cooldown), wait READY + layout.
+    const p2helper = connect();
+    const p2helperAck = await emitAck<{ ok: boolean }>(p2helper, "join", {
+      role: "player",
+      joinToken: joinTokenA,
+      nickname: "Sam",
+    });
+    expect(p2helperAck.ok).toBe(true);
+    const built = await buildToReady(p1, p2helper);
+    expect(built.itemIds).toHaveLength(2);
+    expect(built.placementCount).toBeGreaterThan(0);
+
+    // 3. REFRESH: disconnect the player socket, reconnect a FRESH socket.
+    const disconnect = new Promise<void>((resolve) => p1.on("disconnect", () => resolve()));
+    p1.close();
+    await disconnect;
+
+    const p2 = connect({ sessionToken: p1Ack.identity.sessionToken });
+    const syncPromise = waitFor<SyncFullEvent>(p2, "sync:full");
+    const rejoin = await emitAck<{ ok: boolean; identity: { playerId: string } }>(p2, "join", {
+      role: "player",
+      sessionToken: p1Ack.identity.sessionToken,
+    });
+    expect(rejoin.ok).toBe(true);
+    expect(rejoin.identity.playerId).toBe(p1Ack.identity.playerId);
+
+    // 4. RAW server payload inspection — buildSyncFull evidence.
+    const raw = await syncPromise;
+    const teamA = (raw.teams as unknown as Array<Record<string, unknown>>).find((t) => t.id === teamAId)!;
+    expect(teamA.items).toHaveLength(2); // ← SERVER evidence
+    expect(teamA.layout).not.toBeNull();
+
+    // 5. CLIENT reducer evidence — normalizeSyncFull with myPlayerId.
+    const snapshot = normalizeSyncFull(raw, {}, p1Ack.identity.playerId);
+    const clientTeam = snapshot.teams.find((t) => t.id === teamAId)!;
+    expect(clientTeam.items).toHaveLength(2); // ← CLIENT evidence
+    expect(clientTeam.items.every((i) => i.status === "ready")).toBe(true);
+    expect(clientTeam.layout).not.toBeNull();
+    expect(clientTeam.layout!.placements.length).toBe(built.placementCount);
+
+    // 6. Ledger rebuild: the OWNER's rows must re-enter myItems (Sam's must
+    // not — ownership via row.playerId).
+    expect(Object.keys(snapshot.myItems).sort()).toEqual([built.itemIds[0]].sort());
+
+    p2helper.close();
+    p2.close();
+  }, 25_000);
+
+  it("(r2) refresh after gm:newRound → sync:full keeps round-2 items + layout", async () => {
+    await hub.applyEvent(gameId, { type: "gm:setTheme", theme: "Balloon party", now: Date.now() });
+
+    const p1 = connect();
+    const p1Ack = await emitAck<{ ok: boolean; identity: { playerId: string; sessionToken: string } }>(
+      p1,
+      "join",
+      { role: "player", joinToken: joinTokenA, nickname: "Maya" },
+    );
+    expect(p1Ack.ok).toBe(true);
+    const p2helper = connect();
+    await emitAck(p2helper, "join", { role: "player", joinToken: joinTokenA, nickname: "Sam" });
+    await buildToReady(p1, p2helper);
+
+    // Drive to RESULTS then advance to round 2 (hub-level events, like the
+    // GM console emits them).
+    for (const event of [
+      { type: "gm:stopBuild", now: Date.now() },
+      { type: "gm:stopScoring", now: Date.now() },
+      { type: "gm:pickWinner", teamId: teamAId, now: Date.now() },
+      { type: "reveal:ack", now: Date.now() },
+      { type: "gm:newRound", now: Date.now() },
+    ] as const) {
+      const r = await hub.applyEvent(gameId, event);
+      if (!r.ok) throw new Error(`${event.type} failed: ${r.reason}`);
+    }
+    hub.shutdown(); // clear armed timers (untimed config anyway)
+    await hub.applyEvent(gameId, { type: "gm:setTheme", theme: "Round two", now: Date.now() });
+    const approve = await hub.applyEvent(gameId, { type: "gm:approveGreetings", now: Date.now() });
+    if (!approve.ok) throw new Error(`approve failed: ${approve.reason}`);
+    expect(approve.state.round).toBe(2);
+
+    // Round-2 submission + ready (from Maya this time; the per-player submit
+    // cooldown spans rounds — retry after remainingMs when still cooling).
+    const readyPromise = waitFor<{ itemId: string }>(p1, "item:ready", 10_000);
+    let submit: { ok: boolean; itemId?: string; remainingMs?: number; reason?: string } | null = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      submit = await emitAck<{ ok: boolean; itemId?: string; remainingMs?: number; reason?: string }>(
+        p1,
+        "player:submitPrompt",
+        { text: "green frog" },
+      );
+      if (submit.ok) break;
+      if (submit.reason !== "cooldown") break;
+      const remaining = submit.remainingMs ?? 5_000;
+      await new Promise((r) => setTimeout(r, remaining + 250));
+    }
+    if (!submit!.ok) throw new Error(`round-2 submit failed: ${JSON.stringify(submit!)}`);
+    const ready = await readyPromise;
+    writtenFiles.push(path.join(DEFAULT_ITEMS_DIR, `${ready.itemId}.png`));
+    // Wait for the round-2 layout to commit (1.5s trailing-edge debounce) —
+    // refreshing before it fires would legitimately see layout: null.
+    await waitFor<{ version: number }>(p1, "layout:updated", 10_000);
+
+    // Refresh: disconnect → reconnect → sync:full.
+    const disconnect = new Promise<void>((resolve) => p1.on("disconnect", () => resolve()));
+    p1.close();
+    p2helper.close();
+    await disconnect;
+
+    const p2 = connect({ sessionToken: p1Ack.identity.sessionToken });
+    const syncPromise = waitFor<SyncFullEvent>(p2, "sync:full");
+    await emitAck(p2, "join", { role: "player", sessionToken: p1Ack.identity.sessionToken });
+    const raw = await syncPromise;
+    expect(raw.round).toBe(2);
+    const teamA = (raw.teams as unknown as Array<Record<string, unknown>>).find((t) => t.id === teamAId)!;
+    expect((teamA.items as unknown[]).length).toBe(1);
+    expect(teamA.layout).not.toBeNull();
+
+    const snapshot = normalizeSyncFull(raw, {}, p1Ack.identity.playerId);
+    const clientTeam = snapshot.teams.find((t) => t.id === teamAId)!;
+    expect(clientTeam.items).toHaveLength(1);
+    expect(clientTeam.items[0]!.status).toBe("ready");
+    expect(clientTeam.layout).not.toBeNull();
+    expect(Object.keys(snapshot.myItems)).toEqual([ready.itemId]);
+    p2.close();
+  }, 40_000);
+});
+
