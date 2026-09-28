@@ -357,6 +357,43 @@ describe.skipIf(!DB_OK)("PrismaRepo (postgres)", () => {
     });
   });
 
+  it("layout state: stale version rejected, equal idempotent, newer ok (memory-repo parity)", async () => {
+    await withGame(async (gameId) => {
+      const team = await mkTeam(gameId, "T");
+      const placements = [{ itemId: "i1", x: 1, y: 2, scale: 1, rotation: 0, zIndex: 0 }];
+      await repo.upsertLayoutState(team.id, 1, { version: 5, placements, source: "solver" });
+
+      // STALE: version < current → RepoError (the engine relies on the throw,
+      // same contract as memory-repo), and the stored row is untouched.
+      await expect(
+        repo.upsertLayoutState(team.id, 1, { version: 4, placements, source: "stale" }),
+      ).rejects.toThrow(/stale layout write: version 4 < current 5/);
+      const afterStale = await repo.getLayoutState(team.id, 1);
+      expect(afterStale!.version).toBe(5);
+      expect(afterStale!.source).toBe("solver");
+
+      // EQUAL: idempotent upsert (same version may re-commit its layout).
+      const equalPlacements = [{ itemId: "i2", x: 9, y: 9, scale: 1, rotation: 0, zIndex: 1 }];
+      const eq = await repo.upsertLayoutState(team.id, 1, {
+        version: 5,
+        placements: equalPlacements,
+        source: "manual",
+      });
+      expect(eq.version).toBe(5);
+      expect(eq.placements).toEqual(equalPlacements);
+      expect(eq.source).toBe("manual");
+
+      // NEWER: writes through.
+      const newer = await repo.upsertLayoutState(team.id, 1, {
+        version: 6,
+        placements,
+        source: "solver",
+      });
+      expect(newer.version).toBe(6);
+      expect((await repo.getLayoutState(team.id, 1))!.version).toBe(6);
+    });
+  });
+
   it("ai calls: insert + per-task cost summary, no cross-game leakage", async () => {
     await withGame(async (gameId) => {
       await repo.insertAiCall({ gameId, task: "validate", model: "m1", status: "OK", latencyMs: 100, costUsd: 0.01 });

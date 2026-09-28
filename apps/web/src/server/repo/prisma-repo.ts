@@ -514,28 +514,48 @@ export class PrismaRepo implements Repository {
   // -- Layout ----------------------------------------------------------------
 
   async upsertLayoutState(teamId: string, round: number, patch: LayoutStatePatch): Promise<LayoutStateRow> {
+    // Read-compare-upsert in a transaction, mirroring memory-repo: the engine
+    // RELIES on a stale write throwing (a stale layout must never overwrite a
+    // newer one — e.g. a delayed solver result racing a manual edit).
+    //   version <  existing → RepoError (same message as memory-repo)
+    //   version == existing → idempotent upsert
+    //   version >  existing → write
+    // The transaction serializes the read against concurrent writers (and the
+    // final upsert is still guarded by the [teamId, round] unique key).
     try {
-      const l = await this.prisma.layoutState.upsert({
-        where: { teamId_round: { teamId, round } },
-        create: {
-          teamId,
-          round,
-          version: patch.version,
-          placements: patch.placements as unknown as Prisma.InputJsonValue,
-          greetingStyle: (patch.greetingStyle ?? undefined) as Prisma.InputJsonValue | undefined,
-          source: patch.source,
-        },
-        update: {
-          version: patch.version,
-          placements: patch.placements as unknown as Prisma.InputJsonValue,
-          ...(patch.greetingStyle !== undefined
-            ? { greetingStyle: patch.greetingStyle as Prisma.InputJsonValue }
-            : {}),
-          source: patch.source,
-        },
+      return await this.prisma.$transaction(async (tx) => {
+        const existing = await tx.layoutState.findUnique({
+          where: { teamId_round: { teamId, round } },
+        });
+        if (existing && patch.version < existing.version) {
+          throw new RepoError(
+            `stale layout write: version ${patch.version} < current ${existing.version}`,
+          );
+        }
+        const l = await tx.layoutState.upsert({
+          where: { teamId_round: { teamId, round } },
+          create: {
+            teamId,
+            round,
+            version: patch.version,
+            placements: patch.placements as unknown as Prisma.InputJsonValue,
+            greetingStyle: (patch.greetingStyle ?? undefined) as Prisma.InputJsonValue | undefined,
+            source: patch.source,
+          },
+          update: {
+            version: patch.version,
+            placements: patch.placements as unknown as Prisma.InputJsonValue,
+            ...(patch.greetingStyle !== undefined
+              ? { greetingStyle: patch.greetingStyle as Prisma.InputJsonValue }
+              : {}),
+            source: patch.source,
+          },
+        });
+        return this.mapLayout(l);
       });
-      return this.mapLayout(l);
     } catch (e) {
+      // The stale-version RepoError is INTENTIONAL — never wrap it.
+      if (e instanceof RepoError) throw e;
       throw wrap(e);
     }
   }

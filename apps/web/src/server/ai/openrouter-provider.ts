@@ -43,6 +43,18 @@ interface ChatCompletionResponse {
   error?: { message?: string };
 }
 
+/** POST {baseUrl}/images response (OpenRouter unified image API). */
+interface ImagesEndpointResponse {
+  data?: { b64_json?: string; media_type?: string }[];
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    cost?: number;
+    total_tokens?: number;
+  };
+  error?: { message?: string };
+}
+
 export class OpenRouterProvider implements AiProvider {
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -135,6 +147,19 @@ export class OpenRouterProvider implements AiProvider {
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       const status = res.status;
+      // Image models served ONLY via the dedicated images API (e.g.
+      // openai/gpt-image-1) reject /chat/completions with an HTTP 404 whose
+      // body names the /api/v1/images endpoint. That model is still a valid
+      // fallback — retry the SAME model/attempt against the images endpoint
+      // instead of failing the whole chain (this is what killed real stickers:
+      // the gpt-image-1 fallback burned every attempt on the wrong endpoint).
+      if (
+        task === "item_image" &&
+        status === 404 &&
+        /api\/v1\/images|images endpoint/i.test(text)
+      ) {
+        return this.runViaImagesEndpoint(task, input, cfg, messages, started);
+      }
       // 400/404: malformed request (unknown model id, bad params) — retrying
       // with the SAME model cannot help, so this is fatal for the model; the
       // router still moves on to the next FALLBACK model. Everything else
@@ -217,6 +242,86 @@ export class OpenRouterProvider implements AiProvider {
     };
   }
 
+  /**
+   * Item-image fallback for models that are served ONLY via the unified
+   * images API (POST /api/v1/images — e.g. openai/gpt-image-1). Same model,
+   * same prompt, same attempt budget: this replaces a chat/completions call
+   * that OpenRouter rejected with 404 "Use the /api/v1/images endpoint".
+   * Images come back as base64 (b64_json) with an optional media_type.
+   */
+  private async runViaImagesEndpoint(
+    task: AiTaskName,
+    input: Record<string, unknown>,
+    cfg: TaskConfig,
+    messages: { role: "system" | "user"; content: string }[],
+    started: number,
+  ): Promise<AiCallResult> {
+    const prompt = messages.map((m) => m.content).join("\n\n");
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${this.baseUrl}/images`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://cardcrafters.local",
+          "X-Title": "Card Crafters",
+          "User-Agent": "CardCrafters/0.1 (+https://cardcrafters.local)",
+        },
+        body: JSON.stringify({ model: cfg.primary, prompt }),
+        signal: AbortSignal.timeout(cfg.timeoutMs),
+      });
+    } catch (cause) {
+      throw new AiTaskError({
+        task,
+        model: cfg.primary,
+        cause,
+        retryable: true,
+        message: `openrouter images request failed: ${(cause as Error).message}`,
+      });
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new AiTaskError({
+        task,
+        model: cfg.primary,
+        // Unknown-model/bad-param 404s and 400s are fatal for this model;
+        // capacity/limit errors (408/429/5xx) stay retryable.
+        retryable: res.status !== 400 && res.status !== 404,
+        message: `openrouter images HTTP ${res.status}: ${text.slice(0, 300)}`,
+      });
+    }
+    const json = (await res.json().catch((cause: unknown) => {
+      throw new AiTaskError({
+        task,
+        model: cfg.primary,
+        cause,
+        retryable: true,
+        message: "openrouter images returned non-JSON body",
+      });
+    })) as ImagesEndpointResponse;
+    const b64 = json.data?.[0]?.b64_json;
+    if (!b64) {
+      throw new AiTaskError({
+        task,
+        model: cfg.primary,
+        retryable: true,
+        message: "openrouter images response contained no image",
+      });
+    }
+    const mime = json.data?.[0]?.media_type ?? "image/png";
+    const usage = usageOutKeys(json.usage);
+    return {
+      data: { imageMime: mime },
+      raw: undefined,
+      model: cfg.primary,
+      latencyMs: Date.now() - started,
+      ...(usage ? { usage } : {}),
+      imageBase64: b64,
+      imageMime: mime,
+    };
+  }
+
   /** Build [system?, user] messages from the prompt template + raw input JSON. */
   private async buildMessages(
     task: AiTaskName,
@@ -229,10 +334,7 @@ export class OpenRouterProvider implements AiProvider {
       // Die-cut look: subject centered with generous transparent padding, never
       // a full-bleed rectangle (post-process auto-padding in image/pad.ts is
       // only the safety net — the model must already comply).
-      const subject = String(input.subject ?? input.prompt ?? "");
-      const style = String(input.styleSuffix ?? input.imagePromptSuffix ?? "");
-      const text = `One standalone sticker-style illustration of: ${subject}. The subject must be CENTERED and occupy about 75–85% of the frame, with generous transparent padding on ALL sides (subject must NOT touch the edges). Fully transparent background — no backdrop, no ground shadow, no border, no text.${style ? `\nVisual style: ${style}.` : ""}`;
-      messages.push({ role: "user", content: text });
+      messages.push({ role: "user", content: itemImagePrompt(input) });
       return messages;
     }
     const rendered = this.templates.render(task, PromptTemplates.varsFromInput(input));
@@ -246,6 +348,13 @@ export class OpenRouterProvider implements AiProvider {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** The shared item-image user prompt (chat/completions + images endpoint). */
+function itemImagePrompt(input: Record<string, unknown>): string {
+  const subject = String(input.subject ?? input.prompt ?? "");
+  const style = String(input.styleSuffix ?? input.imagePromptSuffix ?? "");
+  return `One standalone sticker-style illustration of: ${subject}. The subject must be CENTERED and occupy about 75–85% of the frame, with generous transparent padding on ALL sides (subject must NOT touch the edges). Fully transparent background — no backdrop, no ground shadow, no border, no text.${style ? `\nVisual style: ${style}.` : ""}`;
+}
 
 function usageOutKeys(usage: ChatCompletionResponse["usage"]): {
   promptTokens?: number;

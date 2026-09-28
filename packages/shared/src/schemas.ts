@@ -194,6 +194,10 @@ const epochMs = z.number().finite().int().nonnegative();
 export const phaseChangedSchema = z
   .object({
     phase: z.enum(PHASE_VALUES),
+    /** Round the phase change belongs to (stamped by the hub envelope). The
+     *  reducer reads it off the RAW payload too (see store.tsx phaseChanged
+     *  case) so a round bump is never silently stripped. */
+    round: z.number().int().optional(),
     /** Absolute epoch ms when the phase timer expires (absent = untimed). */
     phaseEndsAt: epochMs.optional(),
     /** For SCORING: latest moment a score may still be changed. */

@@ -275,8 +275,40 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
       const p = parsed.data;
       const base = state;
       if (!base) return state;
+      // `round` is read off the RAW payload (same precedent as `theme`): the
+      // parsed schema used to strip it, which froze snapshot.round at 1 so
+      // roundGuard dropped EVERY round-2 build event (stuck “drawing…” chips,
+      // canvases appearing to clear when a stale round-2 layout finally got
+      // accepted). When the payload carries a finite round, adopt it.
+      const rawRound = (action.payload as { round?: unknown }).round;
+      const nextRound = Number(rawRound);
+      const roundChanged = Number.isFinite(nextRound) && nextRound !== base.round;
+      // Round BUMP (gm:newRound → a later round): the card is rebuilt FRESH
+      // per round — clear all round-scoped state client-side. The teams[]
+      // STRUCTURE persists (members, greeting, names); items/layout/activity
+      // are per-round and must never carry over. The owner ledger keeps only
+      // entries whose round == the new round (see MyItemEvent round scoping).
+      const bump = roundChanged && nextRound > base.round;
+      if (!roundChanged) {
+        return {
+          ...base,
+          phase: p.phase,
+          theme: typeof (action.payload as { theme?: string }).theme === "string"
+            ? (action.payload as { theme: string }).theme
+            : base.theme,
+          phaseEndsAt: p.phaseEndsAt !== undefined ? p.phaseEndsAt : base.phaseEndsAt,
+          cutoffAt: p.cutoffAt !== undefined ? p.cutoffAt : base.cutoffAt,
+          serverNow: p.serverNow,
+        };
+      }
+      const myItems = bump
+        ? Object.fromEntries(
+            Object.entries(base.myItems).filter(([, e]) => e.round === nextRound),
+          )
+        : base.myItems;
       return {
         ...base,
+        round: nextRound,
         phase: p.phase,
         theme: typeof (action.payload as { theme?: string }).theme === "string"
           ? (action.payload as { theme: string }).theme
@@ -284,6 +316,15 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
         phaseEndsAt: p.phaseEndsAt !== undefined ? p.phaseEndsAt : base.phaseEndsAt,
         cutoffAt: p.cutoffAt !== undefined ? p.cutoffAt : base.cutoffAt,
         serverNow: p.serverNow,
+        myItems,
+        teams: bump
+          ? base.teams.map((team) => ({
+              ...team,
+              items: [],
+              layout: null,
+              activity: [],
+            }))
+          : base.teams,
       };
     }
     case "playerJoined": {
