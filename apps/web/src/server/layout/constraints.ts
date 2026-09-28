@@ -24,6 +24,8 @@ import {
   MAX_PAIRWISE_OVERLAP,
   MIN_ITEM_SIZE_PCT,
   SAFE_MARGIN_PCT,
+  SMALL_N_OVERLAP_CAP,
+  SMALL_N_OVERLAP_MAX_ITEMS,
   type Placement,
 } from "@cardcrafters/shared";
 
@@ -250,10 +252,28 @@ export function textOverlapOk(box: Aabb, textZone: Rect | null, card: CardBox): 
   return !rectsIntersect(asRect, zone);
 }
 
-/** (d) Pairwise overlap cap: intersection ≤ MAX_PAIRWISE_OVERLAP × min(areaA, areaB). */
-export function overlapCapOk(a: Aabb, b: Aabb): boolean {
+/**
+ * (d) Pairwise overlap cap: intersection ≤ `cap` × min(areaA, areaB).
+ * `cap` defaults to the general MAX_PAIRWISE_OVERLAP; the solver passes the
+ * small-count relaxation (overlapCapFor) for few-item layouts.
+ */
+export function overlapCapOk(
+  a: Aabb,
+  b: Aabb,
+  cap: number = MAX_PAIRWISE_OVERLAP,
+): boolean {
   const inter = boxArea(boxIntersection(a, b));
-  return inter <= MAX_PAIRWISE_OVERLAP * Math.min(boxArea(a), boxArea(b)) + 1e-9;
+  return inter <= cap * Math.min(boxArea(a), boxArea(b)) + 1e-9;
+}
+
+/**
+ * Effective pairwise-overlap cap for an n-item layout: the relaxed
+ * SMALL_N_OVERLAP_CAP for very few stickers (deliberate layering is the
+ * intended look there and the general cap would stop them filling the card),
+ * the general MAX_PAIRWISE_OVERLAP otherwise.
+ */
+export function overlapCapFor(n: number): number {
+  return n <= SMALL_N_OVERLAP_MAX_ITEMS ? SMALL_N_OVERLAP_CAP : MAX_PAIRWISE_OVERLAP;
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +303,12 @@ export interface ConstraintCtx {
   minSizePct?: number;
   /** When false the text-overlap rule is skipped (only for overflow items). */
   checkTextOverlap?: boolean;
+  /**
+   * Pairwise-overlap cap (0–1); defaults to MAX_PAIRWISE_OVERLAP. The solver
+   * passes overlapCapFor(items.length) so very few stickers may overlap
+   * slightly more (deliberate layering — see SMALL_N_OVERLAP_CAP).
+   */
+  overlapCap?: number;
 }
 
 /** Check ONE placement against bounds + size + text zone (+ overlap vs already-placed boxes). */
@@ -304,8 +330,9 @@ export function checkItem(
   if ((ctx.checkTextOverlap ?? true) && !textOverlapOk(box, ctx.textZone, ctx.card)) {
     violations.push({ itemId: item.id, code: "text_overlap" });
   }
+  const cap = ctx.overlapCap ?? MAX_PAIRWISE_OVERLAP;
   for (const other of placedBoxes) {
-    if (!overlapCapOk(box, other.box)) {
+    if (!overlapCapOk(box, other.box, cap)) {
       violations.push({
         itemId: item.id,
         code: "overlap_cap",

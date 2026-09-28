@@ -11,12 +11,15 @@ import {
   CARD_COORD_SPACE,
   layoutCompositionSchema,
   MIN_ITEM_SIZE_PCT,
+  SOLO_ITEM_COVERAGE,
+  TOTAL_COVERAGE_TARGET,
   type Placement,
 } from "@cardcrafters/shared";
 
 import {
   cardBox,
   checkLayout,
+  overlapCapFor,
   placedBox,
   safeMargin,
   scaleWindow,
@@ -25,7 +28,7 @@ import {
   type Rect,
 } from "./constraints";
 import { scoreLayout } from "./score";
-import { mulberry32, solveLayout } from "./solver";
+import { mulberry32, perItemShare, solveLayout } from "./solver";
 
 const card = cardBox({ width: CARD_COORD_SPACE, height: CARD_COORD_SPACE }, 5, 7);
 const K = (0.25 * Math.min(card.w, card.h)) / 256; // baseFit(card)
@@ -179,10 +182,17 @@ describe("solveLayout — text zone reservation", () => {
   });
 });
 
-describe("solveLayout — sizing policy (coverage-proportional targets)", () => {
+describe("solveLayout — sizing policy v2 (coverage-proportional targets)", () => {
   /** Unrotated display width of a placement as a fraction of the card width. */
   const widthPct = (p: Placement, item: LayoutItem): number =>
     (item.imgW * p.scale * K) / card.w;
+
+  /** Mean display width across a solved layout. */
+  const avgWidth = (res: ReturnType<typeof solveLayout>, its: LayoutItem[]): number =>
+    its.reduce(
+      (s, it) => s + widthPct(res.placements.find((p) => p.itemId === it.id)!, it),
+      0,
+    ) / its.length;
 
   it("1 item → display width ≈ 75–85% of the card width", () => {
     const item = mkItem("solo");
@@ -190,59 +200,120 @@ describe("solveLayout — sizing policy (coverage-proportional targets)", () => 
     expect(res.placements).toHaveLength(1);
     const w = widthPct(res.placements[0]!, item);
     expect(w).toBeGreaterThanOrEqual(0.75);
-    expect(w).toBeLessThanOrEqual(0.85);
+    expect(w).toBeLessThanOrEqual(0.85 + 1e-9); // +eps: the window max is exact
+  });
+
+  it("2 items → BOTH stickers fill the card (small-n overlap relaxation)", () => {
+    // Measured (SMALL_N_OVERLAP_CAP = 0.35, seeds 1..5): per-seed averages
+    // 0.509–0.584 (mean 0.550), smallest single item 0.42. Under the general
+    // 0.25 cap the same seeds average ~0.49 with the smaller sticker at ~0.38.
+    const avgs: number[] = [];
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const its = items(2);
+      const res = solve(its, seed);
+      expect(res.placements).toHaveLength(2);
+      const ws = its.map(
+        (it) => widthPct(res.placements.find((p) => p.itemId === it.id)!, it),
+      );
+      for (const w of ws) expect(w).toBeGreaterThanOrEqual(0.4);
+      avgs.push((ws[0]! + ws[1]!) / 2);
+      expect(avgs[avgs.length - 1]!).toBeGreaterThanOrEqual(0.48);
+    }
+    const mean = avgs.reduce((s, v) => s + v, 0) / avgs.length;
+    expect(mean).toBeGreaterThanOrEqual(0.53);
+  });
+
+  it("perItemShare curve: solo target, fill plateau, blend to the legacy split", () => {
+    expect(perItemShare(1)).toBeCloseTo(SOLO_ITEM_COVERAGE, 9);
+    expect(perItemShare(2)).toBeCloseTo(0.3, 9);
+    expect(perItemShare(3)).toBeCloseTo(0.2, 9);
+    expect(perItemShare(5)).toBeCloseTo(0.12, 9);
+    // Fully back to the legacy TOTAL_COVERAGE_TARGET/n split from n = 12.
+    expect(perItemShare(12)).toBeCloseTo(TOTAL_COVERAGE_TARGET / 12, 9);
+    expect(perItemShare(25)).toBeCloseTo(TOTAL_COVERAGE_TARGET / 25, 9);
+    // Monotone non-increasing in n and never above the solo target.
+    let prev = Infinity;
+    for (let n = 1; n <= 25; n++) {
+      const s = perItemShare(n);
+      expect(s).toBeLessThanOrEqual(prev + 1e-12);
+      expect(s).toBeLessThanOrEqual(SOLO_ITEM_COVERAGE);
+      prev = s;
+    }
   });
 
   it("3 items → each clearly smaller than the solo item; 5 smaller again", () => {
+    // Measured (seed 11): n=3 avg 0.54 (heaviest 0.70), n=5 avg 0.38.
     for (const n of [3, 5]) {
       const its = items(n, (i) => 0.9 - i * 0.1);
       const res = solve(its, 11);
       expect(res.placements).toHaveLength(n);
-      const avgW =
-        its.reduce(
-          (s, it) =>
-            s +
-            widthPct(
-              res.placements.find((p) => p.itemId === it.id)!,
-              it,
-            ),
-          0,
-        ) / n;
-      // Solo target ≈ 80% width; n=3 → ~sqrt(0.5/3) ≈ 41%; n=5 → ~32%.
-      expect(avgW).toBeLessThan(n === 3 ? 0.55 : 0.42);
+      const avgW = avgWidth(res, its);
+      expect(avgW).toBeLessThan(n === 3 ? 0.6 : 0.45);
       expect(avgW).toBeGreaterThan(0.2);
     }
   });
 
-  it("average display width decreases monotonically as n grows 1→2→3→5→10", () => {
+  it("average display width decreases (non-increasing, near-flat 1→2) as n grows 1→2→3→5→10→25", () => {
+    // Measured (3 seeds per n): 0.760 → 0.536 → 0.528 → 0.378 → 0.278 → 0.175.
+    // The 1→2 step is intentionally near-flat (two stickers both fill the
+    // card), so the curve asserts NON-INCREASING with a small dip tolerance
+    // plus clear drops where the policy must shrink items.
     const avgs: number[] = [];
-    for (const n of [1, 2, 3, 5, 10]) {
-      const its = items(n, (i) => 0.5 + 0.05 * (i % 4));
-      const res = solve(its, 99);
-      expect(res.placements).toHaveLength(n);
-      avgs.push(
-        its.reduce(
-          (s, it) =>
-            s +
-            widthPct(res.placements.find((p) => p.itemId === it.id)!, it),
-          0,
-        ) / n,
-      );
+    for (const n of [1, 2, 3, 5, 10, 25]) {
+      const perSeed: number[] = [];
+      for (const seed of [1, 2, 3]) {
+        const its = items(n, (i) => 0.5 + 0.05 * (i % 4));
+        const res = solve(its, seed);
+        expect(res.placements).toHaveLength(n);
+        perSeed.push(avgWidth(res, its));
+      }
+      avgs.push(perSeed.reduce((s, v) => s + v, 0) / perSeed.length);
     }
+    // Near-flat 1→2: two stickers still fill the card (measured ratio 0.705).
+    expect(avgs[1]!).toBeGreaterThanOrEqual(0.5);
+    expect(avgs[1]!).toBeGreaterThanOrEqual(0.7 * avgs[0]!);
+    // Non-increasing with a small tolerance for seed noise (measured deltas
+    // are all ≤ 0; the largest is 1→2 at −0.22).
     for (let i = 1; i < avgs.length; i++) {
-      expect(avgs[i]!).toBeLessThan(avgs[i - 1]!);
+      expect(avgs[i]!).toBeLessThanOrEqual(avgs[i - 1]! + 0.02);
     }
+    // Clear drops where the sizing policy must shrink items.
+    expect(avgs[3]!).toBeLessThan(avgs[2]! - 0.08); // 5 vs 3 (measured −0.15)
+    expect(avgs[4]!).toBeLessThan(avgs[3]! - 0.05); // 10 vs 5 (measured −0.10)
+    expect(avgs[5]!).toBeLessThan(avgs[4]! - 0.05); // 25 vs 10 (measured −0.10)
   });
 
-  it("all n still pass checkLayout (n = 1, 2, 3, 5, 10)", () => {
-    for (const n of [1, 2, 3, 5, 10]) {
-      const its = items(n, (i) => 0.9 - (i * 7) % 70 / 100);
+  it("all n still pass checkLayout (n = 1, 2, 3, 5, 10, 25) under the policy overlap cap", () => {
+    for (const n of [1, 2, 3, 5, 10, 25]) {
+      const its = items(n, (i) => 0.9 - ((i * 7) % 70) / 100);
       const res = solve(its, 1234 + n);
       expect(res.placements).toHaveLength(n);
       expect(
-        checkLayout(res.placements, its, { card, k: K, textZone: TEXT_ZONE }).ok,
+        checkLayout(res.placements, its, {
+          card,
+          k: K,
+          textZone: TEXT_ZONE,
+          overlapCap: overlapCapFor(n),
+        }).ok,
       ).toBe(true);
     }
+  });
+
+  it("n = 2 lands diagonal/staggered across seeds (polar ring placement)", () => {
+    // Polar ring candidates let the two big stickers stagger diagonally
+    // instead of only axis-aligned left/right or top/bottom. Measured: 4/5
+    // seeds have both |dx| and |dy| over 15% of the card dimension.
+    let diagonal = 0;
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const its = items(2);
+      const res = solve(its, seed);
+      expect(res.placements).toHaveLength(2);
+      const [a, b] = res.placements;
+      const dx = Math.abs(a!.x - b!.x) / card.w;
+      const dy = Math.abs(a!.y - b!.y) / card.h;
+      if (dx > 0.15 && dy > 0.15) diagonal++;
+    }
+    expect(diagonal).toBeGreaterThanOrEqual(3);
   });
 });
 

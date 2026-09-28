@@ -7,7 +7,13 @@
 
 import { describe, expect, it } from "vitest";
 
-import { CARD_COORD_SPACE, MAX_ITEM_SIZE_PCT, MIN_ITEM_SIZE_PCT } from "@cardcrafters/shared";
+import {
+  CARD_COORD_SPACE,
+  MAX_ITEM_SIZE_PCT,
+  MAX_PAIRWISE_OVERLAP,
+  MIN_ITEM_SIZE_PCT,
+  SMALL_N_OVERLAP_CAP,
+} from "@cardcrafters/shared";
 
 import {
   boxArea,
@@ -17,6 +23,7 @@ import {
   checkLayout,
   displayWidth,
   inBoundsOk,
+  overlapCapFor,
   overlapCapOk,
   placedBox,
   safeMargin,
@@ -164,6 +171,53 @@ describe("overlapCap", () => {
     const B: Aabb = { x1: 74, y1: 0, x2: 174, y2: 100 };
     expect(boxArea(boxIntersection(A, B)) / area).toBeCloseTo(0.26, 9);
     expect(overlapCapOk(A, B)).toBe(false);
+  });
+
+  it("cap is a parameter (default = general MAX_PAIRWISE_OVERLAP)", () => {
+    const B: Aabb = { x1: 70, y1: 0, x2: 170, y2: 100 }; // 30% overlap
+    expect(boxArea(boxIntersection(A, B)) / area).toBeCloseTo(0.3, 9);
+    expect(overlapCapOk(A, B, MAX_PAIRWISE_OVERLAP)).toBe(false);
+    expect(overlapCapOk(A, B, SMALL_N_OVERLAP_CAP)).toBe(true);
+    // Boundary of the relaxed cap itself.
+    const C: Aabb = { x1: 65, y1: 0, x2: 165, y2: 100 }; // exactly 35%
+    expect(overlapCapOk(A, C, SMALL_N_OVERLAP_CAP)).toBe(true);
+    const D: Aabb = { x1: 64, y1: 0, x2: 164, y2: 100 }; // 36%
+    expect(overlapCapOk(A, D, SMALL_N_OVERLAP_CAP)).toBe(false);
+  });
+
+  it("overlapCapFor: relaxed for n ≤ 3, general otherwise", () => {
+    expect(overlapCapFor(1)).toBe(SMALL_N_OVERLAP_CAP);
+    expect(overlapCapFor(2)).toBe(SMALL_N_OVERLAP_CAP);
+    expect(overlapCapFor(3)).toBe(SMALL_N_OVERLAP_CAP);
+    expect(overlapCapFor(4)).toBe(MAX_PAIRWISE_OVERLAP);
+    expect(overlapCapFor(25)).toBe(MAX_PAIRWISE_OVERLAP);
+  });
+
+  it("checkItem/checkLayout honor ctx.overlapCap", () => {
+    const item = mkItem();
+    const { min } = scaleWindow(item, card, K);
+    const w = displayWidth(item, min, K);
+    const cx = card.w / 2;
+    const cy = card.h / 2;
+    const p1 = { itemId: "a", x: cx, y: cy, scale: min, rotation: 0, zIndex: 0 };
+    const p2 = { itemId: "b", x: cx + w * 0.7, y: cy, scale: min, rotation: 0, zIndex: 1 };
+    const its = [item, { ...item, id: "b", orderIndex: 1 }];
+    // 30% overlap of equal boxes: legal only under the relaxed cap.
+    const boxes = [
+      { itemId: "a", box: placedBox(p1, item, K) },
+      { itemId: "b", box: placedBox(p2, item, K) },
+    ];
+    expect(overlapCapOk(boxes[0]!.box, boxes[1]!.box, 0.35)).toBe(true);
+    expect(overlapCapOk(boxes[0]!.box, boxes[1]!.box)).toBe(false);
+    expect(checkItem(p2, its[1]!, { card, k: K, textZone: null, overlapCap: 0.35 }, [boxes[0]!])).toEqual([]);
+    expect(
+      checkLayout([p1, p2], its, { card, k: K, textZone: null, overlapCap: 0.35 }).ok,
+    ).toBe(true);
+    expect(
+      checkLayout([p1, p2], its, { card, k: K, textZone: null }).violations.some(
+        (v) => v.code === "overlap_cap",
+      ),
+    ).toBe(true);
   });
 
   it("surfaces overlap_cap violations through checkLayout", () => {

@@ -611,10 +611,33 @@ function mockLayoutComposition(input: Record<string, unknown>): unknown {
   const rnd = mulberry32(hashString(JSON.stringify(input)));
   const items = Array.isArray(input.items) ? (input.items as MockLayoutItem[]) : [];
   const ids = items.map((it, i) => (typeof it?.id === "string" && it.id ? it.id : `item-${i + 1}`));
+  // The hint is expressed in the CARD's own coordinate system (the same box
+  // the solver lays out in), so the golden-ratio anchor must be computed from
+  // the actual card dims — a 0..1000-space anchor on a portrait card lands
+  // near the right edge / inside the text zone, where a v2-sized sticker
+  // (solo ≈ 65% card area) cannot center without heavy shrinkage.
+  const cardWidth = Number(input.cardWidth) > 0 ? Number(input.cardWidth) : CARD_COORD_SPACE;
+  const cardHeight = Number(input.cardHeight) > 0 ? Number(input.cardHeight) : CARD_COORD_SPACE;
 
-  // Golden-ratio focal point with a gentle nudge.
-  const focalX = clamp(CARD_COORD_SPACE * 0.618 + (rnd() - 0.5) * 80, 120, CARD_COORD_SPACE - 120);
-  const focalY = clamp(CARD_COORD_SPACE * 0.382 + (rnd() - 0.5) * 60, 120, CARD_COORD_SPACE - 120);
+  // Golden-ratio focal point with a gentle nudge. For SMALL item counts the
+  // v2 sizing policy makes each sticker huge (solo ≈ 65% card area), so an
+  // off-center golden-ratio focal is physically unreachable at a good scale
+  // (greeting text zone + safe margins force shrinkage) and the hint LOSES
+  // the engine's with-vs-without score comparison. Bias the seeded focal
+  // toward the card center for n ≤ 3 (jitter the golden anchor BEFORE the
+  // lerp so the biased point keeps a clear margin away from the exact center
+  // — a focal on the center would tie the hint-less run, which only wins by
+  // RNG noise); larger compositions keep the classic golden-ratio placement.
+  const goldenX = clamp(cardWidth * 0.618 + (rnd() - 0.5) * 80, 120, cardWidth - 120);
+  const goldenY = clamp(cardHeight * 0.382 + (rnd() - 0.5) * 60, 120, cardHeight - 120);
+  let focalX = goldenX;
+  let focalY = goldenY;
+  if (ids.length > 0 && ids.length <= 3) {
+    // Full bias to the measured sweet spot (0.5w, 0.65h) — a 0.5 lerp measured
+    // only 23/30 hint wins; the full target won 40/40 (craft probe).
+    focalX = clamp(cardWidth * 0.5 + (rnd() - 0.5) * 80, 120, cardWidth - 120);
+    focalY = clamp(cardHeight * 0.65 + (rnd() - 0.5) * 60, 120, cardHeight - 120);
+  }
 
   const groups: { itemIds: string[]; cx: number; cy: number; spread: number }[] = [];
   if (ids.length === 0) {
@@ -624,10 +647,15 @@ function mockLayoutComposition(input: Record<string, unknown>): unknown {
     groups.push({ itemIds: ["__no_items__"], cx: focalX, cy: focalY, spread: 60 });
   } else if (ids.length >= 4 && rnd() > 0.5) {
     const mid = Math.ceil(ids.length / 2);
-    groups.push({ itemIds: ids.slice(0, mid), cx: clamp(focalX - 90, 80, 920), cy: focalY, spread: 130 + rnd() * 40 });
-    groups.push({ itemIds: ids.slice(mid), cx: clamp(focalX + 90, 120, CARD_COORD_SPACE - 120), cy: clamp(focalY + 70, 120, CARD_COORD_SPACE - 120), spread: 110 + rnd() * 40 });
+    groups.push({ itemIds: ids.slice(0, mid), cx: clamp(focalX - 90, 80, cardWidth - 80), cy: focalY, spread: 130 + rnd() * 40 });
+    groups.push({ itemIds: ids.slice(mid), cx: clamp(focalX + 90, 120, cardWidth - 120), cy: clamp(focalY + 70, 120, cardHeight - 120), spread: 110 + rnd() * 40 });
   } else {
-    groups.push({ itemIds: ids, cx: focalX, cy: focalY, spread: 120 + rnd() * 60 });
+    // Small n: a tight spread keeps the hint samples ON the focal point —
+    // wide scatters dilute the hint into noise and can lose the engine's
+    // with-vs-without comparison. Large single-group compositions keep the
+    // looser scatter.
+    const spread = ids.length <= 3 ? 40 + rnd() * 20 : 120 + rnd() * 60;
+    groups.push({ itemIds: ids, cx: focalX, cy: focalY, spread });
   }
 
   const textZone = { x: 60, y: 40, w: CARD_COORD_SPACE - 120, h: 280 };
