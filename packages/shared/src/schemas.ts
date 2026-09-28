@@ -142,6 +142,10 @@ export const joinSchema = z
     role: roleSchema,
     joinToken: z.string().min(1).optional(),
     nickname: z.string().min(1).max(24).optional(),
+    /** Client-held session token (also accepted via handshake auth/cookie).
+     *  Sent together with joinToken so the server can compare the session's
+     *  team against the URL's link and prefer the link (join-client flow). */
+    sessionToken: z.string().min(1).optional(),
   })
   .strict();
 export type JoinPayload = z.infer<typeof joinSchema>;

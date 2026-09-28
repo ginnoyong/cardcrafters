@@ -8,7 +8,7 @@ import {
   styleDerivationSchema,
 } from "@cardcrafters/shared";
 
-import { MockProvider, drawMockSticker } from "./mock-provider";
+import { MockProvider, SHAPES, drawMockSticker } from "./mock-provider";
 import type { AiTaskName, TaskConfig } from "./provider";
 
 const envNoDelay = { MOCK_AI_DELAY_MS: "0" } as unknown as NodeJS.ProcessEnv;
@@ -176,6 +176,58 @@ describe("MockProvider — item_image", () => {
     expect(a.hue).toBe(b.hue);
     const c = drawMockSticker("blue whale");
     expect(c.base64).not.toBe(a.base64); // different hash → different hue/shape
+  });
+
+  // Shape-pool distribution. The pool is 20 shapes (≥16 enforced below), of
+  // which 6 are roundish (circle, smiley, balloon, cloud, flower, heart) —
+  // 30% of the pool, so a healthy hash should keep roundish selections well
+  // under half of any reasonable sample. Thresholds (≥10 distinct of 20 over
+  // 40+ prompts, roundish ≤50%) were chosen from a measured tsx probe: 105
+  // varied prompts used 19/20 shapes and 50 near-identical in-game prompts
+  // used all 20, with roundish at 32–34% in both — the assertions leave wide
+  // safety margin while still catching a clustered/biased hash or a
+  // roundish-dominant pool regression.
+  describe("shape pool distribution", () => {
+    // Deterministic, varied in-game-style prompts (short nouns, colour swaps,
+    // phrases) — fixed list so the test is fully reproducible.
+    const prompts = [
+      "a red balloon", "a birthday cake", "a golden retriever", "a snowman",
+      "a sunflower", "a paper boat", "a cat", "a rocket", "pizza", "a guitar",
+      "coffee", "a rainbow", "a cactus", "a soccer ball", "a butterfly",
+      "pancakes", "a treasure chest", "a ghost", "a palm tree", "a fish",
+      "a kite", "a strawberry", "a robot", "a wizard hat", "a donut", "a drum",
+      "a camera", "a plant", "a lighthouse", "a mushroom", "a snail", "a duck",
+      "a campfire", "a violin", "a crab", "a firetruck", "a disco ball",
+      "a candle", "a crown", "a telescope", "a unicorn", "a dragon", "a ninja",
+      "a pirate ship", "a taco", "a penguin", "an owl", "a fox", "a bee",
+      "red heart", "blue star", "green tree", "yellow sun", "purple gem",
+      "big house", "small moon", "happy smiley", "fluffy cloud", "loud note",
+      "spiky snowflake", "shiny cupcake", "bright lightning", "square gift",
+    ];
+
+    it("has a pool of at least 16 distinct shapes", () => {
+      expect(SHAPES.length).toBeGreaterThanOrEqual(16);
+      expect(new Set(SHAPES.map((s) => s.name)).size).toBe(SHAPES.length);
+    });
+
+    it("uses at least 10 distinct shapes over 40+ deterministic prompts", () => {
+      expect(prompts.length).toBeGreaterThanOrEqual(40);
+      const used = new Set(prompts.map((p) => drawMockSticker(p).shape));
+      expect(used.size).toBeGreaterThanOrEqual(10);
+    });
+
+    it("maps the same prompt to the same shape every time", () => {
+      for (const p of prompts) {
+        expect(drawMockSticker(p).shape).toBe(drawMockSticker(p).shape);
+      }
+    });
+
+    it("keeps roundish shapes to at most half of the selections", () => {
+      const roundish = new Set(["circle", "smiley", "balloon", "cloud", "flower", "heart"]);
+      const picks = prompts.map((p) => drawMockSticker(p).shape);
+      const roundishCount = picks.filter((s) => roundish.has(s)).length;
+      expect(roundishCount / picks.length).toBeLessThanOrEqual(0.5);
+    });
   });
 });
 

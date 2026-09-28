@@ -387,42 +387,70 @@ export class GameHub {
   // -- Player join flow ---------------------------------------------------------
 
   /**
-   * Join (or rejoin) a player. Reconnection happens when a sessionToken
-   * resolves to a live player of the target game; otherwise joinToken +
-   * nickname are required. Enforces the 12-per-team capacity cap and the
-   * "new players only in LOBBY" phase guard.
+   * Join (or rejoin) a player.
+   *
+   * Reconnection happens when a sessionToken resolves to a live player whose
+   * team carries the SAME joinToken as the request (or when no joinToken is
+   * supplied — the pure reconnect path used by an already-joined screen).
+   * The URL's joinToken is AUTHORITATIVE: a session that resolves to a
+   * DIFFERENT team than the requested link is IGNORED (fall through to a
+   * fresh join on the link's team) so a stale session can never hijack a new
+   * QR link. The old player row is deliberately left untouched — they may
+   * still be active in another tab/game; removing them would kill a live
+   * session (fine for a party game).
+   *
+   * A fresh join (no usable session) requires a nickname: the mount-time
+   * auto-attempt sends no nickname, and refusing it (instead of creating a
+   * placeholder "Player" row) lets the client show the nickname form.
+   *
+   * Enforces the 12-per-team capacity cap and the "new players only in
+   * LOBBY/GREETINGS" phase guard.
    */
   async joinPlayer(input: JoinPlayerInput): Promise<JoinPlayerResult> {
-    // 1) Reconnect by session token.
+    // 1) Reconnect by session token — only when it maps to the requested team.
     if (input.sessionToken) {
       const existing = await this.repo.getPlayerBySessionToken(input.sessionToken);
       if (existing && existing.removedAt === null) {
         const team = await this.teamOf(existing);
-        const game = await this.repo.getGame(existing.gameId);
-        if (!team || !game) throw new RepoError("stale session: game or team no longer exists");
-        await this.repo.setPlayerConnected(existing.id, true);
-        await this.applyEvent(existing.gameId, {
-          type: "player:join",
-          playerId: existing.id,
-          isNewPlayer: false,
-          now: this.now(),
-        });
-        const player = { ...existing, connected: true };
-        this.registerPlayer(player);
-        this.emitToRooms(
-          game.id,
-          game.round,
-          "player:joined",
-          {
-            playerId: player.id,
-            nickname: player.nickname,
-            teamId: team.id,
-            teamLabel: team.label,
+        const game = team ? await this.repo.getGame(existing.gameId) : null;
+        const linkMatches = !input.joinToken || team?.joinToken === input.joinToken;
+        if (team && game && linkMatches) {
+          await this.repo.setPlayerConnected(existing.id, true);
+          await this.applyEvent(existing.gameId, {
+            type: "player:join",
+            playerId: existing.id,
             isNewPlayer: false,
-          },
-          [gameRoom(game.id)],
-        );
-        return { player, team, game, isNewPlayer: false };
+            now: this.now(),
+          });
+          const player = { ...existing, connected: true };
+          this.registerPlayer(player);
+          this.emitToRooms(
+            game.id,
+            game.round,
+            "player:joined",
+            {
+              playerId: player.id,
+              nickname: player.nickname,
+              teamId: team.id,
+              teamLabel: team.label,
+              isNewPlayer: false,
+            },
+            [gameRoom(game.id)],
+          );
+          return { player, team, game, isNewPlayer: false };
+        }
+        // The session does not map to the requested link (different team, or
+        // its game/team vanished). With a nickname (form submit) fall through
+        // to a FRESH join on the link's team; the old player is NOT deleted.
+        // Without a nickname (mount-time auto attempt) refuse so the client
+        // shows the nickname form instead of a silent placeholder join.
+        if (!input.nickname) {
+          throw new RepoError(
+            team
+              ? "stale session: your saved session belongs to a different team"
+              : "stale session: game or team no longer exists",
+          );
+        }
       }
     }
 
@@ -430,6 +458,10 @@ export class GameHub {
     if (!input.joinToken) throw new RepoError("joinToken required");
     const team = await this.repo.getTeamByJoinToken(input.joinToken);
     if (!team) throw new RepoError("invalid joinToken");
+    // Fresh join needs a nickname (the mount-time auto attempt with only a
+    // stale session + link must fail here so the client shows the form,
+    // never a silent placeholder "Player" row).
+    if (!input.nickname) throw new RepoError("stale session: pick a nickname to join this team");
     const game = await this.repo.getGame(team.gameId);
     if (!game) throw new RepoError("game not found for team");
     const state = await this.getOrCreateHubGame(team.gameId);
@@ -456,7 +488,7 @@ export class GameHub {
     const player = await this.repo.createPlayer({
       gameId: team.gameId,
       teamId: team.id,
-      nickname: input.nickname ?? "Player",
+      nickname: input.nickname,
       sessionToken: newSessionToken(),
       autoSuffix: true,
     });

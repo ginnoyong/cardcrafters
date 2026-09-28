@@ -7,9 +7,11 @@
  *   1. Nickname form (≤20 chars) → socket connect → `join` { joinToken, nickname }.
  *   2. On ack ok: persist the sessionToken (cc_session cookie, 24 h, SameSite
  *      Lax + localStorage) and switch to the waiting screen.
- *   3. Rejoin: if a cc_session cookie exists on mount, join with the
- *      sessionToken only (no nickname) → server resolves the same player and
- *      emits sync:full.
+ *   3. Rejoin: on mount the stored cc_session token AND the URL's joinToken
+ *      are sent together — the server rejoins the saved player only when the
+ *      session's team carries the SAME joinToken (the URL link is
+ *      authoritative). Otherwise the nickname form is shown (no error) and
+ *      the form submit performs a fresh join on the link's team.
  *   4. Waiting screen: team roster (live), theme, phase badge, connection dot.
  *   5. BUILD: the card canvas (my team, live layout) + prompt bar + my
  *      submissions + team activity feed, all wired to the store's build-phase
@@ -50,6 +52,8 @@ import {
 } from "@/lib/store";
 
 const SESSION_COOKIE = "cc_session";
+/** localStorage key for the last used nickname (prefill on a fresh join). */
+const NICKNAME_KEY = "cc_nickname";
 
 function readSessionToken(): string | null {
   if (typeof document !== "undefined") {
@@ -70,6 +74,22 @@ function persistSessionToken(token: string): void {
     window.localStorage.setItem(SESSION_COOKIE, token);
   } catch {
     // private mode etc. — the cookie is the important one
+  }
+}
+
+function readStoredNickname(): string {
+  try {
+    return (window.localStorage.getItem(NICKNAME_KEY) ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function persistNickname(nickname: string): void {
+  try {
+    window.localStorage.setItem(NICKNAME_KEY, nickname);
+  } catch {
+    // private mode etc. — prefill is a nicety, never fatal
   }
 }
 
@@ -403,7 +423,10 @@ export default function JoinClient({ token }: { token: string }) {
   const [busy, setBusy] = useState(false);
 
   const attemptJoin = useCallback(
-    async (payload: { role: "player"; joinToken?: string; nickname?: string }, sessionToken?: string) => {
+    async (
+      payload: { role: "player"; joinToken?: string; nickname?: string; sessionToken?: string },
+      sessionToken?: string,
+    ) => {
       setError(null);
       setBusy(true);
       const socket = createGameSocket({ role: "player", ...(sessionToken ? { sessionToken } : {}) });
@@ -412,11 +435,20 @@ export default function JoinClient({ token }: { token: string }) {
         await onceConnected(socket);
         const ack = await emitAck<AckResult>(socket, "join", joinPayload(payload));
         if (!ack.ok || !ack.identity) {
-          setError(friendlyJoinError(ack.ok ? "join failed" : ack.error));
+          const message = ack.ok ? "join failed" : ack.error;
+          // The URL link is authoritative: with a valid joinToken a stale-
+          // session refusal just means "show the nickname form" — never an
+          // "expired link" style error.
+          if (!(payload.joinToken && /stale session/i.test(message))) {
+            setError(friendlyJoinError(message));
+          }
           return false;
         }
         const ident = ack.identity as JoinIdentity;
-        if (ident.sessionToken) persistSessionToken(ident.sessionToken);
+        if (ident.sessionToken) {
+          persistSessionToken(ident.sessionToken);
+          persistNickname(ident.nickname);
+        }
         setIdentity(ident); // switches to the waiting screen (own socket)
         return true;
       } catch (err) {
@@ -430,13 +462,31 @@ export default function JoinClient({ token }: { token: string }) {
     [],
   );
 
-  // Rejoin on mount: a stored session token reconnects WITHOUT a nickname.
+  // Rejoin on mount. The URL's joinToken is AUTHORITATIVE: we send BOTH the
+  // stored session token and the link's token — the server rejoins the saved
+  // player only when the session's team carries the SAME joinToken. Any other
+  // outcome (session from a different team, stale session) is a FRESH JOIN:
+  // the server refuses the nickname-less attempt, we clear the error and
+  // show the nickname form (prefilled from the last used nickname). The old
+  // player is left untouched (they may still be active in another tab).
   useEffect(() => {
     const stored = readSessionToken();
-    if (!stored) return;
+    if (!stored) {
+      setNickname(readStoredNickname());
+      return;
+    }
     void attemptJoinWithSession(stored);
     async function attemptJoinWithSession(sessionToken: string): Promise<void> {
-      await attemptJoin({ role: "player" }, sessionToken);
+      const ok = await attemptJoin(
+        { role: "player", joinToken: token, sessionToken },
+        sessionToken,
+      );
+      if (!ok) {
+        // Stale/mismatched session + a valid link → silently fall back to
+        // the nickname form (never an "expired link" style error).
+        setError(null);
+        setNickname(readStoredNickname());
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -463,7 +513,20 @@ export default function JoinClient({ token }: { token: string }) {
         className="cc-card cc-setup"
         onSubmit={(e) => {
           e.preventDefault();
-          if (!busy) void attemptJoin({ role: "player", joinToken: token, nickname: nickname.trim() });
+          if (busy) return;
+          const stored = readSessionToken();
+          // Send the stored session alongside the link token: the server
+          // treats the LINK as authoritative (mismatched session → fresh
+          // join on this team; the old player is never deleted).
+          void attemptJoin(
+            {
+              role: "player",
+              joinToken: token,
+              nickname: nickname.trim(),
+              ...(stored ? { sessionToken: stored } : {}),
+            },
+            stored ?? undefined,
+          );
         }}
       >
         <label htmlFor="nickname">

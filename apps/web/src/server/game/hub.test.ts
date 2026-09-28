@@ -118,6 +118,71 @@ describe("player join flow", () => {
       hub.joinPlayer({ joinToken: teams[0]!.joinToken, nickname: "Late" }),
     ).rejects.toThrow(RepoError);
   });
+
+  it("a session from team A + team B's joinToken → NEW player in team B, old player untouched (link is authoritative)", async () => {
+    const { hub, repo } = makeHub();
+    const { teams } = await hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 2 });
+
+    // Player joins team A (gets a session token).
+    const inA = await hub.joinPlayer({ joinToken: teams[0]!.joinToken, nickname: "Alex" });
+    expect(inA.player.teamId).toBe(teams[0]!.id);
+
+    // Same session, but the URL points at team B's link → fresh join in B.
+    const inB = await hub.joinPlayer({
+      joinToken: teams[1]!.joinToken,
+      sessionToken: inA.player.sessionToken,
+      nickname: "Alex",
+    });
+    expect(inB.isNewPlayer).toBe(true);
+    expect(inB.player.teamId).toBe(teams[1]!.id);
+    expect(inB.player.id).not.toBe(inA.player.id);
+    expect(inB.player.nickname).toBe("Alex 2");
+
+    // The old player row is NOT deleted/removed (they may be live elsewhere).
+    const oldRow = await repo.getPlayer(inA.player.id);
+    expect(oldRow).not.toBeNull();
+    expect(oldRow!.removedAt).toBeNull();
+    expect(oldRow!.teamId).toBe(teams[0]!.id);
+    expect(oldRow!.sessionToken).toBe(inA.player.sessionToken);
+  });
+
+  it("a session + the SAME team's joinToken → same-player rejoin (no new row)", async () => {
+    const { hub, repo } = makeHub();
+    const { teams } = await hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 2 });
+
+    const first = await hub.joinPlayer({ joinToken: teams[0]!.joinToken, nickname: "Alex" });
+    const rejoin = await hub.joinPlayer({
+      joinToken: teams[0]!.joinToken,
+      sessionToken: first.player.sessionToken,
+      nickname: "Alex",
+    });
+    expect(rejoin.isNewPlayer).toBe(false);
+    expect(rejoin.player.id).toBe(first.player.id);
+    expect(rejoin.player.nickname).toBe("Alex");
+    expect(rejoin.team.id).toBe(teams[0]!.id);
+    // Only one player row for this session.
+    const members = await repo.listTeamPlayers(teams[0]!.id);
+    expect(members.filter((p) => p.nickname === "Alex")).toHaveLength(1);
+  });
+
+  it("a stale session + link + NO nickname is refused (client shows the form, no placeholder row)", async () => {
+    const { hub, repo } = makeHub();
+    const { teams } = await hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 2 });
+    const inA = await hub.joinPlayer({ joinToken: teams[0]!.joinToken, nickname: "Alex" });
+
+    // Mount-time auto attempt: session + link, no nickname → refused.
+    await expect(
+      hub.joinPlayer({
+        joinToken: teams[1]!.joinToken,
+        sessionToken: inA.player.sessionToken,
+      }),
+    ).rejects.toThrow(/stale session/);
+    await expect(
+      hub.joinPlayer({ joinToken: teams[1]!.joinToken }), // unresolvable session-less too
+    ).rejects.toThrow(/stale session|nickname/);
+    // Nothing was created in team B by the nickname-less attempts.
+    expect(await repo.countTeamMembers(teams[1]!.id)).toBe(0);
+  });
 });
 
 describe("applyEvent", () => {

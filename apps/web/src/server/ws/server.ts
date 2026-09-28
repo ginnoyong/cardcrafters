@@ -406,7 +406,10 @@ export function registerSocketHandlers(
           const result = await hub.joinPlayer({
             joinToken: payload.joinToken,
             nickname: payload.nickname,
-            sessionToken: data.sessionToken ?? undefined,
+            // Prefer the payload token (join link page sends BOTH it and the
+            // URL's joinToken so the server can arbitrate which wins);
+            // fall back to the handshake auth/cookie session token.
+            sessionToken: payload.sessionToken ?? data.sessionToken ?? undefined,
           });
           const identity: WsIdentity = {
             role: "player",

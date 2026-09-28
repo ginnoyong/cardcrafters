@@ -26,6 +26,9 @@ let port: number;
 let gameId: string;
 let gameCode: string;
 let joinTokenA: string;
+let joinTokenB: string;
+let teamAId: string;
+let teamBId: string;
 
 beforeEach(async () => {
   // Force the in-memory image queue even when the dev .env exports REDIS_URL
@@ -43,6 +46,9 @@ beforeEach(async () => {
   gameId = setup.game.id;
   gameCode = setup.game.code;
   joinTokenA = setup.teams[0]!.joinToken;
+  joinTokenB = setup.teams[1]!.joinToken;
+  teamAId = setup.teams[0]!.id;
+  teamBId = setup.teams[1]!.id;
 });
 
 afterEach(async () => {
@@ -160,6 +166,50 @@ describe("ws integration (memory repo, ephemeral port)", () => {
     expect(ack2.identity.playerId).toBe(ack.identity.playerId);
     expect(ack2.identity.nickname).toBe("Alex");
     expect(sync2.gameId).toBeTruthy();
+    second.close();
+  });
+
+  it("(c2) browser-style: session for team A + team B's link token → ack ok with team B identity (link wins)", async () => {
+    // 1. Join team A (session token acts as the browser's cc_session cookie).
+    const first = connect();
+    const firstAck = await emitAck<{
+      identity: { playerId: string; sessionToken: string; teamId: string };
+    }>(first, "join", { role: "player", joinToken: joinTokenA, nickname: "Alex" });
+    expect(firstAck.identity.teamId).toBe(teamAId);
+    first.close();
+
+    // 2. Same browser (session token now in the handshake "cookie") opens
+    //    team B's join link: the client sends BOTH tokens. The server must
+    //    honor the LINK and create a fresh player in team B (old player row
+    //    untouched) — never land the user back on team A.
+    const second = connect({ sessionToken: firstAck.identity.sessionToken });
+    const secondSync = waitFor<Record<string, unknown>>(second, "sync:full");
+    const ack2 = await emitAck<{
+      ok: boolean;
+      identity?: { playerId: string; teamId: string; nickname: string; sessionToken: string };
+    }>(second, "join", {
+      role: "player",
+      joinToken: joinTokenB,
+      nickname: "Alex",
+      sessionToken: firstAck.identity.sessionToken,
+    });
+    const sync2 = await secondSync;
+
+    expect(ack2.ok).toBe(true);
+    expect(ack2.identity!.teamId).toBe(teamBId);
+    expect(ack2.identity!.playerId).not.toBe(firstAck.identity.playerId); // NEW player
+    expect(ack2.identity!.sessionToken).not.toBe(firstAck.identity.sessionToken);
+    // Nickname is auto-suffixed: the old team-A row keeps "Alex" (it is
+    // deliberately untouched) and gameId+nickname is unique, so the fresh
+    // team-B player becomes "Alex 2" (same as the hub-level test).
+    expect(ack2.identity!.nickname).toBe("Alex 2");
+    // The sync:full snapshot shows the player as a member of team B only.
+    const teamB = (sync2.teams as Array<Record<string, unknown>>).find(
+      (t) => t.id === teamBId,
+    ) as Record<string, unknown>;
+    expect((teamB.members as Array<{ id: string }>).map((m) => m.id)).toContain(
+      ack2.identity!.playerId,
+    );
     second.close();
   });
 

@@ -51,6 +51,7 @@ export function joinPayload(input: {
   role: Role;
   joinToken?: string;
   nickname?: string;
+  sessionToken?: string;
 }): Record<string, unknown> {
   return joinSchema.parse(input) as unknown as Record<string, unknown>;
 }

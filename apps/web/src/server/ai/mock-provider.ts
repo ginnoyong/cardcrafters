@@ -353,13 +353,49 @@ export const MOCK_IMAGE_MIME = "image/png";
 
 type ShapeDrawer = { name: string; draw: (ctx: SKRSContext2D) => void };
 
-const SHAPES: readonly ShapeDrawer[] = buildShapes();
+/** Exported so tests can assert the shape pool + its distribution. */
+export const SHAPES: readonly ShapeDrawer[] = buildShapes();
 
-/** Draw one of the 12 shapes with the hue implied by `prompt`; returns PNG base64. */
+/**
+ * Seed for shape/hue selection. Plain `hashString(prompt) % N` is BIASED for
+ * sticker prompts: djb2's low bits are a plain character checksum — since
+ * 33·h ≡ h (mod 32), the low 5 bits of the hash are just 5381 + Σ chars
+ * (mod 32) — and with a bucket count like 12 = 4·3 the mod-4 component of
+ * the bucket comes from that letter checksum. Short, similar prompts (rhymes,
+ * one-word color swaps, anagrams) therefore cluster into neighboring buckets.
+ * BEFORE (measured with a tsx probe, `djb2 % 12`, 12-shape pool):
+ *   - 105 varied prompts: gift box 12%, lightning bolt 11%, star 10%, …
+ *     circle 6% — acceptable, BUT:
+ *   - 50 in-game-style prompts ("a red/blue/green balloon", "red star",
+ *     …): star 16%, heart/lightning/circle 10–14%, and 6 of the 12 shapes
+ *     are roundish (circle, smiley, balloon, cloud, flower, heart), so the
+ *     rendered stickers read as "mostly circles" at sticker scale.
+ * Fix: avalanche the hash (murmur3 fmix32) and mix in the prompt length plus
+ * the first/last characters (which djb2 underweights for short strings)
+ * BEFORE taking the bucket modulo. AFTER (same probes re-run against the
+ * final 20-shape pool with a fresh tsx probe):
+ * 105 varied prompts: 19/20 shapes used (only balloon unused), spread
+ * 2–12% per shape (worst bucket triangle 12%); 50 similar in-game prompts
+ * hit ALL 20 distinct shapes (worst bucket flower 10%); roundish shapes
+ * (6 of 20) took 32–34% of selections in both samples.
+ */
+function stickerSeed(prompt: string): number {
+  let h = hashString(prompt) ^ Math.imul(prompt.length, 0x9e3779b9);
+  h ^= (prompt.charCodeAt(0) ?? 0) + ((prompt.charCodeAt(prompt.length - 1) ?? 0) << 8);
+  // murmur3 fmix32 finalizer — full avalanche before the modulo.
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35);
+  h ^= h >>> 16;
+  return h >>> 0;
+}
+
+/** Draw one of the mock sticker shapes with the hue implied by `prompt`; returns PNG base64. */
 export function drawMockSticker(prompt: string): { base64: string; shape: string; hue: number } {
-  const h = hashString(prompt);
-  const hue = h % 360;
-  const shape = SHAPES[h % SHAPES.length]!;
+  const seed = stickerSeed(prompt);
+  const hue = seed % 360;
+  const shape = SHAPES[seed % SHAPES.length]!;
   const canvas = createCanvas(MOCK_IMAGE_SIZE, MOCK_IMAGE_SIZE);
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, MOCK_IMAGE_SIZE, MOCK_IMAGE_SIZE);
@@ -589,6 +625,211 @@ function buildShapes(): ShapeDrawer[] {
         ctx.beginPath();
         ctx.arc(cx, cy + S * 0.04, S * 0.24, 0.15 * Math.PI, 0.85 * Math.PI);
         ctx.lineWidth = 8;
+        ctx.stroke();
+      },
+    },
+    {
+      name: "tree",
+      draw: (ctx) => {
+        ctxRef = ctx;
+        // trunk
+        ctx.beginPath();
+        ctx.rect(cx - S * 0.09, cy + S * 0.18, S * 0.18, S * 0.32);
+        fillStroke();
+        // bottom tier
+        ctx.beginPath();
+        ctx.moveTo(cx - S * 0.42, cy + S * 0.24);
+        ctx.lineTo(cx + S * 0.42, cy + S * 0.24);
+        ctx.lineTo(cx, cy - S * 0.08);
+        ctx.closePath();
+        fillStroke();
+        // top tier
+        ctx.beginPath();
+        ctx.moveTo(cx - S * 0.3, cy - S * 0.02);
+        ctx.lineTo(cx + S * 0.3, cy - S * 0.02);
+        ctx.lineTo(cx, cy - S * 0.42);
+        ctx.closePath();
+        fillStroke();
+      },
+    },
+    {
+      name: "cat",
+      draw: (ctx) => {
+        ctxRef = ctx;
+        // ears first so the head outline reads in front of them
+        ctx.beginPath();
+        ctx.moveTo(cx - S * 0.3, cy - S * 0.1);
+        ctx.lineTo(cx - S * 0.36, cy - S * 0.46);
+        ctx.lineTo(cx - S * 0.04, cy - S * 0.24);
+        ctx.closePath();
+        fillStroke();
+        ctx.beginPath();
+        ctx.moveTo(cx + S * 0.3, cy - S * 0.1);
+        ctx.lineTo(cx + S * 0.36, cy - S * 0.46);
+        ctx.lineTo(cx + S * 0.04, cy - S * 0.24);
+        ctx.closePath();
+        fillStroke();
+        // head
+        ctx.beginPath();
+        ctx.ellipse(cx, cy + S * 0.1, S * 0.36, S * 0.33, 0, 0, Math.PI * 2);
+        fillStroke();
+        // eyes
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(cx - S * 0.13, cy + S * 0.02, S * 0.045, 0, Math.PI * 2);
+        ctx.arc(cx + S * 0.13, cy + S * 0.02, S * 0.045, 0, Math.PI * 2);
+        ctx.fill();
+        // whiskers
+        ctx.beginPath();
+        ctx.moveTo(cx - S * 0.2, cy + S * 0.16);
+        ctx.lineTo(cx - S * 0.42, cy + S * 0.12);
+        ctx.moveTo(cx - S * 0.2, cy + S * 0.22);
+        ctx.lineTo(cx - S * 0.42, cy + S * 0.24);
+        ctx.moveTo(cx + S * 0.2, cy + S * 0.16);
+        ctx.lineTo(cx + S * 0.42, cy + S * 0.12);
+        ctx.moveTo(cx + S * 0.2, cy + S * 0.22);
+        ctx.lineTo(cx + S * 0.42, cy + S * 0.24);
+        ctx.lineWidth = 6;
+        ctx.stroke();
+      },
+    },
+    {
+      name: "sun",
+      draw: (ctx) => {
+        ctxRef = ctx;
+        // rays first; the disc's fill+stroke covers their inner ends
+        for (let i = 0; i < 8; i++) {
+          const a = (i * Math.PI) / 4;
+          const bx = cx + S * 0.3 * Math.cos(a);
+          const by = cy + S * 0.3 * Math.sin(a);
+          const px = -Math.sin(a) * S * 0.07;
+          const py = Math.cos(a) * S * 0.07;
+          ctx.beginPath();
+          ctx.moveTo(bx + px, by + py);
+          ctx.lineTo(cx + S * 0.48 * Math.cos(a), cy + S * 0.48 * Math.sin(a));
+          ctx.lineTo(bx - px, by - py);
+          ctx.closePath();
+          fillStroke();
+        }
+        ctx.beginPath();
+        ctx.arc(cx, cy, S * 0.24, 0, Math.PI * 2);
+        fillStroke();
+      },
+    },
+    {
+      name: "moon",
+      draw: (ctx) => {
+        ctxRef = ctx;
+        // crescent opening right: outer arc the long way round, inner arc back.
+        // Geometry (R = outer radius, inner circle offset 0.55R with r = 0.8R):
+        // intersections sit at angle ±0.925 on the outer circle, ±1.505 on the inner.
+        const R = S * 0.46;
+        ctx.beginPath();
+        ctx.arc(cx, cy, R, -0.925, 0.925, true);
+        ctx.arc(cx + R * 0.55, cy, R * 0.8, 1.505, -1.505, false);
+        ctx.closePath();
+        fillStroke();
+      },
+    },
+    {
+      name: "rainbow",
+      draw: (ctx) => {
+        ctxRef = ctx;
+        // three concentric half-annulus bands on a flat baseline
+        const base = cy + S * 0.32;
+        for (let i = 0; i < 3; i++) {
+          const outer = S * 0.46 - i * 26;
+          ctx.beginPath();
+          ctx.arc(cx, base, outer, Math.PI, 0, false);
+          ctx.arc(cx, base, outer - 13, 0, Math.PI, true);
+          ctx.closePath();
+          fillStroke();
+        }
+      },
+    },
+    {
+      name: "snowflake",
+      draw: (ctx) => {
+        ctxRef = ctx;
+        // six kite arms, each with two barb triangles, one path
+        ctx.beginPath();
+        for (let i = 0; i < 6; i++) {
+          const a = -Math.PI / 2 + (i * Math.PI) / 3;
+          const ux = Math.cos(a);
+          const uy = Math.sin(a);
+          const px = -uy;
+          const py = ux;
+          const tipX = cx + ux * S * 0.48;
+          const tipY = cy + uy * S * 0.48;
+          // arm kite (thin diamond from center to tip)
+          ctx.moveTo(cx + px * S * 0.05, cy + py * S * 0.05);
+          ctx.lineTo(cx + ux * S * 0.3 + px * S * 0.02, cy + uy * S * 0.3 + py * S * 0.02);
+          ctx.lineTo(tipX, tipY);
+          ctx.lineTo(cx + ux * S * 0.3 - px * S * 0.02, cy + uy * S * 0.3 - py * S * 0.02);
+          ctx.closePath();
+          // two barbs at ±60° from the arm, starting at 55% radius
+          for (const sign of [-1, 1]) {
+            const ba = a + sign * (Math.PI / 3);
+            const ox = cx + ux * S * 0.28;
+            const oy = cy + uy * S * 0.28;
+            ctx.moveTo(ox, oy);
+            ctx.lineTo(ox + Math.cos(ba) * S * 0.2, oy + Math.sin(ba) * S * 0.2);
+            ctx.lineTo(
+              ox + Math.cos(ba) * S * 0.14 - ux * S * 0.02,
+              oy + Math.sin(ba) * S * 0.14 - uy * S * 0.02,
+            );
+            ctx.closePath();
+          }
+        }
+        fillStroke();
+      },
+    },
+    {
+      name: "gem",
+      draw: (ctx) => {
+        ctxRef = ctx;
+        // classic gem outline: table edge → girdle → culet
+        ctx.beginPath();
+        ctx.moveTo(cx - S * 0.3, cy - S * 0.32);
+        ctx.lineTo(cx + S * 0.3, cy - S * 0.32);
+        ctx.lineTo(cx + S * 0.48, cy - S * 0.06);
+        ctx.lineTo(cx, cy + S * 0.48);
+        ctx.lineTo(cx - S * 0.48, cy - S * 0.06);
+        ctx.closePath();
+        fillStroke();
+        // facet lines
+        ctx.beginPath();
+        ctx.moveTo(cx - S * 0.3, cy - S * 0.32);
+        ctx.lineTo(cx - S * 0.18, cy - S * 0.06);
+        ctx.lineTo(cx, cy + S * 0.48);
+        ctx.lineTo(cx + S * 0.18, cy - S * 0.06);
+        ctx.lineTo(cx + S * 0.3, cy - S * 0.32);
+        ctx.moveTo(cx - S * 0.48, cy - S * 0.06);
+        ctx.lineTo(cx + S * 0.48, cy - S * 0.06);
+        ctx.lineWidth = 6;
+        ctx.stroke();
+      },
+    },
+    {
+      name: "house",
+      draw: (ctx) => {
+        ctxRef = ctx;
+        // body
+        ctx.beginPath();
+        ctx.rect(cx - S * 0.32, cy - S * 0.06, S * 0.64, S * 0.52);
+        fillStroke();
+        // roof
+        ctx.beginPath();
+        ctx.moveTo(cx - S * 0.4, cy - S * 0.06);
+        ctx.lineTo(cx + S * 0.4, cy - S * 0.06);
+        ctx.lineTo(cx, cy - S * 0.44);
+        ctx.closePath();
+        fillStroke();
+        // door (white for contrast, like the flower centre)
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.rect(cx - S * 0.1, cy + S * 0.14, S * 0.2, S * 0.32);
+        ctx.fill();
         ctx.stroke();
       },
     },
