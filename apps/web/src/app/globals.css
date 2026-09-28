@@ -223,13 +223,13 @@ label {
   gap: 1rem;
 }
 
-.cc-qr-card,
-.cc-roster {
+.cc-qr-area {
   background: #fff; /* QR codes scan better on white */
   color: #1c1526;
+  border-radius: 8px;
 }
 
-.cc-qr-card img {
+.cc-qr-area img {
   border-radius: 8px;
   align-self: center;
 }
@@ -286,56 +286,50 @@ label {
   margin: 0;
 }
 
-/* --- GM flippable team cards (greeting front / QR back) ------------------ */
+/* --- GM vertical team cards (greeting + single-QR accordion) ------------- */
 
-.cc-flip-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-}
-
-.cc-flip-head h3 {
+.cc-team-card h3 {
   margin: 0;
 }
 
-.cc-flip-inner {
-  position: relative;
-  transform-style: preserve-3d;
-  transition: transform 0.45s ease;
-  display: grid;
+.cc-team-card .cc-btn-row {
+  margin-top: auto;
 }
 
-.cc-flip.is-flipped .cc-flip-inner {
-  transform: rotateY(180deg);
-}
-
-.cc-flip-face {
-  backface-visibility: hidden;
-  -webkit-backface-visibility: hidden;
-}
-
-.cc-flip-front {
-  display: grid;
+/* Single-QR accordion: every card's QR area is ALWAYS in the DOM (so print
+   can reveal them all via CSS) but only the active one is displayed on
+   screen — cards stay short, nothing is truncated. */
+.cc-qr-area {
+  display: none;
+  flex-direction: column;
+  align-items: center;
   gap: 0.5rem;
+  padding: 0.75rem;
 }
 
-.cc-flip-back {
-  position: absolute;
-  inset: 0;
-  transform: rotateY(180deg);
-  overflow: auto;
+.cc-qr-area.is-active {
+  display: flex;
 }
 
-.cc-flip-head .cc-btn {
-  flex: 0 0 auto;
-  min-width: var(--tap);
+.cc-qr-area img {
+  width: 190px;
+  height: 190px;
 }
 
-/* Roster below the flip card: compact rows + compact Kick buttons. */
+/* Roster below the card: transparent section with a subtle hairline border,
+   no card-like fill or shadow — compact rows + compact Kick buttons. */
 .cc-roster {
   display: grid;
   gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--text-muted) 30%, transparent);
+  border-radius: var(--radius);
+  box-shadow: none;
+}
+
+.cc-roster .cc-hint {
+  margin: 0;
 }
 
 .cc-roster .cc-player-list li {
@@ -347,28 +341,6 @@ label {
   padding: 0.15rem 0.5rem;
   min-height: 0;
   font-size: 0.75rem;
-}
-
-/* QR back face must fit without scrolling. Height budget: card padding
-   (2×0.75rem = 24) + QR 190 + gap 8 + url ~20 + gap 8 + button ~30 ≈ 280px,
-   so a 300px min-height covers it (1280px viewport, 2-col grid: no page
-   scroll — each grid cell is ~530px wide, card ~300px tall). */
-.cc-flip {
-  perspective: 1200px;
-  min-height: 300px;
-}
-
-.cc-qr-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.75rem;
-}
-
-.cc-qr-card img {
-  width: 190px;
-  height: 190px;
 }
 
 /* Low-profile, compact Copy link button (full width, small footprint). */
@@ -418,9 +390,6 @@ label {
 @media (prefers-reduced-motion: reduce) {
   .cc-shimmer {
     animation: none;
-  }
-  .cc-flip-inner {
-    transition: none;
   }
   .cc-chip-pending,
   .cc-flash {
@@ -771,7 +740,8 @@ label {
   .cc-hint,
   .cc-error,
   .cc-badge,
-  .cc-header {
+  .cc-header,
+  .cc-greeting {
     display: none !important;
   }
 
@@ -779,25 +749,10 @@ label {
     display: block;
   }
 
-  .cc-team .cc-roster {
-    display: none;
-  }
-
-  /* Flippable cards: always print the QR (back) face, never the greeting. */
-  .cc-flip {
-    perspective: none;
-  }
-  .cc-flip-inner {
-    transform: rotateY(180deg) !important;
-  }
-  .cc-flip-front {
-    display: none !important;
-  }
-  .cc-flip-back {
-    position: static !important;
-    transform: none !important;
-    backface-visibility: visible !important;
-    -webkit-backface-visibility: visible !important;
+  /* The QR areas are always in the DOM — printing reveals every one, no
+     matter which (if any) accordion is open on screen. */
+  .cc-qr-area {
+    display: flex !important;
   }
 
   /* One QR card per page: team name huge, QR huge, URL readable. */
@@ -810,17 +765,21 @@ label {
     padding-top: 3rem;
   }
 
-  .cc-qr-card {
+  .cc-team-card {
+    display: contents;
+  }
+
+  .cc-team-name {
+    font-size: 2rem;
+    margin: 0.5rem 0;
+  }
+
+  .cc-qr-area {
     border: 2px solid #000;
     text-align: center;
   }
 
-  .cc-qr-card h3 {
-    font-size: 2rem;
-    margin: 0.5rem;
-  }
-
-  .cc-qr-card img {
+  .cc-qr-area img {
     width: 420px;
     height: 420px;
   }

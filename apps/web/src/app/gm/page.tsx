@@ -7,9 +7,13 @@
  *   1. Team count (1–10) + REQUIRED theme → POST /api/games. The SERVER sets
  *      the theme and auto-generates each team's greeting (the console never
  *      emits gm:setTheme).
- *   2. Console: one FLIPPABLE card per team — front = the generated greeting
- *      (inline edit + regenerate), back = QR join code + copyable link. The
- *      roster ("N joined" + green dots + kick buttons) sits BELOW the card.
+ *   2. Console: one vertical card per team — header (name + label badge), the
+ *      generated greeting (inline edit + regenerate) and a button row
+ *      [Edit] [Regenerate] [Show QR]. "Show QR" toggles a single-QR accordion
+ *      (only one team's QR area is open at a time; all QR areas render in the
+ *      DOM so print can reveal every one via CSS). The roster ("N joined" +
+ *      green dots + kick buttons) sits BELOW the card in a hairline-bordered
+ *      section.
  *   3. A single "Start building" button below the grid emits
  *      gm:approveGreetings once every team's greeting is ready; after BUILD
  *      starts it disappears.
@@ -18,7 +22,7 @@
  *   5. Resume: /gm?code=CODE reloads the console for an existing game
  *      (tokens + greetings come back via /api/games/:code?full=1 AND the
  *      join-time sync:full snapshot).
- *   6. Live previews: below the flippable cards, one read-only CardCanvas
+ *   6. Live previews: below the team cards, one read-only CardCanvas
  *      mini per team fed by the store (GREETINGS: greeting + empty canvas;
  *      BUILD: live item:pending/ready + layout:updated updates — the GM's
  *      socket joins every team room, so team-room events land here).
@@ -97,16 +101,20 @@ function PhaseBadge({ phase, round }: { phase: string | null; round: number | nu
 }
 
 // ---------------------------------------------------------------------------
-// One flippable team card: front = greeting, back = QR + join link.
+// One vertical team card: header, greeting (with inline edit + regenerate),
+// a [Edit] [Regenerate] [Show QR] button row and a conditional QR area
+// (single-QR accordion owned by the Console via qrActive/onToggleQr).
 // The roster ("N joined" + one green dot per player + kick buttons) renders
-// below the flip container, inside the same grid cell wrapper.
+// below the card, inside the same grid cell wrapper.
 // ---------------------------------------------------------------------------
 
-function TeamFlipCard({
+function TeamCard({
   team,
   joinUrl,
   greetingText,
   members,
+  qrActive,
+  onToggleQr,
   onKick,
   onEditGreeting,
   onRegenGreeting,
@@ -115,11 +123,12 @@ function TeamFlipCard({
   joinUrl: string;
   greetingText: string;
   members: Array<{ id: string; nickname: string; connected: boolean }>;
+  qrActive: boolean;
+  onToggleQr: () => void;
   onKick: (playerId: string) => void;
   onEditGreeting: (teamId: string, text: string) => Promise<GreetingMutationResult>;
   onRegenGreeting: (teamId: string) => Promise<GreetingMutationResult>;
 }) {
-  const [flipped, setFlipped] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [regenBusy, setRegenBusy] = useState(false);
@@ -180,122 +189,120 @@ function TeamFlipCard({
     }
   }
 
-  const toggle = () => {
-    setFlipped((f) => !f);
-    setError(null);
-    setEditing(false);
-  };
-
   return (
     <div className="cc-team" aria-label={`team ${team.label} card`}>
-      <div className="cc-flip-head">
-        <h3>
+      <div className="cc-card cc-team-card">
+        {/* Header — team name + label badge. */}
+        <h3 className="cc-team-name">
           {team.name} <span className="cc-muted">({team.label})</span>
         </h3>
-        <button
-          type="button"
-          className="cc-btn cc-btn-small"
-          aria-pressed={flipped}
-          aria-label={flipped ? `show greeting for ${team.name}` : `show QR code for ${team.name}`}
-          onClick={toggle}
+
+        {/* Greeting text (or the generating placeholder). */}
+        {regenBusy ? (
+          <p className="cc-greeting cc-shimmer" aria-live="polite">
+            Rolling a fresh greeting…
+          </p>
+        ) : greetingText ? (
+          <p className="cc-greeting" aria-live="polite">
+            “{greetingText}”
+          </p>
+        ) : (
+          <p className="cc-greeting cc-shimmer" aria-live="polite">
+            Writing the first draft…
+          </p>
+        )}
+
+        {/* Inline edit flow (textarea + Save/Cancel) while editing. */}
+        {editing ? (
+          <div className="cc-edit-block">
+            <label htmlFor={`greet-${team.id}`}>
+              Greeting text (max 60 characters)
+              <textarea
+                id={`greet-${team.id}`}
+                value={draft}
+                maxLength={60}
+                rows={2}
+                onChange={(e) => setDraft(e.target.value)}
+              />
+            </label>
+            <div className="cc-btn-row">
+              <button type="button" className="cc-btn cc-btn-primary cc-btn-small" onClick={() => void save()}>
+                Save
+              </button>
+              <button
+                type="button"
+                className="cc-btn cc-btn-small"
+                onClick={() => {
+                  setEditing(false);
+                  setError(null);
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {error ? (
+          <p role="alert" className="cc-error">
+            {error}
+          </p>
+        ) : null}
+
+        {/* Button row: greeting actions + the single-QR accordion toggle. */}
+        <div className="cc-btn-row">
+          <button type="button" className="cc-btn cc-btn-small" onClick={startEditing}>
+            Edit
+          </button>
+          <button
+            type="button"
+            className="cc-btn cc-btn-small"
+            disabled={regenBusy}
+            onClick={() => void regenerate()}
+          >
+            {regenBusy ? "Regenerating…" : "Regenerate"}
+          </button>
+          <button
+            type="button"
+            className="cc-btn cc-btn-small"
+            aria-expanded={qrActive}
+            aria-pressed={qrActive}
+            aria-label={qrActive ? `hide QR code for ${team.name}` : `show QR code for ${team.name}`}
+            onClick={onToggleQr}
+          >
+            {qrActive ? "Hide QR" : "Show QR"}
+          </button>
+        </div>
+
+        {/* QR area — single-QR accordion. ALWAYS rendered in the DOM (data-URLs
+            are cheap) so @media print can reveal every one via CSS; on screen
+            only the active one (qrTeamId === team.id) is displayed, so cards
+            stay short with no truncation. */}
+        <div
+          className={`cc-qr-area${qrActive ? " is-active" : ""}`}
+          data-qr-active={qrActive ? "true" : "false"}
         >
-          {flipped ? "Show greeting" : "Show QR"}
-        </button>
-      </div>
-
-      <div className={`cc-flip${flipped ? " is-flipped" : ""}`}>
-        <div className="cc-flip-inner">
-          {/* FRONT — greeting + join status/roster */}
-          <div className="cc-flip-face cc-flip-front cc-card">
-            {regenBusy ? (
-              <p className="cc-greeting cc-shimmer" aria-live="polite">
-                Rolling a fresh greeting…
-              </p>
-            ) : greetingText ? (
-              <p className="cc-greeting" aria-live="polite">
-                “{greetingText}”
-              </p>
-            ) : (
-              <p className="cc-greeting cc-shimmer" aria-live="polite">
-                Writing the first draft…
-              </p>
-            )}
-
-            {editing ? (
-              <div className="cc-edit-block">
-                <label htmlFor={`greet-${team.id}`}>
-                  Greeting text (max 60 characters)
-                  <textarea
-                    id={`greet-${team.id}`}
-                    value={draft}
-                    maxLength={60}
-                    rows={2}
-                    onChange={(e) => setDraft(e.target.value)}
-                  />
-                </label>
-                <div className="cc-btn-row">
-                  <button type="button" className="cc-btn cc-btn-primary cc-btn-small" onClick={() => void save()}>
-                    Save
-                  </button>
-                  <button
-                    type="button"
-                    className="cc-btn cc-btn-small"
-                    onClick={() => {
-                      setEditing(false);
-                      setError(null);
-                    }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="cc-btn-row">
-                <button type="button" className="cc-btn cc-btn-small" onClick={startEditing}>
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  className="cc-btn cc-btn-small"
-                  disabled={regenBusy}
-                  onClick={() => void regenerate()}
-                >
-                  {regenBusy ? "Regenerating…" : "Regenerate"}
-                </button>
-              </div>
-            )}
-            {error ? (
-              <p role="alert" className="cc-error">
-                {error}
-              </p>
-            ) : null}
-          </div>
-
-          {/* BACK — QR + join link. Height budget (see .cc-flip in globals.css):
-              QR 190 + url ~20 + copy button ~32 + paddings ≤ ~300px total. */}
-          <div className="cc-flip-face cc-flip-back cc-card cc-qr-card">
-            {qr ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={qr} alt={`QR code to join ${team.name}`} width={190} height={190} />
-            ) : (
-              <div className="cc-qr-placeholder" aria-hidden="true" />
-            )}
-            <p className="cc-join-url">{joinUrl}</p>
-            <button
-              type="button"
-              className="cc-btn cc-btn-copy"
-              onClick={copy}
-              aria-label={`copy join link for ${team.name}`}
-            >
-              {copied ? "Copied ✓" : "Copy join link"}
-            </button>
-          </div>
+          {qr ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={qr} alt={`QR code to join ${team.name}`} width={190} height={190} />
+          ) : (
+            <div className="cc-qr-placeholder" aria-hidden="true" />
+          )}
+          <p className="cc-join-url">{joinUrl}</p>
+          <button
+            type="button"
+            className="cc-btn cc-btn-copy"
+            onClick={copy}
+            aria-label={`copy join link for ${team.name}`}
+          >
+            {copied ? "Copied ✓" : "Copy join link"}
+          </button>
         </div>
       </div>
 
-      {/* Roster lives BELOW the flip card (moved out of the greeting face):
-          "{n} joined" plus one filled green dot per actual player, with a
-          compact Kick button per member. Data flow unchanged. */}
+      {/* Roster lives BELOW the card: "{n} joined" plus one filled green dot
+          per actual player, with a compact Kick button per member. Data flow
+          unchanged. */}
       <div className="cc-roster" aria-label={`team ${team.label} roster`}>
         <p className="cc-hint" aria-label={`team ${team.label} join status`}>
           {members.length} joined
@@ -357,6 +364,8 @@ function Console({ game }: { game: CreatedGame }) {
   const { snapshot, dispatch } = useGameStore();
   const [actionError, setActionError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
+  // Single-QR accordion: the one team whose QR area is open (null = all closed).
+  const [qrTeamId, setQrTeamId] = useState<string | null>(null);
   const socketRef = useRef<ReturnType<typeof createGameSocket> | null>(null);
 
   /** Core ack emitter — returns the result without touching the banner. */
@@ -486,17 +495,20 @@ function Console({ game }: { game: CreatedGame }) {
         </p>
       ) : null}
 
-      {/* Teams: flippable greeting/QR cards. */}
+      {/* Teams: vertical greeting/QR cards with the single-QR accordion. */}
       <section aria-label="teams" className="cc-team-grid">
         {teams.map((team) => {
           const joinUrl = `${window.location.origin}/join/${team.joinToken}`;
+          const qrActive = qrTeamId === team.id;
           return (
-            <TeamFlipCard
+            <TeamCard
               key={team.id}
               team={team}
               joinUrl={joinUrl}
               greetingText={team.greetingText}
               members={team.members}
+              qrActive={qrActive}
+              onToggleQr={() => setQrTeamId(qrActive ? null : team.id)}
               onKick={(playerId) => void gmAction("gm:kick", { playerId })}
               // Greeting mutations surface their ack errors INLINE on the card
               // (the card's own error slot), not in the global banner.
