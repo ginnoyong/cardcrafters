@@ -166,6 +166,57 @@ describe("layoutCompositionSchema", () => {
   it("round-trips through JSON", () => {
     expect(roundTrip(layoutCompositionSchema, valid)).toEqual(valid);
   });
+
+  // -- Semantic-grouping extension (backward compatible) --------------------
+
+  const extended = {
+    ...valid,
+    groups: [
+      { itemIds: ["i1", "i2"], cx: 300, cy: 300, spread: 120, subject: "nature scene" },
+    ],
+    hints: [
+      { itemId: "i1", role: "focal", tiltToward: "i2", importance: 1 },
+      { itemId: "i2", role: "support", tiltToward: "group_center", importance: 0.5 },
+    ],
+  };
+
+  it("accepts group subject + per-item hints (extension fields)", () => {
+    expect(layoutCompositionSchema.parse(extended)).toEqual(extended);
+  });
+
+  it("extension fields are optional (pre-upgrade outputs still parse)", () => {
+    expect(layoutCompositionSchema.parse(valid)).toEqual(valid);
+    expect(
+      layoutCompositionSchema.parse({
+        ...valid,
+        hints: [{ itemId: "i1" }],
+      }).hints,
+    ).toEqual([{ itemId: "i1" }]);
+  });
+
+  it("rejects bad hint values (importance out of range, unknown role, empty tiltToward)", () => {
+    const bad = (h: Record<string, unknown>) =>
+      layoutCompositionSchema.parse({ ...extended, hints: [h] });
+    expect(() => bad({ itemId: "i1", importance: 1.5 })).toThrow();
+    expect(() => bad({ itemId: "i1", importance: -0.1 })).toThrow();
+    expect(() => bad({ itemId: "i1", role: "protagonist" })).toThrow();
+    expect(() => bad({ itemId: "i1", tiltToward: "" })).toThrow();
+    expect(() => bad({ itemId: "" })).toThrow();
+    expect(() => bad({ itemId: "i1", extra: true })).toThrow();
+  });
+
+  it("rejects an out-of-range group subject shape", () => {
+    expect(() =>
+      layoutCompositionSchema.parse({
+        ...valid,
+        groups: [{ itemIds: ["i1"], cx: 300, cy: 300, spread: 120, subject: "" }],
+      }),
+    ).toThrow();
+  });
+
+  it("round-trips the extended contract through JSON", () => {
+    expect(roundTrip(layoutCompositionSchema, extended)).toEqual(extended);
+  });
 });
 
 // ---------------------------------------------------------------------------

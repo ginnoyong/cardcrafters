@@ -352,6 +352,266 @@ describe("solveLayout — sizing policy v2 (coverage-proportional targets)", () 
   });
 });
 
+describe("solveLayout — group-aware solver (semantic grouping)", () => {
+  /** Build a LayoutComposition hint object for the given groups/itemHints. */
+  function hintsFor(
+    groups: Array<{ ids: string[]; cx: number; cy: number; spread: number }>,
+    itemHints: Array<{ itemId: string; role?: "focal" | "support"; tiltToward?: string; importance?: number }> = [],
+    focal?: { x: number; y: number },
+  ) {
+    return layoutCompositionSchema.parse({
+      focalPoint: focal ?? { x: card.w / 2, y: card.h * 0.6 },
+      groups: groups.map((g) => ({ itemIds: g.ids, cx: g.cx, cy: g.cy, spread: g.spread })),
+      hints: itemHints,
+      textZone: TEXT_ZONE,
+      suggestedGreetingStyle: { align: "center", y: 150 },
+    });
+  }
+
+  /** Center distance between two placements (centers ARE x/y). */
+  const dist = (a: Placement, b: Placement): number => Math.hypot(a.x - b.x, a.y - b.y);
+
+  /** Placed half-extent of a square item = half its display width. */
+  const halfOf = (p: Placement, item: LayoutItem): number => (item.imgW * p.scale * K) / 2;
+
+  /** Max pairwise TRUE (SAT) overlap ratio. */
+  const maxSatOverlap = (res: ReturnType<typeof solveLayout>, its: LayoutItem[]): number => {
+    const byId = new Map(its.map((i) => [i.id, i] as const));
+    let max = 0;
+    for (let i = 0; i < res.placements.length; i++) {
+      for (let j = i + 1; j < res.placements.length; j++) {
+        max = Math.max(
+          max,
+          overlapRatio(
+            rotatedRectCorners(res.placements[i]!, byId.get(res.placements[i]!.itemId)!, K),
+            rotatedRectCorners(res.placements[j]!, byId.get(res.placements[j]!.itemId)!, K),
+          ),
+        );
+      }
+    }
+    return max;
+  };
+
+  it("cohesion: 2 same-group items sit near-touching (d ≤ 1.3×(halfA+halfB)), constraints pass", () => {
+    // Measured (seeds 1..5, equal 256×256 squares, cohesion target 1.15×):
+    // the pair equilibrates at ≈ 1.15–1.2× (halfA+halfB) — the cohesion term
+    // (W=1.0) dominates the spacing term's comfort distance (≈ 1.31× with
+    // rotation-inflated AABBs) below the target.
+    const its = [mkItem("a"), mkItem("b", { orderIndex: 1 })];
+    const hints = hintsFor([{ ids: ["a", "b"], cx: card.w / 2, cy: card.h * 0.55, spread: 140 }]);
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const res = solveLayout(its, {
+        cardDims: card,
+        k: K,
+        textZone: TEXT_ZONE,
+        hints,
+        rng: mulberry32(seed),
+      });
+      expect(res.placements).toHaveLength(2);
+      const pa = res.placements.find((p) => p.itemId === "a")!;
+      const pb = res.placements.find((p) => p.itemId === "b")!;
+      const halfSum = halfOf(pa, its[0]!) + halfOf(pb, its[1]!);
+      const d = dist(pa, pb);
+      expect(d, `seed ${seed} d/halfSum=${(d / halfSum).toFixed(2)}`).toBeLessThanOrEqual(
+        1.3 * halfSum + 1e-9,
+      );
+      // All hard constraints unchanged (incl. the 10% true-SAT overlap cap).
+      expect(maxSatOverlap(res, its), `seed ${seed}`).toBeLessThanOrEqual(0.10);
+      expect(
+        checkLayout(res.placements, its, { card, k: K, textZone: TEXT_ZONE }).ok,
+        `seed ${seed}`,
+      ).toBe(true);
+    }
+  });
+
+  it("separation: 2 different-group items keep breathing room (d ≥ 1.4×(halfA+halfB))", () => {
+    // Measured (seeds 1..5): the separation target 1.6× is not fully
+    // reachable at the 0.55 width target (max jointly-feasible center
+    // distance ≈ 1.49×) — cohesion pushes to that ceiling WITHOUT shrinking
+    // the stickers (fidelity's shrink cost exceeds the residual cohesion
+    // gain), which still clears the 1.4× assertion.
+    const its = [mkItem("a"), mkItem("b", { orderIndex: 1 })];
+    const hints = hintsFor([
+      { ids: ["a"], cx: card.w * 0.3, cy: card.h * 0.55, spread: 90 },
+      { ids: ["b"], cx: card.w * 0.7, cy: card.h * 0.55, spread: 90 },
+    ]);
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const res = solveLayout(its, {
+        cardDims: card,
+        k: K,
+        textZone: TEXT_ZONE,
+        hints,
+        rng: mulberry32(seed),
+      });
+      expect(res.placements).toHaveLength(2);
+      const pa = res.placements.find((p) => p.itemId === "a")!;
+      const pb = res.placements.find((p) => p.itemId === "b")!;
+      const halfSum = halfOf(pa, its[0]!) + halfOf(pb, its[1]!);
+      const d = dist(pa, pb);
+      expect(d, `seed ${seed} d/halfSum=${(d / halfSum).toFixed(2)}`).toBeGreaterThanOrEqual(
+        1.4 * halfSum - 1e-9,
+      );
+      expect(maxSatOverlap(res, its), `seed ${seed}`).toBeLessThanOrEqual(0.10);
+      expect(
+        checkLayout(res.placements, its, { card, k: K, textZone: TEXT_ZONE }).ok,
+        `seed ${seed}`,
+      ).toBe(true);
+    }
+  });
+
+  it("orientation: B with tiltToward A faces A (rotation within ±20° of the angle toward A)", () => {
+    // Geometry: A's group is anchored top-right, B's bottom-left — the
+    // separation + focal terms park A and B in opposite corners, so the
+    // angle from B to A is a robust ≈ −55° diagonal (NOT the ≈ 0° horizontal
+    // arrangement a single shared group produces, where correctly facing A
+    // coincides with rotation ≈ 0 and the assertion would be vacuous).
+    const its = [
+      mkItem("a", { visualWeight: 0.8, orderIndex: 0 }),
+      mkItem("b", { visualWeight: 0.4, orderIndex: 1 }),
+    ];
+    const hints = hintsFor(
+      [
+        { ids: ["a"], cx: card.w * 0.72, cy: card.h * 0.32, spread: 90 },
+        { ids: ["b"], cx: card.w * 0.28, cy: card.h * 0.72, spread: 90 },
+      ],
+      [{ itemId: "b", tiltToward: "a", importance: 0.4 }],
+    );
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const res = solveLayout(its, {
+        cardDims: card,
+        k: K,
+        textZone: TEXT_ZONE,
+        hints,
+        rng: mulberry32(seed),
+      });
+      expect(res.placements).toHaveLength(2);
+      const pa = res.placements.find((p) => p.itemId === "a")!;
+      const pb = res.placements.find((p) => p.itemId === "b")!;
+      const angToA =
+        ((Math.atan2(pa.y - pb.y, pa.x - pb.x) * 180) / Math.PI + 540) % 360 - 180;
+      const dev = Math.abs(((pb.rotation - angToA + 540) % 360) - 180);
+      expect(dev, `seed ${seed} rot=${pb.rotation} ang=${angToA.toFixed(1)}`).toBeLessThanOrEqual(
+        20 + 1e-9,
+      );
+      // B visibly TILTED (a diagonal target angle → rotation far from 0;
+      // the pre-hint policy would keep it within ±12°).
+      expect(Math.abs(pb.rotation), `seed ${seed} rot=${pb.rotation}`).toBeGreaterThan(12);
+      expect(
+        checkLayout(res.placements, its, { card, k: K, textZone: TEXT_ZONE }).ok,
+        `seed ${seed}`,
+      ).toBe(true);
+    }
+  });
+
+  it("sizes: the group's focal item gets ≥ the support's width (importance ordering)", () => {
+    const its = [
+      mkItem("a", { visualWeight: 0.8, orderIndex: 0 }),
+      mkItem("b", { visualWeight: 0.4, orderIndex: 1 }),
+    ];
+    const hints = hintsFor(
+      [{ ids: ["a", "b"], cx: card.w / 2, cy: card.h * 0.58, spread: 140 }],
+      [
+        { itemId: "a", role: "focal", importance: 1 },
+        { itemId: "b", role: "support", importance: 0.3 },
+      ],
+    );
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const res = solveLayout(its, {
+        cardDims: card,
+        k: K,
+        textZone: TEXT_ZONE,
+        hints,
+        rng: mulberry32(seed),
+      });
+      expect(res.placements).toHaveLength(2);
+      const wa = its[0]!.imgW * res.placements.find((p) => p.itemId === "a")!.scale * K;
+      const wb = its[1]!.imgW * res.placements.find((p) => p.itemId === "b")!.scale * K;
+      expect(wa, `seed ${seed}`).toBeGreaterThanOrEqual(wb - 1e-9);
+      expect(
+        checkLayout(res.placements, its, { card, k: K, textZone: TEXT_ZONE }).ok,
+        `seed ${seed}`,
+      ).toBe(true);
+    }
+  });
+
+  it("determinism: hinted solve is byte-identical for the same seed", () => {
+    const its = items(6, (i) => 0.3 + 0.1 * i);
+    const hints = hintsFor(
+      [
+        { ids: ["i0", "i1", "i2"], cx: card.w * 0.35, cy: card.h * 0.55, spread: 130 },
+        { ids: ["i3", "i4", "i5"], cx: card.w * 0.65, cy: card.h * 0.6, spread: 130 },
+      ],
+      its.map((i, idx) => ({
+        itemId: i.id,
+        tiltToward: "group_center" as const,
+        importance: 1 - idx * 0.1,
+      })),
+    );
+    const run = () =>
+      solveLayout(its, {
+        cardDims: card,
+        k: K,
+        textZone: TEXT_ZONE,
+        hints,
+        rng: mulberry32(777),
+      });
+    const a = run();
+    const b = run();
+    expect(JSON.stringify(a.placements)).toBe(JSON.stringify(b.placements));
+    expect(a.score).toBe(b.score);
+  });
+
+  it("stress: 25 items with pair groups converge; same-group pairs cluster tighter than cross-group", () => {
+    const its = items(25, (i) => ((i * 37) % 100) / 100);
+    const groups: Array<{ ids: string[]; cx: number; cy: number; spread: number }> = [];
+    for (let i = 0; i < its.length; i += 2) {
+      const ids = its.slice(i, i + 2).map((it) => it.id);
+      if (ids.length === 1 && groups.length > 0) groups[groups.length - 1]!.ids.push(ids[0]!);
+      else groups.push({ ids, cx: card.w * (i % 4 === 0 ? 0.35 : 0.65), cy: card.h * 0.6, spread: 120 });
+    }
+    const hints = hintsFor(
+      groups,
+      its.map((i) => ({ itemId: i.id, tiltToward: "group_center" as const })),
+    );
+    const res = solveLayout(its, {
+      cardDims: card,
+      k: K,
+      textZone: TEXT_ZONE,
+      hints,
+      rng: mulberry32(2024),
+    });
+    expect(res.placements).toHaveLength(25);
+    expect(res.warnings.some((w) => w.includes("could not be placed"))).toBe(false);
+    expect(
+      checkLayout(res.placements, its, {
+        card,
+        k: K,
+        textZone: TEXT_ZONE,
+        minSizePct: res.relaxedMinSize,
+      }).ok,
+    ).toBe(true);
+    const byId = new Map(res.placements.map((p) => [p.itemId, p] as const));
+    let intra = 0;
+    let intraN = 0;
+    let cross = 0;
+    let crossN = 0;
+    for (let i = 0; i < its.length; i++) {
+      for (let j = i + 1; j < its.length; j++) {
+        const d = dist(byId.get(its[i]!.id)!, byId.get(its[j]!.id)!);
+        const sameGroup = groups.some((g) => g.ids.includes(its[i]!.id) && g.ids.includes(its[j]!.id));
+        if (sameGroup) {
+          intra += d;
+          intraN++;
+        } else {
+          cross += d;
+          crossN++;
+        }
+      }
+    }
+    expect(intra / intraN).toBeLessThan(cross / crossN);
+  });
+});
+
 describe("solveLayout — determinism", () => {
   it("same seed → byte-identical placements JSON", () => {
     const its = items(7, (i) => 0.2 + 0.1 * i);

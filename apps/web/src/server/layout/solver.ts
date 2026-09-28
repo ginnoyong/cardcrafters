@@ -34,7 +34,7 @@
  * zIndex = the item's orderIndex (later submissions render on top).
  */
 
-import type { LayoutComposition, Placement } from "@cardcrafters/shared";
+import type { LayoutComposition, LayoutItemHint, Placement } from "@cardcrafters/shared";
 import {
   MIN_ITEM_SIZE_PCT,
   SOLO_ITEM_COVERAGE,
@@ -44,6 +44,7 @@ import {
 import {
   baseFit,
   checkItem,
+  displayHeight,
   displayWidth,
   overlapCapFor,
   placedBox,
@@ -136,6 +137,49 @@ const ROT_NUDGE_DEG = 5;
  */
 const SCALE_FIDELITY_WEIGHT = 0.5;
 /**
+ * Group-cohesion soft terms (semantic-grouping pass — solver-internal, NOT
+ * part of scoreLayout, same mechanism as `fidelity`).
+ *
+ * COHESION: pairs of items in the SAME hint group are pulled together to a
+ * target center distance of COHESION_TOUCH_FACTOR × (halfA + halfB), where
+ * half = the mean half-extent ((displayW + displayH) / 4) of the placed
+ * sticker — "near-touching" for the pair (for two equal squares: 1.15 × side).
+ * Items in DIFFERENT hint groups get breathing room: centers closer than
+ * COHESION_SEPARATION_FACTOR × (halfA + halfB) are penalized proportionally.
+ * Both penalties are normalized per pair and SUMMED (gradient does not decay
+ * with n). Pairs where either item has no group are neutral (no info).
+ *
+ * Weight (1.0) — chosen so cohesion dominates the positioning preferences it
+ * must beat, measured on the default 5:7 card (two equal 256×256 squares,
+ * width target 0.55, halfA+halfB ≈ 393): with W = 1.0 the same-group pair
+ * equilibrates AT the 1.15× target (≈ 452 units, ratio 1.15 — the spacing
+ * term's comfort distance ≈ 513 is weaker: moving d from 452 → 513 costs
+ * cohesion (513−452)/452 ≈ 0.135 vs the spacing term's 0.25 × (513−d)/513
+ * gain ≈ 0.03), and the different-group pair is pushed to the largest
+ * jointly-feasible distance (≈ 587 = 1.49× at desired scale — fidelity's
+ * shrink cost 0.09 > the residual cohesion gain 0.067, so stickers do NOT
+ * undersize to satisfy separation; the hard 10% SAT cap still wins over both).
+ * With W = 0.5 the same-group pair drifted to ≈ 1.5× (too loose).
+ *
+ * ORIENTATION: per-item tilt hints. An item with a resolvable tiltToward
+ * target (another PLACED item's center, or its group center when the group
+ * has ≥2 members) is penalized for the angular deviation between its
+ * rotation and the direction toward the target (saturating at 30°). The
+ * interpretation here is "stickers with an interaction hint FACE their
+ * target": the brief's test spec demands the rotation within ±20° of the
+ * angle toward the target, so the hinted angle is applied in full (candidate
+ * rotations at the hinted angle ± HINT_TILT_JITTER_DEG) rather than capped at
+ * the ±8–15° a few-degrees-only reading would allow. Subtlety is preserved
+ * where it matters: NON-hinted rotations keep the existing ±12° policy, and
+ * the hinted rotation is jittered so perfect facing is not forced.
+ */
+const COHESION_WEIGHT = 1.0;
+const COHESION_TOUCH_FACTOR = 1.15;
+const COHESION_SEPARATION_FACTOR = 1.6;
+const ORIENTATION_WEIGHT = 0.5;
+const ORIENT_TOLERANCE_DEG = 30;
+const HINT_TILT_JITTER_DEG = 8;
+/**
  * Coordinate-descent sweeps after the greedy pass (see the sweep block in
  * attemptSolve). 3 sweeps cover the few-item cases the sweeps exist for;
  * the loop also breaks early when a sweep changes nothing.
@@ -155,6 +199,8 @@ const SCALE_JITTER_MIN = 0.92;
 const SCALE_JITTER_MAX = 1.08;
 const JITTER_FRAC = 0.45; // of one grid cell, per axis
 const HINT_SAMPLES = 6; // extra candidates near the hinted group center
+/** Extra candidates whose rotation faces the tilt target (see ORIENTATION). */
+const ORIENT_SAMPLES = 6;
 /**
  * Polar ring candidates (placement freedom / organic layouts): in addition
  * to the axis-aligned grid, each item also samples RING_SAMPLES positions
@@ -364,6 +410,10 @@ function desiredScales(
   card: CardBox,
   k: number,
   minSizePct: number,
+  /** Optional itemId → importance (0..1 hint) overriding visualWeight in the
+   *  share split — hint importance orders size WITHIN a group so the group's
+   *  focal item gets the larger share (equalization blend unchanged). */
+  weightOverride?: Map<string, number>,
 ): Map<string, number> {
   const n = ordered.length;
   // Desired area per item under the v2 share curve (see the sizing-policy
@@ -374,7 +424,10 @@ function desiredScales(
   const cardArea = card.w * card.h;
   const capArea =
     n >= MAX_ITEM_CAP_MIN_ITEMS ? MAX_ITEM_AREA_SHARE * cardArea : Infinity;
-  const eff = ordered.map((i) => Math.max(i.visualWeight, WEIGHT_FLOOR));
+  const eff = ordered.map((i) => {
+    const o = weightOverride?.get(i.id);
+    return o !== undefined ? Math.max(o, 0) : Math.max(i.visualWeight, WEIGHT_FLOOR);
+  });
   const sum = eff.reduce((s, w) => s + w, 0);
   const map = new Map<string, number>();
   // Few-item width policy for 2 ≤ n ≤ 5 (see PER_ITEM_WIDTH_TARGET); the
@@ -443,10 +496,24 @@ function attemptSolve(
   // constraints.ts — bounding-box overlap is no longer the measure).
   const overlapCap = opts.overlapCap ?? overlapCapFor(items.length);
 
-  // Hint lookup: itemId → group center/spread.
-  const grouped = new Map<string, { cx: number; cy: number; spread: number }>();
+  // Hint lookup: itemId → group (identity is SHARED between a group's members
+  // so same-group pairs are a reference-equality test). Plus the per-item
+  // hint map (role/tiltToward/importance — the optional semantic-grouping
+  // contract) and the importance→weight override for the sizing policy.
+  type LayoutGroup = LayoutComposition["groups"][number];
+  const grouped = new Map<string, LayoutGroup>();
+  const groupSizeOf = new Map<string, number>();
   for (const g of hints?.groups ?? []) {
-    for (const id of g.itemIds) grouped.set(id, { cx: g.cx, cy: g.cy, spread: g.spread });
+    for (const id of g.itemIds) {
+      grouped.set(id, g);
+      groupSizeOf.set(id, g.itemIds.length);
+    }
+  }
+  const hintByItem = new Map<string, LayoutItemHint>();
+  for (const h of hints?.hints ?? []) hintByItem.set(h.itemId, h);
+  const importanceOverride = new Map<string, number>();
+  for (const h of hints?.hints ?? []) {
+    if (typeof h.importance === "number") importanceOverride.set(h.itemId, h.importance);
   }
 
   // Sort: visualWeight desc, stable tie-break by orderIndex.
@@ -468,8 +535,56 @@ function attemptSolve(
     dropTextBeyond === null || ordered.indexOf(item) < dropTextBeyond;
 
   // Coverage-proportional desired scale per item (sizing policy — see the
-  // block comment above). Seeds the candidate scale jitter.
-  const desired = desiredScales(ordered, card, k, minSizePct);
+  // block comment above). Seeds the candidate scale jitter. Hint importance
+  // (when present) overrides visualWeight in the share split.
+  const desired = desiredScales(
+    ordered,
+    card,
+    k,
+    minSizePct,
+    importanceOverride.size > 0 ? importanceOverride : undefined,
+  );
+
+  const itemsById = new Map(items.map((i) => [i.id, i] as const));
+
+  /** Normalize an angle to (−180, 180]. */
+  const norm180 = (deg: number): number => {
+    const a = ((deg % 360) + 360) % 360;
+    return a > 180 ? a - 360 : a;
+  };
+  /** Direction from `from` to `to` in degrees (y-down screen space). */
+  const angleDeg = (
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+  ): number => norm180((Math.atan2(to.y - from.y, to.x - from.x) * 180) / Math.PI);
+
+  /** Resolve a tilt hint's target center against the CURRENT placements.
+   *  group_center → the item's own group center, but only when the group has
+   *  other members (a solo item sits ON the center — no meaningful angle,
+   *  and forcing a rotation would regress the solo hint path). */
+  const tiltTargetFor = (
+    itemId: string,
+    placements: Placement[],
+  ): { x: number; y: number } | null => {
+    const h = hintByItem.get(itemId);
+    if (!h?.tiltToward) return null;
+    if (h.tiltToward === "group_center") {
+      if ((groupSizeOf.get(itemId) ?? 1) < 2) return null;
+      const g = grouped.get(itemId);
+      return g ? { x: g.cx, y: g.cy } : null;
+    }
+    if (h.tiltToward === itemId) return null;
+    const q = placements.find((p) => p.itemId === h.tiltToward);
+    return q ? { x: q.x, y: q.y } : null;
+  };
+
+  /** Half "reach" of a placed sticker: mean of its rotated-shape half-extents
+   *  ((displayW + displayH) / 4) — the radius used by the cohesion targets. */
+  const halfExtentOf = (p: Placement): number => {
+    const item = itemsById.get(p.itemId);
+    if (!item) return 0;
+    return (displayWidth(item, p.scale, k) + displayHeight(item, p.scale, k)) / 4;
+  };
 
   /** Valid candidate placements for one item vs the current placed set.
    *
@@ -528,7 +643,7 @@ function attemptSolve(
     // Hoist ALL seeded RNG draws up front (fixed order → deterministic):
     // one position/jitter/scale-jitter/rotation draw set per grid cell and
     // per hint sample, before any constraint checking happens.
-    const seeds: Array<{ x: number; y: number; jitter: number; rot: number }> = [];
+    const seeds: Array<{ x: number; y: number; jitter: number; rot: number; rotLocked?: boolean }> = [];
     // Grid positions (6×6) with seeded jitter.
     for (let gy = 0; gy < GRID; gy++) {
       for (let gx = 0; gx < GRID; gx++) {
@@ -550,6 +665,40 @@ function attemptSolve(
         const jitter = SCALE_JITTER_MIN + rng() * (SCALE_JITTER_MAX - SCALE_JITTER_MIN);
         const rot = (rng() * 2 - 1) * 12;
         seeds.push({ x, y, jitter, rot });
+      }
+    }
+    // Orientation-biased samples (semantic-grouping pass): when the item has
+    // a tiltToward hint, extra samples near the group center (or focus)
+    // FACE the tilt target — rotation = the angle from this seed's position
+    // to the target center, jittered ±HINT_TILT_JITTER_DEG, NOT multiplied by
+    // the scale-fallback step (rotLocked). When the target is not (yet)
+    // resolvable — e.g. the target item is placed later in the greedy order —
+    // the same fixed draw count runs with a plain ±12° rotation so the hoisted
+    // draw sequence stays deterministic; the soft orientation term + sweeps
+    // enforce the tilt once the target exists.
+    if (hintByItem.get(item.id)?.tiltToward) {
+      const tiltTarget = tiltTargetFor(
+        item.id,
+        placed.map((p) => p.placement),
+      );
+      const orientBase = group ?? {
+        cx: focalPoint?.x ?? card.w / 2,
+        cy: focalPoint?.y ?? card.h / 2,
+        spread: 0.12 * Math.min(card.w, card.h),
+      };
+      for (let s = 0; s < ORIENT_SAMPLES; s++) {
+        const x = clamp(orientBase.cx + (rng() * 2 - 1) * orientBase.spread, ax1, ax2);
+        const y = clamp(orientBase.cy + (rng() * 2 - 1) * orientBase.spread, ay1, ay2);
+        const jitter = SCALE_JITTER_MIN + rng() * (SCALE_JITTER_MAX - SCALE_JITTER_MIN);
+        const tiltJitter = (rng() * 2 - 1) * HINT_TILT_JITTER_DEG;
+        const fallback = (rng() * 2 - 1) * 12;
+        seeds.push({
+          x,
+          y,
+          jitter,
+          rot: tiltTarget ? angleDeg({ x, y }, tiltTarget) + tiltJitter : fallback,
+          rotLocked: tiltTarget !== null,
+        });
       }
     }
     // Polar ring samples around the composition focus (placement freedom —
@@ -586,7 +735,7 @@ function attemptSolve(
           seed.x,
           seed.y,
           baseScale * step * seed.jitter,
-          seed.rot * step,
+          seed.rotLocked ? seed.rot : seed.rot * step,
         );
         if (ok(cand)) {
           cands.push(cand);
@@ -624,13 +773,72 @@ function attemptSolve(
     return s;
   };
 
+  /**
+   * Group-cohesion soft term (semantic-grouping pass — see the COHESION
+   * weight doc above): same-group pairs pulled to near-touching
+   * (1.15 × halfA+halfB), different-group pairs pushed apart beyond
+   * 1.6 × halfA+halfB. Inactive without hints (no grouping info → the term
+   * must not perturb the hint-less baseline layouts). "Cohesion pulls, the
+   * constraint stops": whenever the pressure would push a pair past the 10%
+   * SAT overlap cap, checkItem rejects the candidate and the cap wins.
+   */
+  const cohesion = (placements: Placement[]): number => {
+    if (!hints || hints.groups.length === 0) return 0;
+    let s = 0;
+    for (let i = 0; i < placements.length; i++) {
+      for (let j = i + 1; j < placements.length; j++) {
+        const a = placements[i]!;
+        const b = placements[j]!;
+        const ga = grouped.get(a.itemId);
+        const gb = grouped.get(b.itemId);
+        if (!ga || !gb) continue; // no grouping info for this pair
+        const rSum = halfExtentOf(a) + halfExtentOf(b);
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (ga === gb) {
+          const target = rSum * COHESION_TOUCH_FACTOR;
+          if (d > target) s += (d - target) / target;
+        } else {
+          const sep = rSum * COHESION_SEPARATION_FACTOR;
+          if (d < sep) s += (sep - d) / sep;
+        }
+      }
+    }
+    return s;
+  };
+
+  /**
+   * Orientation-alignment soft term (semantic-grouping pass — see the
+   * ORIENTATION weight doc above): each placed item with a resolvable
+   * tiltToward target is penalized for the deviation between its rotation
+   * and the direction toward the target (saturating at 30°). Evaluated over
+   * the WHOLE placement set, so a hint whose target is placed later is still
+   * enforced by the coordinate sweeps / objective.
+   */
+  const orientation = (placements: Placement[]): number => {
+    if (!hints || (hints.hints?.length ?? 0) === 0) return 0;
+    let s = 0;
+    for (const p of placements) {
+      const target = tiltTargetFor(p.itemId, placements);
+      if (!target) continue;
+      if (Math.hypot(target.x - p.x, target.y - p.y) < 1) continue; // on top of it
+      const dev = Math.abs(norm180(p.rotation - angleDeg(p, target)));
+      s += Math.min(1, dev / ORIENT_TOLERANCE_DEG);
+    }
+    return s;
+  };
+
   /** Incremental score of `cand` + `item` against the already-placed set. */
   const incremental = (cand: Placement, item: LayoutItem, placed: Placed[]): number => {
     const placements = [cand, ...placed.map((p) => p.placement)];
     const ids = new Set(placements.map((p) => p.itemId));
     const subset = items.filter((i) => ids.has(i.id));
     const sctx: ScoreContext = { card, k, focalPoint, clustered };
-    return scoreLayout(placements, subset, sctx) + SCALE_FIDELITY_WEIGHT * fidelity(placements);
+    return (
+      scoreLayout(placements, subset, sctx) +
+      SCALE_FIDELITY_WEIGHT * fidelity(placements) +
+      COHESION_WEIGHT * cohesion(placements) +
+      ORIENTATION_WEIGHT * orientation(placements)
+    );
   };
 
   /**
@@ -646,7 +854,12 @@ function attemptSolve(
     const ids = new Set(placements.map((p) => p.itemId));
     const subset = items.filter((i) => ids.has(i.id));
     const sctx: ScoreContext = { card, k, focalPoint, clustered };
-    return scoreLayout(placements, subset, sctx) + SCALE_FIDELITY_WEIGHT * fidelity(placements);
+    return (
+      scoreLayout(placements, subset, sctx) +
+      SCALE_FIDELITY_WEIGHT * fidelity(placements) +
+      COHESION_WEIGHT * cohesion(placements) +
+      ORIENTATION_WEIGHT * orientation(placements)
+    );
   };
 
   const placed: Placed[] = [];

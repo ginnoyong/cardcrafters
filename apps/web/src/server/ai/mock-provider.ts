@@ -846,6 +846,10 @@ interface MockLayoutItem {
   height?: unknown;
   weight?: unknown;
   order?: unknown;
+  /** The engine sends `visualWeight`; direct mock tests send `weight`. */
+  visualWeight?: unknown;
+  /** Normalized subject from prompt validation (semantic grouping input). */
+  subject?: unknown;
 }
 
 function mockLayoutComposition(input: Record<string, unknown>): unknown {
@@ -880,29 +884,82 @@ function mockLayoutComposition(input: Record<string, unknown>): unknown {
     focalY = clamp(cardHeight * 0.65 + (rnd() - 0.5) * 60, 120, cardHeight - 120);
   }
 
-  const groups: { itemIds: string[]; cx: number; cy: number; spread: number }[] = [];
+  const groups: {
+    itemIds: string[];
+    cx: number;
+    cy: number;
+    spread: number;
+    subject?: string;
+  }[] = [];
+  // SEMANTIC GROUPING (deterministic approximation): adjacent INDEX PAIRS —
+  // items 0-1 form one group, 2-3 the next, etc. (a trailing odd item joins
+  // the last pair's group alone). Adjacent items come from adjacent creation
+  // order, which the real model treats as a topic-continuity prior; the mock
+  // just needs a plausible, schema-valid grouping.
+  const subjects = items.map((it) =>
+    typeof it?.subject === "string" && it.subject.trim() ? it.subject.trim() : null,
+  );
+  const pairs: string[][] = [];
+  for (let i = 0; i < ids.length; i += 2) {
+    const pair = ids.slice(i, i + 2);
+    // Odd trailing item: fold into the previous pair when one exists.
+    if (pair.length === 1 && pairs.length > 0) pairs[pairs.length - 1]!.push(pair[0]!);
+    else pairs.push(pair);
+  }
   if (ids.length === 0) {
     // NOTE: no current caller passes an empty items array (flows always submit
     // ≥1 item); this placeholder group only exists so the mock stays
     // schema-valid on degenerate input instead of throwing a zod error.
     groups.push({ itemIds: ["__no_items__"], cx: focalX, cy: focalY, spread: 60 });
-  } else if (ids.length >= 4 && rnd() > 0.5) {
-    const mid = Math.ceil(ids.length / 2);
-    groups.push({ itemIds: ids.slice(0, mid), cx: clamp(focalX - 90, 80, cardWidth - 80), cy: focalY, spread: 130 + rnd() * 40 });
-    groups.push({ itemIds: ids.slice(mid), cx: clamp(focalX + 90, 120, cardWidth - 120), cy: clamp(focalY + 70, 120, cardHeight - 120), spread: 110 + rnd() * 40 });
   } else {
-    // Small n: a tight spread keeps the hint samples ON the focal point —
-    // wide scatters dilute the hint into noise and can lose the engine's
-    // with-vs-without comparison. Large single-group compositions keep the
-    // looser scatter.
-    const spread = ids.length <= 3 ? 40 + rnd() * 20 : 120 + rnd() * 60;
-    groups.push({ itemIds: ids, cx: focalX, cy: focalY, spread });
+    for (let p = 0; p < pairs.length; p++) {
+      const memberSubjects = pairs[p]!
+        .map((id) => subjects[ids.indexOf(id)])
+        .filter((s): s is string => s !== null);
+      const subject = memberSubjects.length > 0 ? memberSubjects.join(" + ") : undefined;
+      if (ids.length <= 3) {
+        // Small n: a tight spread keeps the hint samples ON the focal point —
+        // wide scatters dilute the hint into noise and can lose the engine's
+        // with-vs-without comparison. Every pair centers on the focal point.
+        groups.push({ itemIds: pairs[p]!, cx: focalX, cy: focalY, spread: 40 + rnd() * 20, subject });
+      } else {
+        // Larger n: pair groups alternate left/right of the focal anchor with
+        // a vertical stagger so the clusters don't stack on one spot.
+        const cx = clamp(p % 2 === 0 ? focalX - 90 : focalX + 90, 120, cardWidth - 120);
+        const cy = clamp(p < 2 ? focalY : focalY + 70, 120, cardHeight - 120);
+        groups.push({ itemIds: pairs[p]!, cx, cy, spread: 110 + rnd() * 40, subject });
+      }
+    }
   }
+
+  // Per-item hints: tilt toward the group center (stickers face each other
+  // across the pair's middle — the deterministic stand-in for the model's
+  // subject-interaction reasoning), role/importance from the visualWeight
+  // ranking (rank 0 = focal, importance 1; last rank ≈ 1/n).
+  const weightOf = (i: number): number => {
+    const raw = items[i]?.visualWeight ?? items[i]?.weight;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const rank = ids.map((_, i) => i).sort(
+    (a, b) => weightOf(b) - weightOf(a) || a - b,
+  );
+  const importanceOf = new Map<number, number>();
+  rank.forEach((itemIdx, r) => importanceOf.set(itemIdx, (ids.length - r) / ids.length));
+  const groupSizeOf = new Map<string, number>();
+  for (const g of groups) for (const id of g.itemIds) groupSizeOf.set(id, g.itemIds.length);
+  const hints = ids.map((id, i) => ({
+    itemId: id,
+    role: (rank[0] === i ? "focal" : "support") as "focal" | "support",
+    tiltToward: "group_center" as const,
+    importance: importanceOf.get(i) ?? 1,
+  }));
 
   const textZone = { x: 60, y: 40, w: CARD_COORD_SPACE - 120, h: 280 };
   return layoutCompositionSchema.parse({
     focalPoint: { x: focalX, y: focalY },
     groups,
+    hints,
     textZone,
     suggestedGreetingStyle: {
       font: "Inter",

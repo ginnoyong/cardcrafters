@@ -255,9 +255,85 @@ describe("MockProvider — layout_composition", () => {
     expect(parsed.textZone.y).toBeLessThan(340);
     expect(parsed.textZone.y + parsed.textZone.h).toBeLessThanOrEqual(1000);
     expect(parsed.textZone.x + parsed.textZone.w).toBeLessThanOrEqual(1000);
-    // deterministic per input
-    const res2 = await mkProvider().run("layout_composition", { items }, cfg("layout_composition"));
+  });
+
+  it("groups by adjacent index pairs and emits semantic hints", async () => {
+    const items = [
+      { id: "a", width: 200, height: 200, weight: 0.8, order: 1, subject: "origami crane" },
+      { id: "b", width: 150, height: 150, weight: 0.5, order: 2, subject: "cherry blossom" },
+      { id: "c", width: 180, height: 180, weight: 0.6, order: 3, subject: "gift box" },
+      { id: "d", width: 120, height: 120, weight: 0.3, order: 4, subject: "ribbon" },
+    ];
+    const res = await mkProvider().run(
+      "layout_composition",
+      { items, cardWidth: 714, cardHeight: 1000 },
+      cfg("layout_composition"),
+    );
+    const parsed = layoutCompositionSchema.parse(res.data);
+    // Adjacent index pairs: (a,b), (c,d).
+    expect(parsed.groups.map((g) => g.itemIds)).toEqual([["a", "b"], ["c", "d"]]);
+    // Group subjects join the member subjects.
+    expect(parsed.groups[0]!.subject).toBe("origami crane + cherry blossom");
+    expect(parsed.groups[1]!.subject).toBe("gift box + ribbon");
+    // Per-item hints: top-weight item is the focal, everything tilts toward
+    // its group center, importance follows the visualWeight ranking.
+    expect(parsed.hints).toHaveLength(4);
+    const byId = new Map(parsed.hints!.map((h) => [h.itemId, h] as const));
+    expect(byId.get("a")!.role).toBe("focal");
+    expect(byId.get("b")!.role).toBe("support");
+    expect(byId.get("c")!.role).toBe("support");
+    for (const id of ["a", "b", "c", "d"]) {
+      expect(byId.get(id)!.tiltToward).toBe("group_center");
+      expect(byId.get(id)!.importance).toBeGreaterThan(0);
+      expect(byId.get(id)!.importance!).toBeLessThanOrEqual(1);
+    }
+    // Importance follows visualWeight DESC (a=0.8 > c=0.6 > b=0.5 > d=0.3),
+    // NOT index order.
+    expect(byId.get("a")!.importance!).toBeGreaterThan(byId.get("c")!.importance!);
+    expect(byId.get("c")!.importance!).toBeGreaterThan(byId.get("b")!.importance!);
+    expect(byId.get("b")!.importance!).toBeGreaterThan(byId.get("d")!.importance!);
+    // Same input → same hints (determinism asserted by the test above too).
+    const res2 = await mkProvider().run(
+      "layout_composition",
+      { items, cardWidth: 714, cardHeight: 1000 },
+      cfg("layout_composition"),
+    );
     expect(res2.data).toEqual(res.data);
+  });
+
+  it("folds a trailing odd item into the previous pair (n = 3 → one group)", async () => {
+    const items = [
+      { id: "a", weight: 0.8, order: 1, subject: "crane" },
+      { id: "b", weight: 0.5, order: 2, subject: "blossom" },
+      { id: "c", weight: 0.6, order: 3, subject: "sun" },
+    ];
+    const res = await mkProvider().run(
+      "layout_composition",
+      { items, cardWidth: 714, cardHeight: 1000 },
+      cfg("layout_composition"),
+    );
+    const parsed = layoutCompositionSchema.parse(res.data);
+    expect(parsed.groups).toHaveLength(1);
+    expect(parsed.groups[0]!.itemIds).toEqual(["a", "b", "c"]);
+    expect(parsed.groups[0]!.subject).toBe("crane + blossom + sun");
+  });
+
+  it("n = 1 stays a single tight group with an inert hint (solo hint-win path)", async () => {
+    const items = [{ id: "solo", width: 256, height: 256, weight: 0.3, order: 1, subject: "heart" }];
+    const res = await mkProvider().run(
+      "layout_composition",
+      { items, cardWidth: 714, cardHeight: 1000 },
+      cfg("layout_composition"),
+    );
+    const parsed = layoutCompositionSchema.parse(res.data);
+    expect(parsed.groups).toHaveLength(1);
+    expect(parsed.groups[0]!.itemIds).toEqual(["solo"]);
+    // The solo item's group_center tilt is INERT (no other members) — the
+    // engine's n = 1 hint-win test relies on the orientation being a no-op.
+    expect(parsed.hints).toHaveLength(1);
+    expect(parsed.hints![0]!.tiltToward).toBe("group_center");
+    expect(parsed.hints![0]!.role).toBe("focal");
+    expect(parsed.hints![0]!.importance).toBe(1);
   });
 });
 

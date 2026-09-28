@@ -13,8 +13,8 @@
  *      greeting itself is rendered by the UI (step 4); the solver only needs
  *      the reserved area. (A measured text box can replace this later.)
  *   4. AI hints: ai.run('layout_composition', {cardWidth, cardHeight,
- *      textHint, items:[{id, w, h, visualWeight, orderIndex}]}, {gameId}) —
- *      ANY failure (AiTaskError, schema reject, budget) → hints = null and
+ *      textHint, items:[{id, w, h, visualWeight, orderIndex, subject}]},
+ *      {gameId}) — ANY failure (AiTaskError, schema reject, budget) → hints = null and
  *      the layout proceeds solver-only. A layout NEVER fails because of AI.
  *   5. Solve with hints AND without; keep the better scoreLayout score
  *      (scored against the same ctx). source: "llm+solver" | "solver".
@@ -87,6 +87,7 @@ function toLayoutItems(
     width: number | null;
     height: number | null;
     visualWeight: number | null;
+    subject: string | null;
   }>,
 ): LayoutItem[] {
   return rows
@@ -97,6 +98,7 @@ function toLayoutItems(
       imgH: r.height!,
       visualWeight: r.visualWeight ?? 0,
       orderIndex,
+      subject: r.subject ?? undefined,
     }));
 }
 
@@ -143,6 +145,7 @@ export async function computeAndPersistLayout(
             h: i.imgH,
             visualWeight: i.visualWeight,
             orderIndex: i.orderIndex,
+            subject: i.subject ?? "",
           })),
         },
         { gameId },

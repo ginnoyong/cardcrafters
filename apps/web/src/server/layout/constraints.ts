@@ -53,7 +53,10 @@ export interface Aabb {
  * The layout-relevant slice of an item row. `imgW/imgH` are the SOURCE image
  * pixel dimensions (Item.width/height); `visualWeight` is the 0..1 heuristic
  * from image/weight.ts; `orderIndex` is the item's position in createdAt
- * order (drives zIndex + deterministic tie-breaks).
+ * order (drives zIndex + deterministic tie-breaks); `subject` is the
+ * normalized_subject from prompt validation (semantic grouping input —
+ * forwarded to the layout_composition AI task by the engine, unused by the
+ * pure solver).
  */
 export interface LayoutItem {
   id: string;
@@ -61,6 +64,7 @@ export interface LayoutItem {
   imgH: number;
   visualWeight: number;
   orderIndex: number;
+  subject?: string;
 }
 
 // ---------------------------------------------------------------------------

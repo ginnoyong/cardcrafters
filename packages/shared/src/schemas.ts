@@ -106,6 +106,26 @@ export const styleDerivationSchema = z
   .strict();
 export type StyleDerivation = z.infer<typeof styleDerivationSchema>;
 
+/**
+ * Per-item layout hint (Step: layout composition). OPTIONAL — the semantic-
+ * grouping upgrade added `subject`/`hints` without breaking the original
+ * contract: every field here is optional and the whole array is optional, so
+ * older outputs (and the pre-hint solver path) keep parsing.
+ */
+export const layoutItemHintSchema = z
+  .object({
+    itemId: z.string().min(1),
+    /** "focal" = the visually dominant sticker of its group, else "support". */
+    role: z.enum(["focal", "support"]).optional(),
+    /** Which sticker this one should tilt/face toward: another item's id, or
+     *  the literal "group_center" to face the middle of its own group. */
+    tiltToward: z.string().min(1).optional(),
+    /** Size/importance ordering within the composition, 0..1 (1 = biggest). */
+    importance: z.number().finite().min(0).max(1).optional(),
+  })
+  .strict();
+export type LayoutItemHint = z.infer<typeof layoutItemHintSchema>;
+
 /** Step: layout composition — suggests where to group items on the card. */
 export const layoutCompositionSchema = z
   .object({
@@ -118,10 +138,16 @@ export const layoutCompositionSchema = z
             cx: coord,
             cy: coord,
             spread: z.number().finite().min(0),
+            /** Short label for what the group depicts (e.g. "nature scene").
+             *  Optional so pre-upgrade outputs still parse. */
+            subject: z.string().min(1).optional(),
           })
           .strict(),
       )
       .min(1),
+    /** Per-item orientation/importance hints (see layoutItemHintSchema).
+     *  Optional + omittable so the original contract stays backward compatible. */
+    hints: z.array(layoutItemHintSchema).optional(),
     textZone: z
       .object({ x: coord, y: coord, w: coord, h: coord })
       .strict(),

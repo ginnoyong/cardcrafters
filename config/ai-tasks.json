@@ -63,7 +63,7 @@
       "primary": "google/gemini-2.5-flash",
       "fallbacks": ["openai/gpt-4.1-mini"],
       "temperature": 0.3,
-      "maxTokens": 600,
+      "maxTokens": 1200,
       "retries": 1,
       "timeoutMs": 15000,
       "structured": "layoutCompositionSchema"
