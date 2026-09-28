@@ -82,26 +82,17 @@ export const TOTAL_COVERAGE_TARGET = 0.5;
 /**
  * Max allowed pairwise overlap ratio between two items (0–1).
  *
- * Product spec: overlap is "limited to deliberate layering", so this stays
- * the GENERAL cap at every item count. For very few stickers the cap is
- * relaxed to SMALL_N_OVERLAP_CAP (see below) so two stickers can actually
- * fill the card instead of both shrinking to dodge each other.
+ * USER DECISION (sizing-accuracy pass): the tolerance is 10% — "slight
+ * overlap ≤ 10% is allowable" — and it is the SINGLE cap for EVERY item
+ * count. The old scheme (general 0.25 plus a relaxed SMALL_N_OVERLAP_CAP =
+ * 0.35 for n ≤ 3) is gone: few-item layouts now fill the card through the
+ * coverage-proportional size targets and the TRUE rotated-rect overlap
+ * measure (see rotatedRectOverlapArea in server/layout/constraints.ts), not
+ * through a looser cap. The overlap ratio is measured on the actual rotated
+ * rectangles — a pair whose bounding boxes brush but whose visible overlap
+ * is within tolerance is legal.
  */
-export const MAX_PAIRWISE_OVERLAP = 0.25;
-/**
- * Relaxed pairwise-overlap cap for SMALL item counts (n ≤
- * SMALL_N_OVERLAP_MAX_ITEMS): deliberate layering IS the intended look for
- * 1–3 stickers, and at 0.25 two large (card-filling) stickers cannot coexist
- * on the default 5:7 card under the safe margin + text zone — they each shrink
- * to ~65% width with empty card between them. 0.35 keeps overlaps clearly
- * "deliberate" (a bit more than a quarter of the smaller sticker tucked
- * behind the larger one) while letting both chase their coverage targets.
- * Measured effect (n = 2, default card, 7 seeds): avg display width
- * 0.49 → 0.54 with the smaller sticker 0.38 → 0.50.
- */
-export const SMALL_N_OVERLAP_CAP = 0.35;
-/** Item counts at or below this use SMALL_N_OVERLAP_CAP instead of the general cap. */
-export const SMALL_N_OVERLAP_MAX_ITEMS = 3;
+export const MAX_PAIRWISE_OVERLAP = 0.10;
 
 /** Debounce before a client persists layout edits (ms). */
 export const LAYOUT_DEBOUNCE_MS = 1500;

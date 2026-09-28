@@ -1,8 +1,10 @@
 /**
  * Layout constraints tests (build-phase step 3) — pure geometry:
  * property-style random placements (seeded mulberry32) always satisfy the
- * bounds + size rules, text-zone rejection, overlap-cap boundary cases, and
- * rotated-AABB correctness.
+ * bounds + size rules, text-zone rejection, and the TRUE rotated-rect
+ * (SAT + clipped-polygon area) overlap measure: hand-computed areas, the
+ * 45° false-positive case the old AABB measure rejected, and the
+ * corner-based cap enforcement through checkItem/checkLayout.
  */
 
 import { describe, expect, it } from "vitest";
@@ -12,10 +14,10 @@ import {
   MAX_ITEM_SIZE_PCT,
   MAX_PAIRWISE_OVERLAP,
   MIN_ITEM_SIZE_PCT,
-  SMALL_N_OVERLAP_CAP,
 } from "@cardcrafters/shared";
 
 import {
+  aabbOverlapCapOk,
   boxArea,
   boxIntersection,
   cardBox,
@@ -24,8 +26,14 @@ import {
   displayWidth,
   inBoundsOk,
   overlapCapFor,
+  overlapRatio,
   overlapCapOk,
   placedBox,
+  placedFootprint,
+  polygonArea,
+  rotatedRectArea,
+  rotatedRectCorners,
+  rotatedRectOverlapArea,
   safeMargin,
   scaleFor,
   scaleWindow,
@@ -34,6 +42,7 @@ import {
   textOverlapOk,
   type Aabb,
   type LayoutItem,
+  type Vec2,
 } from "./constraints";
 import { mulberry32 } from "./solver";
 
@@ -69,6 +78,13 @@ function randomPlacement(rng: () => number, item: LayoutItem) {
   const x = m.x + hx + rng() * Math.max(0, freeX - 2 * hx);
   const y = m.y + hy + rng() * Math.max(0, freeY - 2 * hy);
   return { itemId: item.id, x, y, scale, rotation, zIndex: item.orderIndex };
+}
+
+/** Corner set of a side×side square centered at (cx, cy) rotated `deg`,
+ *  via the production rotatedRectCorners (k = 1, scale = side / 256). */
+function squareCorners(cx: number, cy: number, side: number, deg: number): Vec2[] {
+  const item = mkItem({ imgW: side, imgH: side });
+  return rotatedRectCorners({ x: cx, y: cy, scale: 1, rotation: deg }, item, 1);
 }
 
 describe("cardBox + sizing model", () => {
@@ -157,85 +173,131 @@ describe("noTextOverlap", () => {
   });
 });
 
-describe("overlapCap", () => {
-  const A: Aabb = { x1: 0, y1: 0, x2: 100, y2: 100 };
-  const area = boxArea(A);
-
-  it("exactly 25% overlap passes (boundary)", () => {
-    const B: Aabb = { x1: 75, y1: 0, x2: 175, y2: 100 };
-    expect(boxArea(boxIntersection(A, B)) / area).toBeCloseTo(0.25, 9);
-    expect(overlapCapOk(A, B)).toBe(true);
+describe("SAT overlap — true rotated-rect measure", () => {
+  it("two axis-aligned squares with 25% area overlap → overlapRatio = 0.25", () => {
+    // Squares of side 100, centers offset by 75 in x: the intersection is a
+    // 25 × 100 strip → 2500 / 10000 = 0.25 of each (equal) area.
+    const a = squareCorners(0, 0, 100, 0);
+    const b = squareCorners(75, 0, 100, 0);
+    expect(rotatedRectOverlapArea(a, b)).toBeCloseTo(2500, 6);
+    expect(overlapRatio(a, b)).toBeCloseTo(0.25, 6);
+    // The 10% cap rejects it; exactly 10% passes (boundary).
+    expect(overlapCapOk(a, b, 0.10)).toBe(false);
+    const b10 = squareCorners(90, 0, 100, 0);
+    expect(overlapRatio(a, b10)).toBeCloseTo(0.10, 6);
+    expect(overlapCapOk(a, b10, 0.10)).toBe(true);
   });
 
-  it("26% overlap fails", () => {
-    const B: Aabb = { x1: 74, y1: 0, x2: 174, y2: 100 };
-    expect(boxArea(boxIntersection(A, B)) / area).toBeCloseTo(0.26, 9);
-    expect(overlapCapOk(A, B)).toBe(false);
+  it("two 45°-rotated squares: AABBs overlap ~40% per axis, TRUE overlap = 0", () => {
+    // Two side-100 squares both rotated 45° (diamonds, AABB 100√2 ≈ 141.42
+    // per side), centers offset by (85, 85). Their AABBs overlap by
+    // (141.42 − 85) / 141.42 ≈ 39.8% along EACH axis, but along the
+    // separating axis (1,1)/√2 the projection of the center offset is
+    // 170/√2 ≈ 120.2 > 50 + 50 (the diamonds' half-extents along their
+    // edge normals), so the rotated rectangles themselves never intersect.
+    const a = squareCorners(0, 0, 100, 45);
+    const b = squareCorners(85, 85, 100, 45);
+    expect(overlapRatio(a, b)).toBeLessThan(1e-9);
+    expect(overlapCapOk(a, b, 0.10)).toBe(true);
+    // The deprecated AABB measure REJECTS this legal pair — the documented
+    // false positive that motivated the corner-based rewrite.
+    const aabbA: Aabb = { x1: -70.71, y1: -70.71, x2: 70.71, y2: 70.71 };
+    const aabbB: Aabb = { x1: 14.29, y1: 14.29, x2: 155.71, y2: 155.71 };
+    expect(aabbOverlapCapOk(aabbA, aabbB, 0.10)).toBe(false);
   });
 
-  it("cap is a parameter (default = general MAX_PAIRWISE_OVERLAP)", () => {
-    const B: Aabb = { x1: 70, y1: 0, x2: 170, y2: 100 }; // 30% overlap
-    expect(boxArea(boxIntersection(A, B)) / area).toBeCloseTo(0.3, 9);
-    expect(overlapCapOk(A, B, MAX_PAIRWISE_OVERLAP)).toBe(false);
-    expect(overlapCapOk(A, B, SMALL_N_OVERLAP_CAP)).toBe(true);
-    // Boundary of the relaxed cap itself.
-    const C: Aabb = { x1: 65, y1: 0, x2: 165, y2: 100 }; // exactly 35%
-    expect(overlapCapOk(A, C, SMALL_N_OVERLAP_CAP)).toBe(true);
-    const D: Aabb = { x1: 64, y1: 0, x2: 164, y2: 100 }; // 36%
-    expect(overlapCapOk(A, D, SMALL_N_OVERLAP_CAP)).toBe(false);
+  it("hand-computed non-trivial case: square ∩ 45°-rotated square = octagon", () => {
+    // Unit square [0,1]² and the same square rotated 45° about the shared
+    // center (0.5, 0.5). The rotated square is the diamond
+    // |x−0.5| + |y−0.5| ≤ 1/√2; inside the unit square it cuts one right
+    // isosceles triangle off each corner with leg c = 1 − 1/√2 (the corner
+    // (0,0) triangle is bounded by x + y = c), area c²/2 each.
+    //   intersection = 1 − 4·c²/2 = 1 − 2(1 − 1/√2)² = 2√2 − 2 ≈ 0.828427
+    // Both rects have area 1, so the overlap ratio equals that area.
+    const a = squareCorners(0.5, 0.5, 1, 0);
+    const b = squareCorners(0.5, 0.5, 1, 45);
+    expect(rotatedRectArea(a)).toBeCloseTo(1, 9);
+    expect(rotatedRectArea(b)).toBeCloseTo(1, 9);
+    const expected = 2 * Math.SQRT2 - 2;
+    expect(rotatedRectOverlapArea(a, b)).toBeCloseTo(expected, 9);
+    expect(overlapRatio(a, b)).toBeCloseTo(expected, 9);
   });
 
-  it("overlapCapFor: relaxed for n ≤ 3, general otherwise", () => {
-    expect(overlapCapFor(1)).toBe(SMALL_N_OVERLAP_CAP);
-    expect(overlapCapFor(2)).toBe(SMALL_N_OVERLAP_CAP);
-    expect(overlapCapFor(3)).toBe(SMALL_N_OVERLAP_CAP);
-    expect(overlapCapFor(4)).toBe(MAX_PAIRWISE_OVERLAP);
-    expect(overlapCapFor(25)).toBe(MAX_PAIRWISE_OVERLAP);
+  it("rotatedRectCorners winding + area: positive shoelace, area = w × h", () => {
+    const item = mkItem({ imgW: 100, imgH: 40 });
+    const corners = rotatedRectCorners({ x: 5, y: 5, scale: 1, rotation: 30 }, item, 1);
+    expect(polygonArea(corners)).toBeGreaterThan(0); // CCW-positive winding
+    expect(rotatedRectArea(corners)).toBeCloseTo(4000, 6); // rotation-invariant
+    // 0° corners are the axis-aligned rect itself.
+    const c0 = rotatedRectCorners({ x: 5, y: 5, scale: 1, rotation: 0 }, item, 1);
+    expect(c0[0]).toEqual({ x: -45, y: -15 });
+    expect(c0[2]).toEqual({ x: 55, y: 25 });
   });
 
-  it("checkItem/checkLayout honor ctx.overlapCap", () => {
+  it("overlapCapFor(n) === 0.10 for every n (single user tolerance)", () => {
+    for (let n = 1; n <= 25; n++) {
+      expect(overlapCapFor(n)).toBe(0.10);
+      expect(overlapCapFor(n)).toBe(MAX_PAIRWISE_OVERLAP);
+    }
+  });
+
+  it("checkItem/checkLayout enforce the corner-based cap (0.3 fails, 0.08 passes)", () => {
     const item = mkItem();
+    const other = { ...item, id: "b", orderIndex: 1 };
     const { min } = scaleWindow(item, card, K);
-    const w = displayWidth(item, min, K);
+    const w = displayWidth(item, min, K); // display width in normalized units
     const cx = card.w / 2;
     const cy = card.h / 2;
-    const p1 = { itemId: "a", x: cx, y: cy, scale: min, rotation: 0, zIndex: 0 };
-    const p2 = { itemId: "b", x: cx + w * 0.7, y: cy, scale: min, rotation: 0, zIndex: 1 };
-    const its = [item, { ...item, id: "b", orderIndex: 1 }];
-    // 30% overlap of equal boxes: legal only under the relaxed cap.
-    const boxes = [
-      { itemId: "a", box: placedBox(p1, item, K) },
-      { itemId: "b", box: placedBox(p2, item, K) },
-    ];
-    expect(overlapCapOk(boxes[0]!.box, boxes[1]!.box, 0.35)).toBe(true);
-    expect(overlapCapOk(boxes[0]!.box, boxes[1]!.box)).toBe(false);
-    expect(checkItem(p2, its[1]!, { card, k: K, textZone: null, overlapCap: 0.35 }, [boxes[0]!])).toEqual([]);
+    const mk = (id: string, x: number) => ({ itemId: id, x, y: cy, scale: min, rotation: 0, zIndex: 0 });
+    // Offset 0.7 × width → intersection strip 0.3 × width → ratio 0.30.
+    const p30a = mk("a", cx - w * 0.35);
+    const p30b = mk("b", cx + w * 0.35);
+    // Offset 0.92 × width → ratio 0.08.
+    const p08a = mk("a", cx - w * 0.46);
+    const p08b = mk("b", cx + w * 0.46);
+    const its = [item, other];
+    const fpA = placedFootprint(p30a, item, K);
+    const fpA08 = placedFootprint(p08a, item, K);
+    // Sanity: the true ratios are what the geometry says.
+    expect(overlapRatio(fpA.corners, placedFootprint(p30b, other, K).corners)).toBeCloseTo(0.3, 6);
+    expect(overlapRatio(fpA08.corners, placedFootprint(p08b, other, K).corners)).toBeCloseTo(0.08, 6);
+    // checkItem: 30% is rejected, 8% accepted, under the default 10% cap.
     expect(
-      checkLayout([p1, p2], its, { card, k: K, textZone: null, overlapCap: 0.35 }).ok,
-    ).toBe(true);
+      checkItem(p30b, other, { card, k: K, textZone: null }, [fpA])
+        .map((v) => v.code),
+    ).toContain("overlap_cap");
     expect(
-      checkLayout([p1, p2], its, { card, k: K, textZone: null }).violations.some(
-        (v) => v.code === "overlap_cap",
-      ),
+      checkItem(p08b, other, { card, k: K, textZone: null }, [fpA08]),
+    ).toEqual([]);
+    // ctx.overlapCap is honored (relaxed cap admits the 30% pair).
+    expect(
+      checkItem(p30b, other, { card, k: K, textZone: null, overlapCap: 0.35 }, [fpA]),
+    ).toEqual([]);
+    // checkLayout surfaces the violation pair-wise.
+    const res = checkLayout([p30a, p30b], its, { card, k: K, textZone: null });
+    expect(res.ok).toBe(false);
+    expect(res.violations.some((v) => v.code === "overlap_cap")).toBe(true);
+    expect(
+      checkLayout([p08a, p08b], its, { card, k: K, textZone: null }).ok,
     ).toBe(true);
   });
 
-  it("surfaces overlap_cap violations through checkLayout", () => {
-    const item = mkItem();
-    // Tiny scale so both boxes fit side by side; then force heavy overlap.
-    const { min } = scaleWindow(item, card, K);
-    const scale = min;
-    const w = displayWidth(item, scale, K);
-    const cx = card.w / 2;
-    const cy = card.h / 2;
-    const p1 = { itemId: "a", x: cx, y: cy, scale, rotation: 0, zIndex: 0 };
-    const p2 = { itemId: "b", x: cx + w * 0.5, y: cy, scale, rotation: 0, zIndex: 1 };
-    const items = [item, { ...item, id: "b", orderIndex: 1 }];
-    const res = checkLayout([p1, p2], items, { card, k: K, textZone: null });
-    expect(res.violations.filter((v) => v.code === "overlap_cap").length).toBeGreaterThan(0);
+  it("aabbOverlapCapOk vs overlapCapOk on the same AABB pair (legacy contrast)", () => {
+    // Axis-aligned squares overlapping 30%: both measures agree it fails 0.10.
+    const A: Aabb = { x1: 0, y1: 0, x2: 100, y2: 100 };
+    const B: Aabb = { x1: 70, y1: 0, x2: 170, y2: 100 };
+    expect(boxArea(boxIntersection(A, B)) / boxArea(A)).toBeCloseTo(0.3, 9);
+    expect(aabbOverlapCapOk(A, B, 0.10)).toBe(false);
+    expect(overlapCapOk(squareCorners(50, 50, 100, 0), squareCorners(120, 50, 100, 0), 0.10)).toBe(false);
+    // …and both agree a 10%-exact overlap passes at the boundary.
+    const B10: Aabb = { x1: 90, y1: 0, x2: 190, y2: 100 };
+    expect(aabbOverlapCapOk(A, B10, 0.10)).toBe(true);
+    expect(overlapCapOk(squareCorners(50, 50, 100, 0), squareCorners(140, 50, 100, 0), 0.10)).toBe(true);
   });
+});
 
-  it("inBoundsOk rejects/accepts at the margin line", () => {
+describe("inBoundsOk at the margin line", () => {
+  it("rejects/accepts at the margin line", () => {
     const m = safeMargin(card);
     expect(inBoundsOk({ x1: m.x - 1, y1: m.y, x2: 100, y2: 100 }, card)).toBe(false);
     expect(inBoundsOk({ x1: m.x, y1: m.y, x2: card.w - m.x, y2: card.h - m.y }, card)).toBe(true);

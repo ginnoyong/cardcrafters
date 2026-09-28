@@ -24,8 +24,6 @@ import {
   MAX_PAIRWISE_OVERLAP,
   MIN_ITEM_SIZE_PCT,
   SAFE_MARGIN_PCT,
-  SMALL_N_OVERLAP_CAP,
-  SMALL_N_OVERLAP_MAX_ITEMS,
   type Placement,
 } from "@cardcrafters/shared";
 
@@ -109,8 +107,13 @@ export function displayHeight(item: LayoutItem, scale: number, k: number): numbe
 /**
  * Axis-aligned bounding box of the ROTATED item. `rotation` is in degrees;
  * the item's unrotated box is centered at (placement.x, placement.y). The
- * AABB of a rotated rect overestimates the visual footprint — that is
- * intentional (collision-safe for both text avoidance and overlap caps).
+ * AABB of a rotated rect OVERESTIMATES the visual footprint — that is
+ * intentional (collision-safe) for bounds and text avoidance, which must
+ * never clip. Pairwise OVERLAP, however, is measured on the true rotated
+ * rectangles (see rotatedRectOverlapArea): with an AABB measure, two
+ * rotated stickers punish each other for corner-bounding-box area that
+ * does not actually intersect, which used to force them much smaller than
+ * the card allows.
  */
 export function placedBox(
   placement: Pick<Placement, "x" | "y" | "rotation" | "scale">,
@@ -252,12 +255,179 @@ export function textOverlapOk(box: Aabb, textZone: Rect | null, card: CardBox): 
   return !rectsIntersect(asRect, zone);
 }
 
+// ---------------------------------------------------------------------------
+// True rotated-rect overlap (SAT + exact intersection-polygon area)
+// ---------------------------------------------------------------------------
+
+/** A 2D point / corner. */
+export interface Vec2 {
+  x: number;
+  y: number;
+}
+
 /**
- * (d) Pairwise overlap cap: intersection ≤ `cap` × min(areaA, areaB).
- * `cap` defaults to the general MAX_PAIRWISE_OVERLAP; the solver passes the
- * small-count relaxation (overlapCapFor) for few-item layouts.
+ * The 4 corners of the item's ACTUAL rotated rectangle around the placement
+ * center (the AABB in placedBox is a bounding superset of this). Corner order
+ * is local (−w,−h) → (+w,−h) → (+w,+h) → (−w,+h) rotated by `rotation`
+ * degrees — counterclockwise in the math sense (positive shoelace area),
+ * the winding clipConvex requires. Rotation uses the same canvas convention
+ * as the renderer (ctx.rotate: x' = x·cosθ − y·sinθ, y' = x·sinθ + y·cosθ
+ * in y-down screen space).
+ */
+export function rotatedRectCorners(
+  placement: Pick<Placement, "x" | "y" | "rotation" | "scale">,
+  item: LayoutItem,
+  k: number,
+): [Vec2, Vec2, Vec2, Vec2] {
+  const hw = displayWidth(item, placement.scale, k) / 2;
+  const hh = displayHeight(item, placement.scale, k) / 2;
+  const rad = (placement.rotation * Math.PI) / 180;
+  const c = Math.cos(rad);
+  const s = Math.sin(rad);
+  const local: Array<[number, number]> = [
+    [-hw, -hh],
+    [hw, -hh],
+    [hw, hh],
+    [-hw, hh],
+  ];
+  return local.map(
+    ([lx, ly]) => ({
+      x: placement.x + lx * c - ly * s,
+      y: placement.y + lx * s + ly * c,
+    }),
+  ) as [Vec2, Vec2, Vec2, Vec2];
+}
+
+/** Signed shoelace area of a simple polygon (CCW-positive). */
+export function polygonArea(poly: Vec2[]): number {
+  let a = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const p = poly[i]!;
+    const q = poly[(i + 1) % poly.length]!;
+    a += p.x * q.y - q.x * p.y;
+  }
+  return a / 2;
+}
+
+/** Unsigned area of a rotated-rect corner set (== unrotated w × h). */
+export function rotatedRectArea(rect: Vec2[]): number {
+  return Math.abs(polygonArea(rect));
+}
+
+/** Cross-product z component of (b−a) × (p−a) — the edge side test. */
+function crossZ(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  px: number,
+  py: number,
+): number {
+  return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+}
+
+/**
+ * Convex polygon clipping (Sutherland–Hodgman): clip `subject` against every
+ * edge half-plane of convex `clip`. Both polygons must be CCW (math sense),
+ * which rotatedRectCorners guarantees. Exact for two convex polygons: the
+ * output IS the intersection polygon — empty (or < 3 points) when the rects
+ * are disjoint, INCLUDING the rotated case where their bounding boxes
+ * intersect but the rectangles themselves do not (the implicit
+ * separating-axis test). Deterministic, ~40 lines, no allocations beyond
+ * the vertex lists.
+ */
+function clipConvex(subject: Vec2[], clip: Vec2[]): Vec2[] {
+  let out = subject;
+  for (let i = 0; i < clip.length; i++) {
+    if (out.length === 0) break;
+    const a = clip[i]!;
+    const b = clip[(i + 1) % clip.length]!;
+    const input = out;
+    out = [];
+    for (let j = 0; j < input.length; j++) {
+      const p = input[j]!;
+      const q = input[(j + 1) % input.length]!;
+      const dp = crossZ(a.x, a.y, b.x, b.y, p.x, p.y);
+      const dq = crossZ(a.x, a.y, b.x, b.y, q.x, q.y);
+      const pIn = dp >= 0;
+      const qIn = dq >= 0;
+      if (pIn) out.push(p);
+      if (pIn !== qIn) {
+        const t = dp / (dp - dq);
+        out.push({ x: p.x + t * (q.x - p.x), y: p.y + t * (q.y - p.y) });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Exact area of the intersection of two rotated rectangles (corner sets from
+ * rotatedRectCorners). Cheap AABB early-out first (a necessary condition for
+ * any intersection), then the exact clipped-polygon area.
+ */
+export function rotatedRectOverlapArea(a: Vec2[], b: Vec2[]): number {
+  let aMinX = Infinity;
+  let aMinY = Infinity;
+  let aMaxX = -Infinity;
+  let aMaxY = -Infinity;
+  let bMinX = Infinity;
+  let bMinY = Infinity;
+  let bMaxX = -Infinity;
+  let bMaxY = -Infinity;
+  for (const p of a) {
+    aMinX = Math.min(aMinX, p.x);
+    aMaxX = Math.max(aMaxX, p.x);
+    aMinY = Math.min(aMinY, p.y);
+    aMaxY = Math.max(aMaxY, p.y);
+  }
+  for (const p of b) {
+    bMinX = Math.min(bMinX, p.x);
+    bMaxX = Math.max(bMaxX, p.x);
+    bMinY = Math.min(bMinY, p.y);
+    bMaxY = Math.max(bMaxY, p.y);
+  }
+  if (aMaxX <= bMinX || bMaxX <= aMinX || aMaxY <= bMinY || bMaxY <= aMinY) {
+    return 0;
+  }
+  const poly = clipConvex(a, b);
+  return poly.length < 3 ? 0 : Math.abs(polygonArea(poly));
+}
+
+/**
+ * True pairwise overlap RATIO of two rotated rects: intersection area /
+ * min(areaA, areaB) — the smaller sticker's visible footprint is the
+ * denominator, matching the product rule "≤ 10% OF A STICKER may be tucked
+ * behind another".
+ */
+export function overlapRatio(a: Vec2[], b: Vec2[]): number {
+  const denom = Math.min(rotatedRectArea(a), rotatedRectArea(b));
+  if (!(denom > 0)) return 0;
+  return rotatedRectOverlapArea(a, b) / denom;
+}
+
+/**
+ * (d) Pairwise overlap cap — TRUE rotated-rect measure. `a`/`b` are corner
+ * sets from rotatedRectCorners; passes when the true intersection ≤
+ * `cap` × min(areaA, areaB). `cap` defaults to MAX_PAIRWISE_OVERLAP (the
+ * single 10% user tolerance for every item count — see overlapCapFor).
  */
 export function overlapCapOk(
+  a: Vec2[],
+  b: Vec2[],
+  cap: number = MAX_PAIRWISE_OVERLAP,
+): boolean {
+  return overlapRatio(a, b) <= cap + 1e-9;
+}
+
+/**
+ * @deprecated Legacy AABB-based pair check — kept only for measurement/
+ * regression comparisons. The AABB of a rotated rect overestimates its
+ * footprint, so this REJECTS legal placements (two 45°-rotated stickers
+ * whose bounding boxes brush measure ~40% "overlap" here while their true
+ * rotated intersection is 0). Use overlapCapOk on rotatedRectCorners output.
+ */
+export function aabbOverlapCapOk(
   a: Aabb,
   b: Aabb,
   cap: number = MAX_PAIRWISE_OVERLAP,
@@ -267,13 +437,19 @@ export function overlapCapOk(
 }
 
 /**
- * Effective pairwise-overlap cap for an n-item layout: the relaxed
- * SMALL_N_OVERLAP_CAP for very few stickers (deliberate layering is the
- * intended look there and the general cap would stop them filling the card),
- * the general MAX_PAIRWISE_OVERLAP otherwise.
+ * Effective pairwise-overlap cap for an n-item layout.
+ *
+ * USER DECISION (sizing-accuracy pass): ONE tolerance — MAX_PAIRWISE_OVERLAP
+ * = 0.10 — for EVERY item count. The former small-count relaxation
+ * (SMALL_N_OVERLAP_CAP = 0.35 for n ≤ 3) is retired: few-sticker cards now
+ * fill the card through the coverage-proportional size targets plus the true
+ * rotated-rect overlap measure (bounding-box corners that don't actually
+ * intersect no longer count as overlap), not through a looser cap. Kept as
+ * a function so the solver and tests keep a single policy entry point.
  */
 export function overlapCapFor(n: number): number {
-  return n <= SMALL_N_OVERLAP_MAX_ITEMS ? SMALL_N_OVERLAP_CAP : MAX_PAIRWISE_OVERLAP;
+  void n;
+  return MAX_PAIRWISE_OVERLAP;
 }
 
 // ---------------------------------------------------------------------------
@@ -304,11 +480,32 @@ export interface ConstraintCtx {
   /** When false the text-overlap rule is skipped (only for overflow items). */
   checkTextOverlap?: boolean;
   /**
-   * Pairwise-overlap cap (0–1); defaults to MAX_PAIRWISE_OVERLAP. The solver
-   * passes overlapCapFor(items.length) so very few stickers may overlap
-   * slightly more (deliberate layering — see SMALL_N_OVERLAP_CAP).
+   * Pairwise-overlap cap (0–1); defaults to MAX_PAIRWISE_OVERLAP — the
+   * single 10% user tolerance for every item count (see overlapCapFor).
    */
   overlapCap?: number;
+}
+
+/** A placed item's footprint for the pairwise overlap check (true corners). */
+export interface PlacedFootprint {
+  itemId: string;
+  /** Bounding AABB (bounds/text checks + cheap rejection). */
+  box: Aabb;
+  /** Exact rotated-rect corners (true overlap check). */
+  corners: [Vec2, Vec2, Vec2, Vec2];
+}
+
+/** Footprint (AABB + true corners) of one placement. */
+export function placedFootprint(
+  placement: Placement,
+  item: LayoutItem,
+  k: number,
+): PlacedFootprint {
+  return {
+    itemId: item.id,
+    box: placedBox(placement, item, k),
+    corners: rotatedRectCorners(placement, item, k),
+  };
 }
 
 /** Check ONE placement against bounds + size + text zone (+ overlap vs already-placed boxes). */
@@ -316,7 +513,7 @@ export function checkItem(
   placement: Placement,
   item: LayoutItem,
   ctx: ConstraintCtx,
-  placedBoxes: Array<{ itemId: string; box: Aabb }> = [],
+  placedBoxes: Array<{ itemId: string; box: Aabb; corners?: [Vec2, Vec2, Vec2, Vec2] }> = [],
 ): Violation[] {
   const violations: Violation[] = [];
   const box = placedBox(placement, item, ctx.k);
@@ -331,8 +528,21 @@ export function checkItem(
     violations.push({ itemId: item.id, code: "text_overlap" });
   }
   const cap = ctx.overlapCap ?? MAX_PAIRWISE_OVERLAP;
+  const corners = rotatedRectCorners(placement, item, ctx.k);
   for (const other of placedBoxes) {
-    if (!overlapCapOk(box, other.box, cap)) {
+    // Cheap AABB pre-filter: disjoint bounding boxes can never have true
+    // rotated intersection, skip the exact measure. (Same corner order as
+    // placedFootprint — [Vec2, Vec2, Vec2, Vec2] as a plain Vec2 array.)
+    if (!(
+      box.x2 > other.box.x1 &&
+      other.box.x2 > box.x1 &&
+      box.y2 > other.box.y1 &&
+      other.box.y2 > box.y1
+    )) {
+      continue;
+    }
+    const otherCorners = other.corners ?? [];
+    if (!overlapCapOk(corners, otherCorners as Vec2[], cap)) {
       violations.push({
         itemId: item.id,
         code: "overlap_cap",
@@ -355,12 +565,16 @@ export function checkLayout(
 ): { ok: boolean; violations: Violation[] } {
   const byId = new Map(items.map((i) => [i.id, i] as const));
   const violations: Violation[] = [];
-  const boxes: Array<{ itemId: string; box: Aabb }> = [];
+  const footprints: Array<{ itemId: string; box: Aabb; corners: [Vec2, Vec2, Vec2, Vec2] }> = [];
   for (const p of placements) {
     const item = byId.get(p.itemId);
     if (!item) continue;
-    violations.push(...checkItem(p, item, ctx, boxes));
-    boxes.push({ itemId: p.itemId, box: placedBox(p, item, ctx.k) });
+    violations.push(...checkItem(p, item, ctx, footprints));
+    footprints.push({
+      itemId: p.itemId,
+      box: placedBox(p, item, ctx.k),
+      corners: rotatedRectCorners(p, item, ctx.k),
+    });
   }
   return { ok: violations.length === 0, violations };
 }

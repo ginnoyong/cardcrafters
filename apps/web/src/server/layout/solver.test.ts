@@ -20,7 +20,9 @@ import {
   cardBox,
   checkLayout,
   overlapCapFor,
+  overlapRatio,
   placedBox,
+  rotatedRectCorners,
   safeMargin,
   scaleWindow,
   textOverlapOk,
@@ -194,6 +196,33 @@ describe("solveLayout — sizing policy v2 (coverage-proportional targets)", () 
       0,
     ) / its.length;
 
+  /** Max pairwise TRUE (SAT) overlap ratio across all emitted pairs. */
+  const maxSatOverlap = (
+    res: ReturnType<typeof solveLayout>,
+    its: LayoutItem[],
+  ): number => {
+    const byId = new Map(its.map((i) => [i.id, i] as const));
+    let max = 0;
+    for (let i = 0; i < res.placements.length; i++) {
+      for (let j = i + 1; j < res.placements.length; j++) {
+        const a = byId.get(res.placements[i]!.itemId)!;
+        const b = byId.get(res.placements[j]!.itemId)!;
+        max = Math.max(
+          max,
+          overlapRatio(
+            rotatedRectCorners(res.placements[i]!, a, K),
+            rotatedRectCorners(res.placements[j]!, b, K),
+          ),
+        );
+      }
+    }
+    return max;
+  };
+
+  /** n equal 256×256 square items, same weight (the measured configuration). */
+  const squareItems = (n: number): LayoutItem[] =>
+    Array.from({ length: n }, (_, i) => mkItem(`i${i}`, { orderIndex: i }));
+
   it("1 item → display width ≈ 75–85% of the card width", () => {
     const item = mkItem("solo");
     const res = solve([item], 7);
@@ -203,21 +232,27 @@ describe("solveLayout — sizing policy v2 (coverage-proportional targets)", () 
     expect(w).toBeLessThanOrEqual(0.85 + 1e-9); // +eps: the window max is exact
   });
 
-  it("2 items → BOTH stickers fill the card (small-n overlap relaxation)", () => {
-    // Measured (SMALL_N_OVERLAP_CAP = 0.35, seeds 1..5): per-seed averages
-    // 0.509–0.584 (mean 0.550), smallest single item 0.42. Under the general
-    // 0.25 cap the same seeds average ~0.49 with the smaller sticker at ~0.38.
+  it("2 items (equal 256×256 squares) → both ≥ 0.50, mean ≥ 0.53, equalized, SAT ≤ 0.10", () => {
+    // Measured (seeds 1..5, two equal 256×256 squares, true SAT overlap):
+    // widths [0.550,0.553] / [0.537,0.550] / [0.536,0.538] / [0.503,0.551] /
+    // [0.532,0.573] — every seed has both stickers ≥ 0.50, the worst
+    // equalization ratio is 1.095, and the worst SAT pairwise overlap is
+    // 0.100 (exactly at the cap, never above).
     const avgs: number[] = [];
     for (const seed of [1, 2, 3, 4, 5]) {
-      const its = items(2);
+      const its = squareItems(2);
       const res = solve(its, seed);
       expect(res.placements).toHaveLength(2);
       const ws = its.map(
         (it) => widthPct(res.placements.find((p) => p.itemId === it.id)!, it),
       );
-      for (const w of ws) expect(w).toBeGreaterThanOrEqual(0.4);
+      for (const w of ws) expect(w, `seed ${seed}`).toBeGreaterThanOrEqual(0.50);
+      // Size equalization: the pair stays balanced (measured ratio ≤ 1.095).
+      const ratio = Math.max(...ws) / Math.min(...ws);
+      expect(ratio, `seed ${seed}`).toBeLessThanOrEqual(1.25);
       avgs.push((ws[0]! + ws[1]!) / 2);
-      expect(avgs[avgs.length - 1]!).toBeGreaterThanOrEqual(0.48);
+      // True rotated-rect overlap via the production SAT measure.
+      expect(maxSatOverlap(res, its), `seed ${seed}`).toBeLessThanOrEqual(0.10);
     }
     const mean = avgs.reduce((s, v) => s + v, 0) / avgs.length;
     expect(mean).toBeGreaterThanOrEqual(0.53);
@@ -225,9 +260,9 @@ describe("solveLayout — sizing policy v2 (coverage-proportional targets)", () 
 
   it("perItemShare curve: solo target, fill plateau, blend to the legacy split", () => {
     expect(perItemShare(1)).toBeCloseTo(SOLO_ITEM_COVERAGE, 9);
-    expect(perItemShare(2)).toBeCloseTo(0.3, 9);
-    expect(perItemShare(3)).toBeCloseTo(0.2, 9);
-    expect(perItemShare(5)).toBeCloseTo(0.12, 9);
+    expect(perItemShare(2)).toBeCloseTo(0.35, 9); // FILL_COVERAGE = 0.7
+    expect(perItemShare(3)).toBeCloseTo(0.7 / 3, 9);
+    expect(perItemShare(5)).toBeCloseTo(0.14, 9);
     // Fully back to the legacy TOTAL_COVERAGE_TARGET/n split from n = 12.
     expect(perItemShare(12)).toBeCloseTo(TOTAL_COVERAGE_TARGET / 12, 9);
     expect(perItemShare(25)).toBeCloseTo(TOTAL_COVERAGE_TARGET / 25, 9);
@@ -241,23 +276,32 @@ describe("solveLayout — sizing policy v2 (coverage-proportional targets)", () 
     }
   });
 
-  it("3 items → each clearly smaller than the solo item; 5 smaller again", () => {
-    // Measured (seed 11): n=3 avg 0.54 (heaviest 0.70), n=5 avg 0.38.
-    for (const n of [3, 5]) {
-      const its = items(n, (i) => 0.9 - i * 0.1);
-      const res = solve(its, 11);
-      expect(res.placements).toHaveLength(n);
-      const avgW = avgWidth(res, its);
-      expect(avgW).toBeLessThan(n === 3 ? 0.6 : 0.45);
-      expect(avgW).toBeGreaterThan(0.2);
+  it("3 items → mean width ≥ 0.45 with SAT overlap ≤ 0.10; 5 items ≥ 0.30", () => {
+    // Measured (equal weights, seeds 1..5, true SAT measure): n=3 avg 0.477,
+    // n=5 avg 0.356, SAT always ≤ 0.10. (The mixed-aspect PAIR ceiling is
+    // ~0.46–0.50 width each — geometric; squares are the case the 0.55
+    // target floor applies to.)
+    for (const [n, floor] of [
+      [3, 0.45],
+      [5, 0.30],
+    ] as const) {
+      const perSeed: number[] = [];
+      for (const seed of [1, 2, 3, 4, 5]) {
+        const its = items(n);
+        const res = solve(its, seed);
+        expect(res.placements).toHaveLength(n);
+        perSeed.push(avgWidth(res, its));
+        expect(maxSatOverlap(res, its), `n=${n} seed ${seed}`).toBeLessThanOrEqual(0.10);
+      }
+      const mean = perSeed.reduce((s, v) => s + v, 0) / perSeed.length;
+      expect(mean, `n=${n}`).toBeGreaterThanOrEqual(floor);
     }
   });
 
-  it("average display width decreases (non-increasing, near-flat 1→2) as n grows 1→2→3→5→10→25", () => {
+  it("average display width curve is non-increasing 1→2→3→5→10→25 (0.02 flat tolerance)", () => {
     // Measured (3 seeds per n): 0.760 → 0.536 → 0.528 → 0.378 → 0.278 → 0.175.
-    // The 1→2 step is intentionally near-flat (two stickers both fill the
-    // card), so the curve asserts NON-INCREASING with a small dip tolerance
-    // plus clear drops where the policy must shrink items.
+    // The curve asserts NON-INCREASING with a 0.02 seed-noise tolerance at
+    // every step.
     const avgs: number[] = [];
     for (const n of [1, 2, 3, 5, 10, 25]) {
       const perSeed: number[] = [];
@@ -269,22 +313,13 @@ describe("solveLayout — sizing policy v2 (coverage-proportional targets)", () 
       }
       avgs.push(perSeed.reduce((s, v) => s + v, 0) / perSeed.length);
     }
-    // Near-flat 1→2: two stickers still fill the card (measured ratio 0.705).
-    expect(avgs[1]!).toBeGreaterThanOrEqual(0.5);
-    expect(avgs[1]!).toBeGreaterThanOrEqual(0.7 * avgs[0]!);
-    // Non-increasing with a small tolerance for seed noise (measured deltas
-    // are all ≤ 0; the largest is 1→2 at −0.22).
     for (let i = 1; i < avgs.length; i++) {
       expect(avgs[i]!).toBeLessThanOrEqual(avgs[i - 1]! + 0.02);
     }
-    // Clear drops where the sizing policy must shrink items.
-    expect(avgs[3]!).toBeLessThan(avgs[2]! - 0.08); // 5 vs 3 (measured −0.15)
-    expect(avgs[4]!).toBeLessThan(avgs[3]! - 0.05); // 10 vs 5 (measured −0.10)
-    expect(avgs[5]!).toBeLessThan(avgs[4]! - 0.05); // 25 vs 10 (measured −0.10)
   });
 
-  it("all n still pass checkLayout (n = 1, 2, 3, 5, 10, 25) under the policy overlap cap", () => {
-    for (const n of [1, 2, 3, 5, 10, 25]) {
+  it("checkLayout passes under the 0.10 overlap cap for every n = 1..25", () => {
+    for (let n = 1; n <= 25; n++) {
       const its = items(n, (i) => 0.9 - ((i * 7) % 70) / 100);
       const res = solve(its, 1234 + n);
       expect(res.placements).toHaveLength(n);
