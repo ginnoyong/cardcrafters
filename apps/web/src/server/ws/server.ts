@@ -353,14 +353,24 @@ export function registerSocketHandlers(
 
   // Queue-level emitter: item:ready → hub-stamped broadcast to the TEAM room;
   // item:failed → hub-stamped direct emit to ALL of the owner's live sockets
-  // (owner offline → skipped; the state is visible on the next sync:full).
+  // (owner offline → skipped; the state is visible on the next sync:full)
+  // PLUS an `item:withdrawn` team broadcast so teammates' "drawing…"
+  // placeholder vanishes without leaking the failure detail.
   queueEmit = (event, payload, ctx) => {
     // teamId is added for GM/presenter routing (see layoutEmit above).
     const enveloped = { ...hub.stamp(ctx.gameId), teamId: ctx.teamId, ...payload };
     if (event === "item:failed") {
       const sockets = playerSockets.get(ctx.playerId);
-      if (!sockets) return;
-      for (const s of sockets) s.emit(event, enveloped);
+      if (sockets) {
+        for (const s of sockets) s.emit(event, enveloped);
+      }
+      // Owner-only item:failed FIRST (the owner's ledger goes terminal), then
+      // the team broadcast that removes the pending placeholder.
+      io.to(teamRoom(ctx.gameId, ctx.teamId)).emit("item:withdrawn", {
+        ...hub.stamp(ctx.gameId),
+        itemId: payload.itemId,
+        teamId: ctx.teamId,
+      });
       return;
     }
     io.to(teamRoom(ctx.gameId, ctx.teamId)).emit(event, enveloped);
@@ -512,9 +522,10 @@ export function registerSocketHandlers(
         ackFailReason(ack, "kicked", "you were removed from this game", "kicked");
         return;
       }
-      // Emit callback: item:pending goes to the TEAM room (hub-stamped
-      // envelope); owner-only events (item:rejected / item:failed) go direct
-      // to ALL of the owning player's live sockets — never the team room.
+      // Emit callback: item:pending / item:withdrawn go to the TEAM room
+      // (hub-stamped envelope); owner-only events (item:rejected /
+      // item:failed) go direct to ALL of the owning player's live sockets —
+      // never the team room.
       const emit: PromptEmit = (event, payload, opts) => {
         const enveloped = { ...hub.stamp(identity.gameId), ...payload };
         if (opts?.toPlayerOnly) {

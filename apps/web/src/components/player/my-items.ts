@@ -8,11 +8,16 @@
 import type { ClientItem, GameSnapshot, MyItemEvent } from "@/lib/store";
 
 /**
- * All of THIS player's items: the team's rows filtered to items I own
- * (playerId from sync:full rows) UNION the owner ledger (myItems — entries
+ * All of THIS player's items: the team's rows filtered STRICTLY to items I own
+ * (row.playerId === myPlayerId) UNION the owner ledger (myItems — entries
  * whose rows haven't arrived / whose owner-only detail the snapshot rows
  * lack). Ledger fields (status, reason, exampleFix) WIN over row fields —
  * owner-only events are always the freshest authority.
+ *
+ * Ledger presence is reliable ownership evidence because the reducer only
+ * ever registers MY items there (item:pending/item:ready echoes are gated by
+ * ownsItem — teammates' submissions never enter myItems, so "Your stickers"
+ * shows ONLY this player's own prompts).
  */
 export function selectMyItems(snapshot: GameSnapshot, myTeamId: string, myPlayerId: string | null): ClientItem[] {
   const team = snapshot.teams.find((t) => t.id === myTeamId);

@@ -194,7 +194,9 @@ describe("prompt pipeline — AI checks", () => {
     expect(rows).toHaveLength(1); // audit trail keeps the row
     expect(rows[0]).toMatchObject({ status: "REJECTED", failReason: expect.any(String), subject: null });
 
-    // item:rejected goes ONLY to the owner, with the friendly reason + fix.
+    // item:rejected goes ONLY to the owner (reason + fix), then the team-room
+    // item:withdrawn broadcast cleans up the pending placeholder (no reason —
+    // nothing is leaked) and is NEVER owner-direct.
     expect(s.events).toEqual([
       { event: "item:pending", payload: expect.objectContaining({ itemId: rows[0]!.id }), toPlayerOnly: undefined },
       {
@@ -206,7 +208,22 @@ describe("prompt pipeline — AI checks", () => {
         }),
         toPlayerOnly: s.playerId,
       },
+      {
+        event: "item:withdrawn",
+        payload: { itemId: rows[0]!.id, teamId: s.teamId },
+        toPlayerOnly: undefined,
+      },
     ]);
+
+    // The withdrawn broadcast is team-room only: no event of any kind targets
+    // the owner's socket with the withdrawn payload (it carries no reason, but
+    // the owner learns the outcome via item:rejected instead).
+    for (const e of s.events) {
+      if (e.event === "item:withdrawn") {
+        expect(e.toPlayerOnly).toBeUndefined();
+        expect(e.payload).toEqual({ itemId: rows[0]!.id, teamId: s.teamId });
+      }
+    }
 
     // Rejected submissions don't consume the cooldown → immediate resubmit ok.
     const next = await s.submit("a red balloon dog");
@@ -225,6 +242,12 @@ describe("prompt pipeline — AI checks", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.status).toBe("REJECTED");
     expect(s.events[1]).toMatchObject({ event: "item:rejected", toPlayerOnly: s.playerId });
+    // Follow-up team broadcast: placeholder cleanup, again team-room only.
+    expect(s.events[2]).toEqual({
+      event: "item:withdrawn",
+      payload: { itemId: rows[0]!.id, teamId: s.teamId },
+      toPlayerOnly: undefined,
+    });
 
     const next = await s.submit("a red balloon dog");
     expect(next).toEqual({ ok: true, itemId: expect.any(String) });
@@ -248,8 +271,13 @@ describe("prompt pipeline — AI checks", () => {
     const rows = await itemsOf(s.repo, s.teamId);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ status: "FAILED", failReason: "provider down" });
-    // Owner-only item:failed.
+    // Owner-only item:failed, then the team-room withdrawn broadcast.
     expect(s.events[1]).toMatchObject({ event: "item:failed", toPlayerOnly: s.playerId });
+    expect(s.events[2]).toEqual({
+      event: "item:withdrawn",
+      payload: { itemId: rows[0]!.id, teamId: s.teamId },
+      toPlayerOnly: undefined,
+    });
 
     // No cooldown consumed: with the AI back, an immediate submit succeeds.
     const retry = await s.submit("a red balloon dog");
@@ -406,7 +434,14 @@ describe("prompt pipeline — queue seam", () => {
     const rows = await itemsOf(s.repo, s.teamId);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ status: "FAILED", failReason: "queue unavailable" });
-    expect(s.events.at(-1)).toMatchObject({
+    expect(s.events.at(-1)).toEqual({
+      event: "item:withdrawn",
+      payload: { itemId: rows[0]!.id, teamId: s.teamId },
+      toPlayerOnly: undefined,
+    });
+    // item:failed stays owner-only (the withdrawn broadcast never carries the
+    // failure detail — it follows the owner event by one position).
+    expect(s.events.at(-2)).toMatchObject({
       event: "item:failed",
       toPlayerOnly: s.playerId,
     });

@@ -17,10 +17,20 @@
  *                       REMOVED/REJECTED/FAILED vs limits.maxItemsPerCard.
  *   4. In-flight cap  — this player's VALIDATING|GENERATING items this round
  *                       vs limits.maxInflightPerPlayer.
- *   5. Persist (VALIDATING) → emit `item:pending` to the team room → run the
- *      AI checks: prompt_validation → moderation → GENERATING + subject,
+ *   5. Persist (VALIDATING) → emit `item:pending` to the team room (with the
+ *      submitter's playerId — prompts are public, and clients need the owner
+ *      for their own-stickers ledger) → run the AI checks:
+ *      prompt_validation → moderation → GENERATING + subject,
  *      `item:rejected` (OWNER ONLY) on a failed check, FAILED +
  *      `item:failed` (OWNER ONLY) when the AI is unreachable.
+ *
+ * TEAMMATE PRIVACY vs. PLACEHOLDER CLEANUP: rejected/failed prompts are
+ * never broadcast with their reason (owner-only intel), but the earlier
+ * `item:pending` placeholder WAS broadcast to the team. Every terminal
+ * transition therefore ALSO emits `item:withdrawn` {itemId, teamId} to the
+ * team room (no reason — nothing is leaked) so teammates' reducers drop the
+ * "drawing…" placeholder. Clients order it AFTER the owner-only event so
+ * the owner's ledger is already terminal when the broadcast arrives.
  *
  * SUBMIT RACES (per-player mutex): every step up to and including the
  * cooldown anchor is check-then-act across `await`s (repo reads, AI round-
@@ -300,6 +310,7 @@ async function runSubmit(
     itemId: item.id,
     promptRaw: item.promptRaw,
     nickname: player.nickname,
+    playerId: player.id, // lets clients scope their own-stickers ledger
     teamId: player.teamId,
     createdAt: item.createdAt,
   });
@@ -314,18 +325,21 @@ async function runSubmit(
     );
     validation = promptValidationSchema.parse(res.data);
   } catch (err) {
-    return aiUnavailable(deps, item, player.id, err);
+    return aiUnavailable(deps, item, player.id, player.teamId, err);
   }
   if (!validation.valid) {
     const reason = validation.reason;
     const exampleFix = validation.example_fix;
     await deps.repo.updateItem(item.id, { status: "REJECTED", failReason: reason });
-    // Owner-only: the team never sees rejected prompts.
+    // Owner-only: the team never sees rejected prompts. The broadcast
+    // item:withdrawn (emitted AFTER the owner event) then removes the
+    // team's pending placeholder.
     deps.emit(
       "item:rejected",
       { itemId: item.id, reason, ...(exampleFix ? { exampleFix } : {}) },
       { toPlayerOnly: player.id },
     );
+    deps.emit("item:withdrawn", { itemId: item.id, teamId: player.teamId });
     return {
       ok: false,
       stage: "validation",
@@ -340,12 +354,13 @@ async function runSubmit(
     const res = await deps.ai.run("moderation", { prompt: text }, { gameId: identity.gameId });
     moderation = moderationSchema.parse(res.data);
   } catch (err) {
-    return aiUnavailable(deps, item, player.id, err);
+    return aiUnavailable(deps, item, player.id, player.teamId, err);
   }
   if (!moderation.safe) {
     const reason = MODERATION_MESSAGES[moderation.category];
     await deps.repo.updateItem(item.id, { status: "REJECTED", failReason: reason });
     deps.emit("item:rejected", { itemId: item.id, reason }, { toPlayerOnly: player.id });
+    deps.emit("item:withdrawn", { itemId: item.id, teamId: player.teamId });
     return { ok: false, stage: "moderation", reason };
   }
 
@@ -386,6 +401,7 @@ async function runSubmit(
         { itemId: accepted.id, reason: `queue unavailable (${detail})` },
         { toPlayerOnly: player.id },
       );
+      deps.emit("item:withdrawn", { itemId: accepted.id, teamId: player.teamId });
       return { ok: false, stage: "ai_unavailable", reason: AI_UNAVAILABLE_MESSAGE };
     }
   }
@@ -397,17 +413,22 @@ async function runSubmit(
  * AI outage after fallbacks: the item is FAILED (not REJECTED — nothing was
  * wrong with the prompt), the player is told to retry, and no cooldown is
  * consumed. Also emits `item:failed` owner-only so the player's own UI can
- * clear the pending state.
+ * clear the pending state, then `item:withdrawn` to the team (placeholder
+ * cleanup — see the module doc).
  */
 async function aiUnavailable(
   deps: PromptPipelineDeps,
   item: ItemRow,
   playerId: string,
+  teamId: string,
   err: unknown,
 ): Promise<PromptSubmitResult> {
   const detail = err instanceof Error ? err.message : String(err);
   await deps.repo.updateItem(item.id, { status: "FAILED", failReason: detail });
   deps.emit("item:failed", { itemId: item.id, reason: detail }, { toPlayerOnly: playerId });
+  // Owner-only item:failed FIRST (ledger goes terminal), then the team
+  // broadcast that removes the pending placeholder.
+  deps.emit("item:withdrawn", { itemId: item.id, teamId });
   return { ok: false, stage: "ai_unavailable", reason: AI_UNAVAILABLE_MESSAGE };
 }
 

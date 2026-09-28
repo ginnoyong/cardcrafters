@@ -186,6 +186,9 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
       // Build-phase events. Team-room events carry teamId (route by payload);
       // owner-only events (item:rejected / item:failed) do NOT — the store's
       // patchItemEverywhere finds the single team that has the item.
+      // item:withdrawn (team broadcast on a REJECTED/FAILED item) removes the
+      // pending placeholder for teammates; the store's reducer keeps the
+      // owner's own terminal row/ledger.
       // -------------------------------------------------------------------
       onEvent<Record<string, unknown>>(socket, "item:pending", (payload) =>
         dispatch({ type: "itemPending", payload }),
@@ -195,6 +198,9 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
       ),
       onEvent<Record<string, unknown>>(socket, "layout:updated", (payload) =>
         dispatch({ type: "layoutUpdated", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "item:withdrawn", (payload) =>
+        dispatch({ type: "itemWithdrawn", payload }),
       ),
       onEvent<Record<string, unknown>>(socket, "item:rejected", (payload) =>
         dispatch({ type: "itemRejected", payload }),
@@ -305,6 +311,17 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
             ) : null}
           </section>
 
+          <PromptBar
+            disabled={!connected}
+            onSubmitted={() => {
+              /* owner-ledger registration already happened on the ack path */
+            }}
+            onSubmitStart={handleSubmitStart}
+            wiring={promptWiring}
+          />
+
+          {noUndoNeeded ? <NoUndoNotice /> : null}
+
           <CardCanvas
             items={team.items}
             layout={team.layout}
@@ -315,17 +332,6 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
             highlightItemId={highlightItemId}
             onItemTap={handleHighlight}
             ariaLabel={`your team's card — ${team.items.filter((i) => i.status === "ready").length} stickers placed`}
-          />
-
-          {noUndoNeeded ? <NoUndoNotice /> : null}
-
-          <PromptBar
-            disabled={!connected}
-            onSubmitted={() => {
-              /* owner-ledger registration already happened on the ack path */
-            }}
-            onSubmitStart={handleSubmitStart}
-            wiring={promptWiring}
           />
 
           <MySubmissions items={myItems} onHighlight={handleHighlight} />

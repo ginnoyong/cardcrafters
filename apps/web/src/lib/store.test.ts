@@ -61,6 +61,7 @@ function baseSnapshot(overrides: Partial<SyncFullEvent> = {}): SyncFullEvent {
       },
     ],
     myItems: {},
+    myPlayerId: PLAYER_ME,
     ...overrides,
   };
 }
@@ -279,6 +280,174 @@ describe("owner ledger round scoping (m4)", () => {
     const ids = mine.map((i) => i.id);
     expect(ids).toContain("fresh"); // synthesized from the current-round entry
     expect(ids).not.toContain("stale"); // previous round → pruned
+  });
+});
+
+// ---------------------------------------------------------------------------
+// itemWithdrawn + own-sticker ledger filter (owner-scoped myItems)
+// ---------------------------------------------------------------------------
+
+describe("storeReducer — itemWithdrawn", () => {
+  it("(i) teammate case: pending row + activity entry removed on withdrawn", () => {
+    let s: GameSnapshot | null = normalizeSyncFull(baseSnapshot(), {}, PLAYER_ME);
+    // A TEAMMATE submits — the pending echo carries their playerId.
+    s = storeReducer(s, {
+      type: "itemPending",
+      payload: envelope({
+        itemId: "i1",
+        promptRaw: "happiness",
+        nickname: "Sam",
+        playerId: "player-other",
+        teamId: TEAM_A,
+      }),
+    });
+    expect(s!.teams.find((t) => t.id === TEAM_A)!.items).toHaveLength(1);
+    expect(s!.teams.find((t) => t.id === TEAM_A)!.activity).toHaveLength(1);
+    // Teammates' prompts never enter MY ledger.
+    expect(s!.myItems["i1"]).toBeUndefined();
+
+    s = storeReducer(s, {
+      type: "itemWithdrawn",
+      payload: envelope({ itemId: "i1", teamId: TEAM_A }),
+    });
+    const teamA = s!.teams.find((t) => t.id === TEAM_A)!;
+    expect(teamA.items).toHaveLength(0);
+    expect(teamA.activity).toHaveLength(0);
+  });
+
+  it("(ii) OWNER case: item:rejected (ledger terminal) THEN withdrawn → row + ledger survive intact", () => {
+    let s: GameSnapshot | null = normalizeSyncFull(baseSnapshot(), {}, PLAYER_ME);
+    // Owner submits (pending echo carries my playerId → ledger registered).
+    s = storeReducer(s, {
+      type: "itemPending",
+      payload: envelope({
+        itemId: "i2",
+        promptRaw: "happiness",
+        nickname: "Me",
+        playerId: PLAYER_ME,
+        teamId: TEAM_A,
+      }),
+    });
+    // Owner-only event arrives first: ledger goes terminal with the reason.
+    s = storeReducer(s, {
+      type: "itemRejected",
+      payload: envelope({
+        itemId: "i2",
+        reason: "'happiness' is a feeling.",
+        exampleFix: "balloons bursting with confetti",
+      }),
+    });
+    expect(s!.myItems["i2"]).toMatchObject({ status: "rejected", reason: "'happiness' is a feeling." });
+
+    // The team broadcast arrives AFTER the owner event → must be a no-op.
+    s = storeReducer(s, {
+      type: "itemWithdrawn",
+      payload: envelope({ itemId: "i2", teamId: TEAM_A }),
+    });
+    const teamA = s!.teams.find((t) => t.id === TEAM_A)!;
+    expect(teamA.items).toHaveLength(1);
+    expect(teamA.items[0]).toMatchObject({ id: "i2", status: "rejected" });
+    expect(teamA.activity).toHaveLength(1);
+    expect(s!.myItems["i2"]).toMatchObject({
+      promptRaw: "happiness",
+      status: "rejected",
+      reason: "'happiness' is a feeling.",
+      exampleFix: "balloons bursting with confetti",
+    });
+  });
+
+  it("(iii) owner's pending row + withdrawn (owner-only event LOST) → row removed, ledger promptRaw survives and selectMyItems synthesizes it", () => {
+    let s: GameSnapshot | null = normalizeSyncFull(baseSnapshot(), {}, PLAYER_ME);
+    s = storeReducer(s, {
+      type: "itemPending",
+      payload: envelope({
+        itemId: "i3",
+        promptRaw: "a red balloon dog",
+        nickname: "Me",
+        playerId: PLAYER_ME,
+        teamId: TEAM_A,
+      }),
+    });
+    // Ledger still PENDING — the owner-only item:rejected was lost/out-of-order.
+    expect(s!.myItems["i3"]).toMatchObject({ status: "pending", promptRaw: "a red balloon dog" });
+
+    s = storeReducer(s, {
+      type: "itemWithdrawn",
+      payload: envelope({ itemId: "i3", teamId: TEAM_A }),
+    });
+    // The row is removed (placeholder cleanup is unconditional for non-terminal
+    // ledgers) but the ledger is NEVER touched by the broadcast.
+    expect(s!.teams.find((t) => t.id === TEAM_A)!.items).toHaveLength(0);
+    expect(s!.myItems["i3"]).toMatchObject({ status: "pending", promptRaw: "a red balloon dog" });
+
+    // selectMyItems still synthesizes the entry so the owner sees their
+    // submission instead of it silently vanishing.
+    const mine = selectMyItems(s!, TEAM_A, PLAYER_ME);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ id: "i3", promptRaw: "a red balloon dog", status: "pending" });
+  });
+
+  it("(iv) unknown itemId → no-op", () => {
+    let s: GameSnapshot | null = normalizeSyncFull(baseSnapshot(), {}, PLAYER_ME);
+    s = storeReducer(s, {
+      type: "itemWithdrawn",
+      payload: envelope({ itemId: "does-not-exist", teamId: TEAM_A }),
+    });
+    expect(s!.teams.find((t) => t.id === TEAM_A)!.items).toHaveLength(0);
+    expect(s!.myItems).toEqual({});
+  });
+
+  it("(v) stale round → dropped", () => {
+    let s: GameSnapshot | null = normalizeSyncFull(baseSnapshot(), {}, PLAYER_ME);
+    s = storeReducer(s, {
+      type: "itemPending",
+      payload: envelope({ itemId: "i1", promptRaw: "p", nickname: "Sam", playerId: "player-other", teamId: TEAM_A }),
+    });
+    const out = storeReducer(s, {
+      type: "itemWithdrawn",
+      payload: envelope({ itemId: "i1", teamId: TEAM_A, round: 2 }),
+    });
+    // Stale event ignored: the round-1 placeholder survives.
+    expect(out!.teams.find((t) => t.id === TEAM_A)!.items).toHaveLength(1);
+  });
+});
+
+describe("own-stickers filter (owner-scoped ledger + strict row ownership)", () => {
+  it("teammate itemPending (playerId 'player-other') → myItems gains NO entry; selectMyItems excludes it", () => {
+    let s: GameSnapshot | null = normalizeSyncFull(baseSnapshot(), {}, PLAYER_ME);
+    s = storeReducer(s, {
+      type: "itemPending",
+      payload: envelope({
+        itemId: "i1",
+        promptRaw: "someone else's prompt",
+        nickname: "Sam",
+        playerId: "player-other",
+        teamId: TEAM_A,
+      }),
+    });
+    // Row lands in the team list (prompts are public)…
+    expect(s!.teams.find((t) => t.id === TEAM_A)!.items[0]!.id).toBe("i1");
+    // …but never in MY ledger.
+    expect(s!.myItems["i1"]).toBeUndefined();
+    expect(selectMyItems(s!, TEAM_A, PLAYER_ME)).toHaveLength(0);
+  });
+
+  it("my own itemPending (playerId = mine) → included in myItems and selectMyItems", () => {
+    let s: GameSnapshot | null = normalizeSyncFull(baseSnapshot(), {}, PLAYER_ME);
+    s = storeReducer(s, {
+      type: "itemPending",
+      payload: envelope({
+        itemId: "i2",
+        promptRaw: "my own prompt",
+        nickname: "Me",
+        playerId: PLAYER_ME,
+        teamId: TEAM_A,
+      }),
+    });
+    expect(s!.myItems["i2"]).toMatchObject({ promptRaw: "my own prompt", status: "pending" });
+    const mine = selectMyItems(s!, TEAM_A, PLAYER_ME);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ id: "i2", promptRaw: "my own prompt", status: "pending" });
   });
 });
 

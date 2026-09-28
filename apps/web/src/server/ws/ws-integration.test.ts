@@ -364,6 +364,84 @@ describe("ws integration (memory repo, ephemeral port)", () => {
     maya.close();
     gm.close();
   });
+
+  it("(k) validation reject during BUILD: teammate gets item:withdrawn (never item:rejected); owner gets item:rejected", async () => {
+    // Theme moves LOBBY → GREETINGS so players may join, then approval moves
+    // GREETINGS → BUILD (see test (j)).
+    await hub.applyEvent(gameId, { type: "gm:setTheme", theme: "Balloon party", now: Date.now() });
+
+    // Two players on the SAME team (same joinToken): owner + teammate.
+    const owner = connect();
+    const ownerAck = await emitAck<{ ok: boolean; identity: { playerId: string; teamId: string } }>(
+      owner,
+      "join",
+      { role: "player", joinToken: joinTokenA, nickname: "Maya" },
+    );
+    const teammate = connect();
+    const teammateAck = await emitAck<{ ok: boolean; identity: { teamId: string } }>(
+      teammate,
+      "join",
+      { role: "player", joinToken: joinTokenA, nickname: "Sam" },
+    );
+    expect(ownerAck.ok).toBe(true);
+    expect(teammateAck.ok).toBe(true);
+    expect(teammateAck.identity.teamId).toBe(ownerAck.identity.teamId);
+
+    const approve = await hub.applyEvent(gameId, { type: "gm:approveGreetings", now: Date.now() });
+    if (!approve.ok) throw new Error(`approveGreetings failed: ${approve.reason}`);
+    expect(approve.state.phase).toBe("BUILD");
+
+    // Collect every item:* event on BOTH sockets from before the submit so an
+    // unexpected item:rejected cannot slip past unnoticed.
+    const ITEM_EVENTS = ["item:pending", "item:rejected", "item:failed", "item:withdrawn"] as const;
+    type Seen = { event: string; payload: Record<string, unknown> };
+    const ownerSeen: Seen[] = [];
+    const teammateSeen: Seen[] = [];
+    const track = (sock: Socket, sink: Seen[]) => {
+      for (const ev of ITEM_EVENTS) sock.on(ev, (payload: Record<string, unknown>) => sink.push({ event: ev, payload }));
+    };
+    track(owner, ownerSeen);
+    track(teammate, teammateSeen);
+
+    // The mock validation provider rejects "happiness" (a feeling, not a
+    // drawable object). Waiters are registered BEFORE the submit — the
+    // owner-only event can land on the socket before the ack resolves.
+    const rejectedPromise = waitFor<{ reason?: string; exampleFix?: string }>(owner, "item:rejected");
+    const withdrawnPromise = waitFor<{ itemId?: string; teamId?: string }>(teammate, "item:withdrawn");
+    const submit = await emitAck<{ ok: boolean; reason?: string; exampleFix?: string }>(
+      owner,
+      "player:submitPrompt",
+      { text: "happiness" },
+    );
+    expect(submit.ok).toBe(false);
+
+    // Owner socket: the private detail — item:rejected with reason + fix.
+    const rejected = await rejectedPromise;
+    expect(rejected.reason).toContain("feeling");
+    expect(typeof rejected.exampleFix).toBe("string");
+
+    // Teammate socket: ONLY the placeholder-cleanup broadcast.
+    const withdrawn = await withdrawnPromise;
+    expect(withdrawn.itemId).toBeTruthy();
+    expect(withdrawn.teamId).toBe(ownerAck.identity.teamId);
+
+    // Small grace period: if a leaked item:rejected were ever going to reach
+    // the teammate, it would already be in the buffer (socket.io preserves
+    // per-socket ordering and the owner event is emitted FIRST server-side).
+    await new Promise((r) => setTimeout(r, 150));
+    expect(teammateSeen.map((e) => e.event)).not.toContain("item:rejected");
+    expect(teammateSeen.map((e) => e.event)).toEqual(expect.arrayContaining(["item:pending", "item:withdrawn"]));
+    // The broadcast carries no reason/exampleFix — nothing leaks.
+    const teammateWithdrawn = teammateSeen.find((e) => e.event === "item:withdrawn")!;
+    expect(teammateWithdrawn.payload).not.toHaveProperty("reason");
+    expect(teammateWithdrawn.payload).not.toHaveProperty("exampleFix");
+
+    // The owner's socket DID get the rejected detail (reason + exampleFix).
+    expect(ownerSeen.map((e) => e.event)).toContain("item:rejected");
+
+    owner.close();
+    teammate.close();
+  });
 });
 
 // ---------------------------------------------------------------------------

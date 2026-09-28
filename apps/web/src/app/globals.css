@@ -701,12 +701,14 @@ label {
   gap: 0.5rem;
 }
 
-/* Prominent full-width Start control below the team grid. Extra top margin
-   keeps clear breathing room between the team-cards grid and Start. */
+/* Prominent full-width Start control between the roster grid and the live
+   card previews. Extra top margin keeps clear breathing room between the
+   team-cards grid and Start. */
 .cc-start {
   display: grid;
   gap: 0.5rem;
-  margin-top: 2rem;
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
 }
 
 .cc-btn-start {

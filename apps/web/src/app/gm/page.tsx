@@ -14,9 +14,9 @@
  *      DOM so print can reveal every one via CSS). The roster ("N joined" +
  *      green dots + kick buttons) sits BELOW the card in a hairline-bordered
  *      section.
- *   3. A single "Start building" button below the grid emits
- *      gm:approveGreetings once every team's greeting is ready; after BUILD
- *      starts it disappears.
+ *   3. A single "Start building" button between the team cards and the live
+ *      card previews emits gm:approveGreetings once every team's greeting is
+ *      ready; after BUILD starts it disappears.
  *   4. Greeting text reaches the console via sync:full (buildSyncFull now
  *      carries teams[].greeting) and live via `greeting:updated`.
  *   5. Resume: /gm?code=CODE reloads the console for an existing game
@@ -451,6 +451,12 @@ function Console({ game }: { game: CreatedGame }) {
       onEvent<Record<string, unknown>>(socket, "item:failed", (payload) =>
         dispatch({ type: "itemFailed", payload }),
       ),
+      // Team broadcast when an item goes REJECTED/FAILED — the console's mini
+      // canvas drops the pending placeholder (the rejection reason itself is
+      // owner-only intel and never reaches the GM live).
+      onEvent<Record<string, unknown>>(socket, "item:withdrawn", (payload) =>
+        dispatch({ type: "itemWithdrawn", payload }),
+      ),
     );
 
     socket.connect();
@@ -519,17 +525,8 @@ function Console({ game }: { game: CreatedGame }) {
         })}
       </section>
 
-      {/* Live previews: one read-only mini canvas per team. GREETINGS: the
-          greeting + an empty canvas; BUILD: live items + layout. */}
-      {snapshot && snapshot.teams.length > 0 ? (
-        <section aria-label="live card previews" className="cc-mini-grid">
-          {snapshot.teams.map((team) => (
-            <TeamMiniCanvas key={team.id} team={team} />
-          ))}
-        </section>
-      ) : null}
-
-      {/* Single prominent Start control below all cards. Hidden once BUILD is underway. */}
+      {/* Single prominent Start control: below the roster/team cards, above
+          the live card previews. Hidden once BUILD is underway. */}
       {!building ? (
         <section className="cc-start" aria-label="start building">
           <button
@@ -548,6 +545,16 @@ function Console({ game }: { game: CreatedGame }) {
           ) : (
             <p className="cc-hint">All greetings are ready — starting hands each team its card brief.</p>
           )}
+        </section>
+      ) : null}
+
+      {/* Live previews: one read-only mini canvas per team. GREETINGS: the
+          greeting + an empty canvas; BUILD: live items + layout. */}
+      {snapshot && snapshot.teams.length > 0 ? (
+        <section aria-label="live card previews" className="cc-mini-grid">
+          {snapshot.teams.map((team) => (
+            <TeamMiniCanvas key={team.id} team={team} />
+          ))}
         </section>
       ) : null}
     </div>

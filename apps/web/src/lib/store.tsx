@@ -35,7 +35,7 @@ export interface ClientItem {
   id: string;
   promptRaw: string;
   nickname: string;
-  /** Submitting player (from sync:full rows; live item:pending lacks it). */
+  /** Submitting player (sync:full rows + the item:pending echo). */
   playerId?: string;
   status: ClientItemStatus;
   imageUrl?: string;
@@ -125,6 +125,8 @@ export interface GameSnapshot {
   teams: ClientTeam[];
   /** Owner-only submission ledger (see MyItemEvent). */
   myItems: Record<string, MyItemEvent>;
+  /** THIS client's player id (client-only; null for GM/presenter sockets). */
+  myPlayerId: string | null;
 }
 
 /** Max entries kept per team's activity feed (newest first). */
@@ -154,6 +156,11 @@ export type StoreAction =
   | { type: "itemReady"; payload: Record<string, unknown> }
   | { type: "itemRejected"; payload: Record<string, unknown> }
   | { type: "itemFailed"; payload: Record<string, unknown> }
+  // Team broadcast when an item goes REJECTED/FAILED: teammates drop the
+  // pending placeholder (the owner's private item:rejected/item:failed —
+  // which carries the reason — is always delivered BEFORE this broadcast,
+  // and the owner's terminal row/ledger must survive it).
+  | { type: "itemWithdrawn"; payload: Record<string, unknown> }
   | { type: "layoutUpdated"; payload: Record<string, unknown> }
   // Placeholder — no server event exists yet (gm:removeItem future work).
   | { type: "itemRemoved"; itemId: string }
@@ -243,6 +250,21 @@ function patchItemEverywhere(
   };
 }
 
+/** Does THIS client own the item? Ownership signals, in order: the event
+ *  payload's playerId (item:pending carries the submitter's id), an existing
+ *  ledger entry, or a row attributed to me. GM/presenter (myPlayerId null)
+ *  own nothing — their ledger must stay empty. Keeping team-wide echoes out
+ *  of myItems is what makes "ledger presence" reliable ownership evidence
+ *  for selectMyItems ("Your stickers" shows ONLY my prompts). */
+function ownsItem(base: GameSnapshot, itemId: string, payloadPlayerId?: unknown): boolean {
+  if (base.myPlayerId == null) return false;
+  if (payloadPlayerId === base.myPlayerId) return true;
+  if (base.myItems[itemId]) return true;
+  return base.teams.some((t) =>
+    t.items.some((i) => i.id === itemId && i.playerId === base.myPlayerId),
+  );
+}
+
 export function storeReducer(state: GameSnapshot | null, action: StoreAction): GameSnapshot | null {
   switch (action.type) {
     case "sync:full":
@@ -329,18 +351,21 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
         itemId?: unknown;
         promptRaw?: unknown;
         nickname?: unknown;
+        playerId?: unknown;
         teamId?: unknown;
       };
       if (typeof p.itemId !== "string" || typeof p.teamId !== "string") return state;
       const itemId = p.itemId;
       const promptRaw = typeof p.promptRaw === "string" ? p.promptRaw : "";
       const nickname = typeof p.nickname === "string" ? p.nickname : "?";
+      const playerId = typeof p.playerId === "string" ? p.playerId : undefined;
       const next = withTeam(base, p.teamId, (team) => ({
         ...team,
         items: upsertItem(team.items, {
           id: itemId,
           promptRaw,
           nickname,
+          ...(playerId ? { playerId } : {}),
           status: "pending",
         }),
         activity: trimActivity([
@@ -348,6 +373,10 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
           ...team.activity.filter((e) => e.itemId !== itemId),
         ]),
       }));
+      // Ledger is OWNER-scoped: the team-wide pending echo registers only
+      // the submitter's entry (see ownsItem) — teammates must not grow
+      // "Your stickers" rows for other people's prompts.
+      if (!ownsItem(base, itemId, playerId)) return next;
       return patchMyItems(next, itemId, (prev) => ({
         promptRaw: prev?.promptRaw ?? promptRaw,
         status: "pending",
@@ -392,6 +421,10 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
           ]),
         };
       });
+      // Ledger is OWNER-scoped (see ownsItem): the owner is identified by
+      // their existing ledger entry / an attributed row (item:ready carries
+      // no playerId) — teammates' ledgers stay untouched.
+      if (!ownsItem(base, itemId)) return next;
       return patchMyItems(next, itemId, (prev) => ({
         promptRaw: prev?.promptRaw ?? "",
         status: "ready",
@@ -425,10 +458,36 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
       const itemId = p.itemId;
       const reason = typeof p.reason === "string" ? p.reason : "";
       const next = patchItemEverywhere(base, itemId, { status: "failed", reason });
+      if (!ownsItem(base, itemId)) return next;
       return patchMyItems(next, itemId, (prev) => ({
         promptRaw: prev?.promptRaw ?? "",
         status: "failed",
         reason,
+      }));
+    }
+    // item:withdrawn — team broadcast when an item goes REJECTED/FAILED (the
+    // pipeline/queue emit it right AFTER the owner-only item:rejected /
+    // item:failed, so the owner's ledger is already terminal here). Removes
+    // the pending placeholder + activity entry for everyone EXCEPT the owner:
+    // their ledger keeps the terminal rejected/failed state (with reason /
+    // exampleFix) and their row must survive. The ledger itself is NEVER
+    // touched — a pending entry (owner-side, rejected detail still in flight)
+    // keeps its promptRaw for the owner-only event to overwrite.
+    case "itemWithdrawn": {
+      const base = roundGuard(state, action.payload);
+      if (!base) return state;
+      const p = action.payload as { itemId?: unknown; teamId?: unknown };
+      if (typeof p.itemId !== "string" || typeof p.teamId !== "string") return state;
+      const itemId = p.itemId;
+      const teamId = p.teamId;
+      // Owner-keep rule: the owner-only event already marked the ledger
+      // terminal — never delete the owner's row/ledger via the broadcast.
+      const mine = base.myItems[itemId];
+      if (mine?.status === "rejected" || mine?.status === "failed") return base;
+      return withTeam(base, teamId, (team) => ({
+        ...team,
+        items: team.items.filter((i) => i.id !== itemId),
+        activity: team.activity.filter((e) => e.itemId !== itemId),
       }));
     }
     case "layoutUpdated": {
@@ -547,6 +606,7 @@ function normalizeSnapshot(
     scoresLocked: Boolean(raw.scoresLocked),
     serverNow: Number(raw.serverNow ?? Date.now()),
     myItems,
+    myPlayerId,
     teams: teams.map((t) => {
       // Raw sync:full rows carry server-only fields (failReason, playerId…)
       // beyond the client shape — read them off a loose record type.
