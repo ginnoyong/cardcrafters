@@ -341,3 +341,73 @@ describe("visual weight", () => {
     expect(await computeVisualWeight(buf)).toBe(await computeVisualWeight(buf));
   });
 });
+
+describe("die-cut post-processing in the worker", () => {
+  it("full-bleed AI image → READY with frame-size dims, written file has transparent edges", async () => {
+    const sharp = (await import("sharp")).default;
+    const s = await setup();
+    const storageDir = await newStorageDir();
+
+    // Fake AI returning a FULL-BLEED transparent PNG: 128×128 canvas, opaque
+    // artwork touching all 4 edges (transparent corners only).
+    const raw = Buffer.alloc(128 * 128 * 4, 0);
+    for (let y = 0; y < 128; y++) {
+      for (let x = 0; x < 128; x++) {
+        if (Math.abs(x - 64) < 20 || Math.abs(y - 64) < 20) {
+          const p = (y * 128 + x) * 4;
+          raw[p] = 200;
+          raw[p + 1] = 30;
+          raw[p + 2] = 30;
+          raw[p + 3] = 255;
+        }
+      }
+    }
+    const fullBleed = await sharp(raw, { raw: { width: 128, height: 128, channels: 4 } })
+      .png()
+      .toBuffer();
+    const fullBleedAi = {
+      run: async () => ({
+        data: {},
+        imageBase64: fullBleed.toString("base64"),
+        imageMime: "image/png",
+      }),
+    } as unknown as AiRouter;
+
+    const item = await s.repo.createItem({
+      teamId: s.teamId,
+      playerId: s.playerId,
+      round: 1,
+      promptRaw: "a red balloon dog",
+      subject: "a red balloon dog",
+      status: "GENERATING",
+    });
+    const handler = createItemImageHandler({ repo: s.repo, ai: fullBleedAi, emit: s.emit, storageDir });
+    await handler({
+      itemId: item.id,
+      gameId: s.gameId,
+      teamId: s.teamId,
+      playerId: s.playerId,
+      round: 1,
+      prompt: "a red balloon dog",
+      subject: "a red balloon dog",
+    });
+
+    // READY with dims from the FINAL buffer = the original FRAME size
+    // (padding never resizes the canvas, only the content on it).
+    const row = await s.repo.getItem(item.id);
+    expect(row).toMatchObject({ status: "READY", width: 128, height: 128 });
+    expect(row?.imageUrl).toBe(`/static/items/${item.id}.png`);
+
+    // The written file has transparent padding on all sides now.
+    const written = await readFile(path.join(storageDir, `${item.id}.png`));
+    const { data } = await sharp(written).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * 128 + x) * 4 + 3];
+    expect(at(0, 0)).toBe(0);
+    expect(at(127, 0)).toBe(0);
+    expect(at(0, 127)).toBe(0);
+    expect(at(127, 127)).toBe(0);
+    expect(at(64, 0)).toBe(0);
+    expect(at(64, 127)).toBe(0);
+    expect(at(64, 64)).toBe(255); // content still there, centered
+  });
+});

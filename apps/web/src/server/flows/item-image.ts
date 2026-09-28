@@ -9,7 +9,10 @@
  *      fallback happens inside the router.
  *   3. On success: decode base64 → ensureTransparentPng (bg-removal fallback
  *      for opaque results; already-transparent PNGs pass through untouched) →
- *      write public/static/items/{itemId}.png (filename = itemId only — a
+ *      ensureSubjectPadding (die-cut guarantee: chroma-key FIRST, then padding
+ *      — padding applies to the FINAL transparent artwork; already-padded
+ *      images pass through byte-identically) → write
+ *      public/static/items/{itemId}.png (filename = itemId only — a
  *      safe cuid, no user text in the path) → persist READY with imageUrl
  *      `/static/items/{itemId}.png` + real width/height (sharp metadata) +
  *      visualWeight → emit `item:ready` to the TEAM room.
@@ -42,6 +45,7 @@ import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 
 import { ensureTransparentPng } from "../image/bg-remove";
+import { ensureSubjectPadding } from "../image/pad";
 import { computeVisualWeight } from "../image/weight";
 import type { ImageJob } from "../queue/queue";
 import type { Repository } from "../repo/repository";
@@ -118,7 +122,10 @@ export function createItemImageHandler(
       if (!res.imageBase64) throw new Error("provider returned no image data");
 
       const decoded = Buffer.from(res.imageBase64, "base64");
-      const { buf } = await ensureTransparentPng(decoded, res.imageMime ?? "image/png");
+      // Order matters: chroma-key first, THEN padding — padding must apply to
+      // the final transparent artwork, never to the opaque pre-key image.
+      const { buf: keyed } = await ensureTransparentPng(decoded, res.imageMime ?? "image/png");
+      const buf = await ensureSubjectPadding(keyed);
 
       // Re-check the status BEFORE touching the filesystem (m9): the GM may
       // have REMOVED the item while the image was generating — never

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import { DEFAULT_CARD_CONFIG } from "@cardcrafters/shared";
 
+const sharp = (await import("sharp")).default;
+
 import { MemoryRepo } from "../repo/memory-repo";
 import { AiBudgetExceededError, AiTaskError } from "./errors";
 import { OpenRouterProvider } from "./openrouter-provider";
@@ -260,6 +262,51 @@ describe("AiRouter — openrouter (mocked fetch)", () => {
     // 400 is fatal per-model (no retry on the same model) but the chain continues
     // through every fallback → primary + both fallbacks, 1 attempt each.
     expect(models()).toEqual([primary, fallback, CONFIG.prompt_validation.fallbacks[1]!]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OpenRouter item_image prompt (die-cut sticker look)
+// ---------------------------------------------------------------------------
+
+describe("OpenRouterProvider — item_image prompt (die-cut)", () => {
+  it("synthesizes a die-cut prompt: centered 75–85% subject, transparent padding on all sides + style suffix", async () => {
+    const tinyPng = await sharp({
+      create: { width: 8, height: 8, channels: 4, background: { r: 200, g: 30, b: 30, alpha: 1 } },
+    })
+      .png()
+      .toBuffer();
+    const dataUrl = `data:image/png;base64,${tinyPng.toString("base64")}`;
+    const { fn, calls } = mockFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "sticker", images: [{ image_url: { url: dataUrl } }] } }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const provider = new OpenRouterProvider({ apiKey: "sk-test", fetchImpl: fn });
+    const res = await provider.run(
+      "item_image",
+      { subject: "a red balloon dog", styleSuffix: "flat vector, bold outlines" },
+      taskCfg("item_image", { maxTokens: 0 }),
+    );
+
+    expect(calls).toHaveLength(1);
+    const body = JSON.parse(String(calls[0]!.init.body));
+    expect(body.modalities).toEqual(["image", "text"]);
+    const text = body.messages[0].content as string;
+    expect(text).toContain("a red balloon dog");
+    expect(text).toContain("75–85%");
+    expect(text).toContain("transparent padding on ALL sides");
+    expect(text).toContain("Fully transparent background");
+    expect(text).toContain("CENTERED");
+    // Style suffix is still inserted.
+    expect(text).toContain("flat vector, bold outlines");
+    // And the image round-trips back out of the response.
+    expect(res.imageBase64).toBe(tinyPng.toString("base64"));
+    expect(res.imageMime).toBe("image/png");
   });
 });
 

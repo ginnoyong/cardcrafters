@@ -226,9 +226,12 @@ export class OpenRouterProvider implements AiProvider {
     const messages: { role: "system" | "user"; content: string }[] = [];
     if (task === "item_image") {
       // Binary image task — no text template; prompt is synthesized from input.
+      // Die-cut look: subject centered with generous transparent padding, never
+      // a full-bleed rectangle (post-process auto-padding in image/pad.ts is
+      // only the safety net — the model must already comply).
       const subject = String(input.subject ?? input.prompt ?? "");
       const style = String(input.styleSuffix ?? input.imagePromptSuffix ?? "");
-      const text = `Create one standalone sticker-style illustration of: "${subject}".\n${style ? `Visual style: ${style}.\n` : ""}Transparent background, single object centered, no text.`;
+      const text = `One standalone sticker-style illustration of: ${subject}. The subject must be CENTERED and occupy about 75–85% of the frame, with generous transparent padding on ALL sides (subject must NOT touch the edges). Fully transparent background — no backdrop, no ground shadow, no border, no text.${style ? `\nVisual style: ${style}.` : ""}`;
       messages.push({ role: "user", content: text });
       return messages;
     }
