@@ -37,6 +37,7 @@ import {
   computeAndPersistLayout,
   type LayoutEmit,
 } from "../layout/engine";
+import { createCritiqueScheduler, type CritiqueEmit } from "../layout/critique";
 import {
   createPromptPipelineDeps,
   submitPrompt,
@@ -365,9 +366,34 @@ export function registerSocketHandlers(
       io.to(room).emit(event, enveloped);
     }
   };
-  const layoutDebouncer = createLayoutDebouncer((ctx) =>
-    computeAndPersistLayout({ repo, ai: ai ?? null, emit: layoutEmit }, ctx.gameId, ctx.teamId),
-  );
+  // Vision layout critique: after every committed layout:updated emit the
+  // critique scheduler arms a trailing 5s buffer per team (bursts re-arm the
+  // SAME timer); on fire it renders the card to a PNG, asks the vision model
+  // for a verdict and emits `layout:critique` to the GM room ONLY (hub-stamped
+  // envelope). Mock mode (no real provider) short-circuits to a fixed passing
+  // verdict without rendering or calling the AI. Failures are swallowed —
+  // critique problems never break the build flow.
+  const critiqueEmit: CritiqueEmit = (event, payload, ctx) => {
+    io.to(gmRoom(ctx.gameId)).emit(event, { ...hub.stamp(ctx.gameId), teamId: ctx.teamId, ...payload });
+  };
+  const critique = createCritiqueScheduler({
+    repo,
+    ai: ai ?? null,
+    mockMode: ai ? ai.isMock() : true,
+    emitCritique: critiqueEmit,
+    emitLayout: layoutEmit,
+  });
+  const layoutDebouncer = createLayoutDebouncer(async (ctx) => {
+    const computed = await computeAndPersistLayout(
+      { repo, ai: ai ?? null, emit: layoutEmit },
+      ctx.gameId,
+      ctx.teamId,
+    );
+    // The critique trails the layout commit (never runs on a layout that
+    // didn't land).
+    if (computed) critique.schedule(ctx);
+    return computed;
+  });
 
   // Queue-level emitter: item:ready → hub-stamped broadcast to the TEAM room;
   // item:failed → hub-stamped direct emit to ALL of the owner's live sockets
@@ -783,6 +809,9 @@ export function registerSocketHandlers(
   return {
     async close() {
       await layoutDebouncer.flushAll();
+      // Critiques are ephemeral GM intel — pending ones are DROPPED on
+      // shutdown (dispose clears the timers; it does not flush).
+      critique.dispose();
       if (ownedQueue) await ownedQueue.close();
     },
   };

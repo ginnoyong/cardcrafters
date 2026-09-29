@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import {
   greetingVariationsSchema,
   layoutCompositionSchema,
+  layoutCritiqueSchema,
   moderationSchema,
   promptValidationSchema,
   styleDerivationSchema,
@@ -120,6 +121,7 @@ export const TASK_SCHEMAS: Record<string, z.ZodTypeAny> = {
   greetingVariationsSchema,
   styleDerivationSchema,
   layoutCompositionSchema,
+  layoutCritiqueSchema,
 };
 
 /** Validate `data` against the schema named by cfg.structured (null = exempt). */

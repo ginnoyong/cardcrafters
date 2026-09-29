@@ -103,24 +103,26 @@ describe("AiRouter — mock mode", () => {
       layout_critique: {},
     };
     for (const task of TASK_NAMES) {
-      if (task === "layout_critique") continue; // disabled — separate test
       const res = await router.run(task, inputs[task], { gameId });
       expect(res.model).toBe(`mock/${task}`);
       if (task === "item_image") expect(res.imageBase64).toBeTruthy();
       else expect(res.data).toBeTruthy();
     }
     const summary = await repo.listAiCalls(gameId);
-    expect(summary.rows).toHaveLength(TASK_NAMES.length - 1);
+    expect(summary.rows).toHaveLength(TASK_NAMES.length);
     expect(summary.rows.every((r) => r.status === "OK")).toBe(true);
     expect(summary.totalCostUsd).toBe(0);
   });
 
-  it("skips the disabled task (layout_critique) without logging rows", async () => {
+  it("layout_critique (mock): deterministic fixed verdict, logged like any task", async () => {
     const { repo, gameId } = await mkRepo();
     const router = new AiRouter({ repo, mode: "mock", config: CONFIG });
-    await expect(router.run("layout_critique", {}, { gameId })).rejects.toThrow(/disabled/);
+    const res = await router.run("layout_critique", { layoutSummary: "x" }, { gameId });
+    expect(res.model).toBe("mock/layout_critique");
+    expect(res.data).toEqual({ score: 80, issues: [], focalOk: true });
     const summary = await repo.listAiCalls(gameId);
-    expect(summary.rows).toHaveLength(0);
+    expect(summary.rows).toHaveLength(1);
+    expect(summary.rows[0]!.status).toBe("OK");
   });
 
   it("throws on unknown task names", async () => {
@@ -403,7 +405,7 @@ describe("createAiRouter", () => {
     });
     expect(router.taskConfig("item_image")?.timeoutMs).toBe(60000);
     expect(router.taskConfig("prompt_validation")?.structured).toBe("promptValidationSchema");
-    expect(router.taskConfig("layout_critique")?.enabled).toBe(false);
+    expect(router.taskConfig("layout_critique")?.enabled).toBe(true);
     // under the $25 budget a mock call succeeds (mock costs 0, unknown game ok)
     await expect(router.run("moderation", { prompt: "x" }, { gameId: "fresh-game" })).resolves.toBeTruthy();
   });

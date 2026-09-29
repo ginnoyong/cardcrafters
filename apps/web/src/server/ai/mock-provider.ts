@@ -141,12 +141,12 @@ export class MockProvider implements AiProvider {
         data = mockLayoutComposition(input);
         break;
       case "layout_critique":
-        throw new AiTaskError({
-          task,
-          model: `mock/${task}`,
-          retryable: false,
-          message: "layout_critique is disabled in config/ai-tasks.json",
-        });
+        // The critique scheduler short-circuits mock mode BEFORE calling the
+        // router, so this branch is a deterministic safety net (tests, or any
+        // future direct mock call): a fixed passing verdict — never a
+        // heuristic, never a network call.
+        data = { score: 80, issues: [], focalOk: true };
+        break;
       case "item_image":
         // Handled in run() (binary output path); unreachable here.
         throw new AiTaskError({

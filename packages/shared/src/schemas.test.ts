@@ -23,6 +23,7 @@ import {
   itemRejectedSchema,
   itemFailedSchema,
   itemRemovedSchema,
+  layoutCritiqueSchema,
 } from "./schemas";
 
 /** JSON round-trip helper: serialize, parse, re-parse through the schema. */
@@ -216,6 +217,57 @@ describe("layoutCompositionSchema", () => {
 
   it("round-trips the extended contract through JSON", () => {
     expect(roundTrip(layoutCompositionSchema, extended)).toEqual(extended);
+  });
+});
+
+describe("layoutCritiqueSchema", () => {
+  const valid = {
+    score: 82,
+    issues: ["hero slightly off-center", "dead space in the lower-left corner"],
+    focalOk: true,
+  };
+
+  it("accepts a valid fixture", () => {
+    expect(layoutCritiqueSchema.parse(valid)).toEqual(valid);
+  });
+
+  it("accepts the empty-issues minimal verdict", () => {
+    expect(layoutCritiqueSchema.parse({ score: 80, issues: [], focalOk: true })).toEqual({
+      score: 80,
+      issues: [],
+      focalOk: true,
+    });
+  });
+
+  it("rejects score 101, a non-integer score (101.5) and a negative score", () => {
+    expect(() => layoutCritiqueSchema.parse({ ...valid, score: 101 })).toThrow();
+    expect(() => layoutCritiqueSchema.parse({ ...valid, score: 101.5 })).toThrow();
+    expect(() => layoutCritiqueSchema.parse({ ...valid, score: -1 })).toThrow();
+  });
+
+  it("rejects non-boolean focalOk (e.g. 'yes')", () => {
+    expect(() => layoutCritiqueSchema.parse({ ...valid, focalOk: "yes" })).toThrow();
+  });
+
+  it("rejects an issue over 200 chars and more than 10 issues", () => {
+    const long = "x".repeat(201);
+    expect(() => layoutCritiqueSchema.parse({ ...valid, issues: [long] })).toThrow();
+    expect(() =>
+      layoutCritiqueSchema.parse({
+        ...valid,
+        issues: Array.from({ length: 11 }, (_, i) => `issue ${i}`),
+      }),
+    ).toThrow();
+  });
+
+  it("rejects missing/extra fields (strict)", () => {
+    const { focalOk: _drop, ...rest } = valid;
+    expect(() => layoutCritiqueSchema.parse(rest)).toThrow();
+    expect(() => layoutCritiqueSchema.parse({ ...valid, confidence: 0.9 })).toThrow();
+  });
+
+  it("round-trips through JSON", () => {
+    expect(roundTrip(layoutCritiqueSchema, valid)).toEqual(valid);
   });
 });
 

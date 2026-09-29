@@ -111,6 +111,16 @@ export interface ClientTeam {
   layout: ClientLayout | null;
   /** Recent team activity (newest first, max ACTIVITY_FEED_MAX entries). */
   activity: ClientActivityEntry[];
+  /** Latest vision layout critique (GM-only intel from `layout:critique`;
+   *  event-only — sync:full never carries it, so it resets on snapshot). */
+  critique: ClientCritique | null;
+}
+
+/** One vision critique verdict (see shared layoutCritiqueSchema). */
+export interface ClientCritique {
+  score: number;
+  issues: string[];
+  focalOk: boolean;
 }
 
 export interface GameSnapshot {
@@ -162,6 +172,10 @@ export type StoreAction =
   // and the owner's terminal row/ledger must survive it).
   | { type: "itemWithdrawn"; payload: Record<string, unknown> }
   | { type: "layoutUpdated"; payload: Record<string, unknown> }
+  // GM-only vision verdict (layout:critique, emitted straight to the GM room):
+  // {gameId, round, ts, seq, teamId, score, issues, focalOk}. Stores the
+  // LATEST verdict per team (ClientTeam.critique).
+  | { type: "critiqueReceived"; payload: Record<string, unknown> }
   // Placeholder — no server event exists yet (gm:removeItem future work).
   | { type: "itemRemoved"; itemId: string }
   // Submit ack ok: register the new submission in the owner's ledger.
@@ -323,6 +337,7 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
               items: [],
               layout: null,
               activity: [],
+              critique: null,
             }))
           : base.teams,
       };
@@ -564,6 +579,28 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
         return { ...team, layout: { version, placements, greetingStyle, source } };
       });
     }
+    // layout:critique — GM-room-only vision verdict. Payload is a hub-stamped
+    // envelope + {teamId, score, issues, focalOk}. Stores the LATEST verdict
+    // per team; round-guarded like every build-phase event.
+    case "critiqueReceived": {
+      const base = roundGuard(state, action.payload);
+      if (!base) return state;
+      const p = action.payload as {
+        teamId?: unknown;
+        score?: unknown;
+        issues?: unknown;
+        focalOk?: unknown;
+      };
+      if (typeof p.teamId !== "string" || !Number.isFinite(Number(p.score))) return state;
+      const critique: ClientCritique = {
+        score: Number(p.score),
+        issues: Array.isArray(p.issues)
+          ? p.issues.filter((i): i is string => typeof i === "string")
+          : [],
+        focalOk: p.focalOk === true,
+      };
+      return withTeam(base, p.teamId, (team) => ({ ...team, critique }));
+    }
     // Placeholder — no server event (gm:removeItem) exists yet. Removes the
     // item AND its placement so the card re-flows on the next layout.
     case "itemRemoved": {
@@ -740,6 +777,8 @@ function normalizeSnapshot(
         // sync:full is authoritative but activity is event-only → start empty;
         // the live feed rebuilds as events arrive.
         activity: [],
+        // Critiques are event-only GM intel — a fresh snapshot starts clean.
+        critique: null,
       };
     }),
   };

@@ -55,6 +55,30 @@ interface ImagesEndpointResponse {
   error?: { message?: string };
 }
 
+/**
+ * Message content part — plain text, or an image (data URL / https URL) for
+ * VISION tasks. layout_critique sends the rendered card PNG as a base64 data
+ * URL alongside the prompt text; OpenRouter forwards the part to the
+ * vision-capable model (google/gemini-2.5-flash primary).
+ */
+type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+interface ChatMessage {
+  role: "system" | "user";
+  content: string | ContentPart[];
+}
+
+/** Flatten a message's content to plain text (images → a placeholder note).
+ *  Used only by the images-endpoint fallback, which is text-prompt-only. */
+function messageText(content: string | ContentPart[]): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((p) => (p.type === "text" ? p.text : "[image attached]"))
+    .join("\n");
+}
+
 export class OpenRouterProvider implements AiProvider {
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -93,7 +117,7 @@ export class OpenRouterProvider implements AiProvider {
     // model with the same (broken) template cannot help — mark non-retryable
     // so the router moves on to the next fallback model instead of burning
     // this model's retry chain.
-    let messages: { role: "system" | "user"; content: string }[];
+    let messages: ChatMessage[];
     try {
       messages = await this.buildMessages(task, input);
     } catch (cause) {
@@ -253,10 +277,10 @@ export class OpenRouterProvider implements AiProvider {
     task: AiTaskName,
     input: Record<string, unknown>,
     cfg: TaskConfig,
-    messages: { role: "system" | "user"; content: string }[],
+    messages: ChatMessage[],
     started: number,
   ): Promise<AiCallResult> {
-    const prompt = messages.map((m) => m.content).join("\n\n");
+    const prompt = messages.map((m) => messageText(m.content)).join("\n\n");
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.baseUrl}/images`, {
@@ -326,15 +350,39 @@ export class OpenRouterProvider implements AiProvider {
   private async buildMessages(
     task: AiTaskName,
     input: Record<string, unknown>,
-  ): Promise<{ role: "system" | "user"; content: string }[]> {
+  ): Promise<ChatMessage[]> {
     await this.ensureTemplates(); // loaded once per provider instance
-    const messages: { role: "system" | "user"; content: string }[] = [];
+    const messages: ChatMessage[] = [];
     if (task === "item_image") {
       // Binary image task — no text template; prompt is synthesized from input.
       // Die-cut look: subject centered with generous transparent padding, never
       // a full-bleed rectangle (post-process auto-padding in image/pad.ts is
       // only the safety net — the model must already comply).
       messages.push({ role: "user", content: itemImagePrompt(input) });
+      return messages;
+    }
+    if (task === "layout_critique") {
+      // VISION task: the rendered card PNG travels as a base64 data-URL image
+      // part next to the prompt text. The base64 payload must NOT be inlined
+      // into the text/JSON dump (megabytes of noise) — strip it from both the
+      // template vars and the INPUT JSON block.
+      const { imageBase64: _b64, imageMime: _mime, ...rest } = input;
+      const rendered = this.templates.render(task, PromptTemplates.varsFromInput(rest));
+      if (rendered.system) messages.push({ role: "system", content: rendered.system });
+      const parts: ContentPart[] = [
+        { type: "text", text: `${rendered.user}\n\nINPUT (JSON):\n${JSON.stringify(rest, null, 2)}` },
+      ];
+      if (typeof input.imageBase64 === "string" && input.imageBase64.length > 0) {
+        const mime =
+          typeof input.imageMime === "string" && input.imageMime ? input.imageMime : "image/png";
+        parts.push({
+          type: "image_url",
+          image_url: { url: `data:${mime};base64,${input.imageBase64}` },
+        });
+      }
+      // No image in the input → text-only message (the model judges from the
+      // summary; the schema still applies).
+      messages.push({ role: "user", content: parts });
       return messages;
     }
     const rendered = this.templates.render(task, PromptTemplates.varsFromInput(input));

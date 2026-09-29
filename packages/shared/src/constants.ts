@@ -96,6 +96,21 @@ export const MAX_PAIRWISE_OVERLAP = 0.10;
 
 /** Debounce before a client persists layout edits (ms). */
 export const LAYOUT_DEBOUNCE_MS = 1500;
+
+/**
+ * Vision layout-critique pacing (build phase):
+ *  - BUFFER: trailing buffer after a layout commit before the critique runs;
+ *    a sticker arriving within the buffer re-arms the SAME single timer
+ *    (trailing edge, same semantics as LAYOUT_DEBOUNCE_MS) instead of
+ *    stacking critiques.
+ *  - MIN_INTERVAL: safety net — two critiques for the same team are never
+ *    closer than this, even if layouts keep landing.
+ *  - LOW_SCORE: a verdict below this score (or a failed focal check) flags
+ *    the layout to the GM (see the critique scheduler).
+ */
+export const LAYOUT_CRITIQUE_BUFFER_MS = 5000;
+export const LAYOUT_CRITIQUE_MIN_INTERVAL_MS = 45000;
+export const LAYOUT_CRITIQUE_LOW_SCORE = 55;
 /** Tween duration when applying remote layout updates (ms). */
 export const LAYOUT_TWEEN_MS = 600;
 

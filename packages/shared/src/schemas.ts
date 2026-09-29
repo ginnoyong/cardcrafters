@@ -156,6 +156,24 @@ export const layoutCompositionSchema = z
   .strict();
 export type LayoutComposition = z.infer<typeof layoutCompositionSchema>;
 
+/**
+ * Step: layout critique — a VISION model's verdict on the RENDERED card image
+ * (see server/render/card-render.ts). The rendered PNG is sent as an image_url
+ * content part; the model answers with this strict JSON shape.
+ */
+export const layoutCritiqueSchema = z
+  .object({
+    /** 0–100 composition quality score. */
+    score: z.number().int().min(0).max(100),
+    /** Concrete issues (focal unclear, dead space, crowding, collision,
+     *  imbalance); each capped at 200 chars to keep payloads/GM UI sane. */
+    issues: z.array(z.string().max(200)).max(10),
+    /** Whether ONE sticker clearly dominates the composition (focal point). */
+    focalOk: z.boolean(),
+  })
+  .strict();
+export type LayoutCritique = z.infer<typeof layoutCritiqueSchema>;
+
 // ---------------------------------------------------------------------------
 // (b) WebSocket payloads — client → server (strict: reject unknown fields)
 // ---------------------------------------------------------------------------

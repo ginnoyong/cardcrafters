@@ -69,14 +69,14 @@
       "structured": "layoutCompositionSchema"
     },
     "layout_critique": {
-      "primary": "openai/gpt-4.1-mini",
-      "fallbacks": [],
-      "temperature": 0,
-      "maxTokens": 200,
+      "primary": "google/gemini-2.5-flash",
+      "fallbacks": ["openai/gpt-4.1-mini"],
+      "temperature": 0.2,
+      "maxTokens": 400,
       "retries": 1,
-      "timeoutMs": 15000,
-      "structured": null,
-      "enabled": false
+      "timeoutMs": 20000,
+      "structured": "layoutCritiqueSchema",
+      "enabled": true
     }
   }
 }

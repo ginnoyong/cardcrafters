@@ -345,9 +345,9 @@ describe("MockProvider — misc", () => {
     expect(res.model).toBe("mock/moderation");
   });
 
-  it("rejects layout_critique as disabled", async () => {
-    await expect(
-      mkProvider().run("layout_critique", {}, cfg("layout_critique")),
-    ).rejects.toThrow(/disabled/);
+  it("layout_critique (mock): fixed passing verdict — the scheduler normally short-circuits before this", async () => {
+    const res = await mkProvider().run("layout_critique", {}, cfg("layout_critique"));
+    expect(res.model).toBe("mock/layout_critique");
+    expect(res.data).toEqual({ score: 80, issues: [], focalOk: true });
   });
 });

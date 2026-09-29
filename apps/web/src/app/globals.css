@@ -359,6 +359,24 @@ label {
   margin: 0;
 }
 
+/* GM vision-critique block: score badge + issue list (team card front). */
+.cc-critique {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.cc-critique-score.is-low {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.cc-critique-issues {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
 .cc-greeting-card {
   border-color: color-mix(in srgb, var(--accent) 60%, transparent);
 }

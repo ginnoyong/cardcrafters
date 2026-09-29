@@ -239,6 +239,13 @@ export class AiRouter {
     return this.config[task];
   }
 
+  /** True when the resolved provider is the deterministic mock (no network,
+   *  no cost). The layout-critique scheduler uses this to short-circuit the
+   *  vision call with a fixed verdict instead of asking the mock provider. */
+  isMock(): boolean {
+    return this.provider instanceof MockProvider;
+  }
+
   /** Total known spend for a game (cached; refreshed from repo on demand). */
   async spendUsd(gameId: string): Promise<number> {
     return this.currentSpend(gameId);

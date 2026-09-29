@@ -34,7 +34,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import QRCode from "qrcode";
 
-import { MAX_TEAMS } from "@cardcrafters/shared";
+import { LAYOUT_CRITIQUE_LOW_SCORE, MAX_TEAMS } from "@cardcrafters/shared";
 
 import {
   createGameSocket,
@@ -55,6 +55,7 @@ import {
   normalizeSyncFull,
   phaseLabel,
   useGameStore,
+  type ClientCritique,
   type ClientTeam,
   type SyncFullEvent,
 } from "@/lib/store";
@@ -113,6 +114,7 @@ function TeamCard({
   joinUrl,
   greetingText,
   members,
+  critique,
   qrActive,
   onToggleQr,
   onKick,
@@ -123,6 +125,7 @@ function TeamCard({
   joinUrl: string;
   greetingText: string;
   members: Array<{ id: string; nickname: string; connected: boolean }>;
+  critique: ClientCritique | null;
   qrActive: boolean;
   onToggleQr: () => void;
   onKick: (playerId: string) => void;
@@ -211,6 +214,31 @@ function TeamCard({
             Writing the first draft…
           </p>
         )}
+
+        {/* Vision layout critique (GM-only quality intel): score badge
+            (red below LAYOUT_CRITIQUE_LOW_SCORE or a failed focal check)
+            + the verdict's issues, right under the greeting. */}
+        {critique ? (
+          <div className="cc-critique" aria-label={`layout critique for ${team.name}`}>
+            <span
+              className={`cc-badge cc-critique-score${
+                critique.score < LAYOUT_CRITIQUE_LOW_SCORE || !critique.focalOk
+                  ? " is-low"
+                  : ""
+              }`}
+              aria-live="polite"
+            >
+              Layout {critique.score}/100{critique.focalOk ? "" : " · focal unclear"}
+            </span>
+            {critique.issues.length > 0 ? (
+              <ul className="cc-critique-issues">
+                {critique.issues.map((issue, i) => (
+                  <li key={i}>{issue}</li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        ) : null}
 
         {/* Inline edit flow (textarea + Save/Cancel) while editing. */}
         {editing ? (
@@ -457,6 +485,12 @@ function Console({ game }: { game: CreatedGame }) {
       onEvent<Record<string, unknown>>(socket, "item:withdrawn", (payload) =>
         dispatch({ type: "itemWithdrawn", payload }),
       ),
+      // Vision layout critique — GM-room-only verdict from the critique
+      // scheduler (build phase, ~5s after a layout lands). Stores the latest
+      // per-team score/issues for the card badges.
+      onEvent<Record<string, unknown>>(socket, "layout:critique", (payload) =>
+        dispatch({ type: "critiqueReceived", payload }),
+      ),
     );
 
     socket.connect();
@@ -477,6 +511,7 @@ function Console({ game }: { game: CreatedGame }) {
       ...t,
       greetingText: live?.greeting.text ?? "",
       members: live?.members ?? [],
+      critique: live?.critique ?? null,
     };
   });
   const pendingTeams = teams.filter((t) => t.greetingText.trim().length === 0);
@@ -513,6 +548,7 @@ function Console({ game }: { game: CreatedGame }) {
               joinUrl={joinUrl}
               greetingText={team.greetingText}
               members={team.members}
+              critique={team.critique}
               qrActive={qrActive}
               onToggleQr={() => setQrTeamId(qrActive ? null : team.id)}
               onKick={(playerId) => void gmAction("gm:kick", { playerId })}
