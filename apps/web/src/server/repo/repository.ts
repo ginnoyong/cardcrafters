@@ -22,6 +22,7 @@ import type {
   ItemStatus,
   Phase,
   Placement,
+  StyleDerivation,
 } from "@cardcrafters/shared";
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,7 @@ export interface GameRow {
   round: number;
   theme: string | null;
   config: CardConfig;
+  style: StyleDerivation | null;
   phaseEndsAt: number | null;
   cutoffAt: number | null;
   createdAt: number;
@@ -170,6 +172,7 @@ export interface GamePatch {
   round?: number;
   theme?: string | null;
   config?: CardConfig;
+  style?: StyleDerivation | null;
   phaseEndsAt?: number | null;
   cutoffAt?: number | null;
 }

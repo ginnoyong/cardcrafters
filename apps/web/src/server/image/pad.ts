@@ -1,49 +1,36 @@
 /**
- * Auto-padding post-process (build-phase step 2) — guarantees the die-cut
- * sticker look: subject centered with generous transparent padding, never a
- * full-bleed rectangle.
+ * Content-crop post-process (USER DECISION: "no white space around the image"
+ * — the visible cutout/border of a sticker must not be obvious). Replaces the
+ * earlier die-cut padding pass: instead of guaranteeing padding, the sticker
+ * PNG is CROPPED to its visible content box plus a small safety margin, so
+ * what the solver/client treat as the "frame" is essentially the artwork.
  *
  * Runs in the item-image worker AFTER ensureTransparentPng (chroma-key first —
- * padding must apply to the FINAL transparent artwork; padding an opaque
- * rectangle would be meaningless). Worker flow order:
- *   decode → ensureTransparentPng → ensureSubjectPadding → write.
+ * cropping must apply to the FINAL transparent artwork). Worker flow order:
+ *   decode → ensureTransparentPng → ensureSubjectPadding(crop) → write.
  *
  * How it works:
- *  1. Trim fully-transparent margins with sharp().trim() using a transparent
- *     background (alpha-based trim) to find the content bounding box. The
- *     trim offsets (info.trimOffsetLeft/Top) locate the box inside the frame.
- *  2. If the content box is ≤ targetFrac (default 0.88) of the frame in BOTH
- *     dimensions AND touches no edge, the artwork already has ≥12% padding →
- *     return the ORIGINAL buffer unchanged (byte-identical pass-through —
- *     mock stickers rely on this: their content is 160/256 = 0.625 of the
- *     frame). Content TOUCHING an edge (trim is a no-op in that axis) always
- *     triggers padding — touching an edge means zero padding there.
- *  3. Otherwise resize the CONTENT so its long edge is 85% of the frame's
- *     long edge, then composite it CENTERED onto a fully transparent canvas
- *     of the ORIGINAL frame size — output dimensions never change.
+ *  1. Alpha-based trim (sharp().trim() with a transparent background) finds
+ *     the content bounding box; trim offsets (info.trimOffsetLeft/Top,
+ *     NEGATIVE pixels removed) locate it inside the frame.
+ *  2. Crop the frame to content + margin = 2% of the max frame dimension
+ *     (min 4px per side), clamped to the frame bounds.
+ *  3. Interior transparency of the artwork is untouched — only the outside
+ *     transparent margins disappear.
  *
- * Fail-open: any sharp error logs a warning and returns the ORIGINAL buffer —
- * a full-bleed sticker is better than a lost generation (same policy as
- * bg-remove). A fully transparent image (degenerate) also passes through.
+ * Fail-open: any sharp error logs a warning and returns the ORIGINAL buffer
+ * (same policy as bg-remove). A fully transparent (degenerate) image also
+ * passes through.
  */
 
 import sharp from "sharp";
 
-/** Content box may not exceed this fraction of the frame (per dimension). */
-const DEFAULT_TARGET_FRAC = 0.88;
-/** When padding is needed, the content long edge becomes this fraction of the frame's long edge. */
-const CONTENT_FRAC = 0.85;
+/** Crop margin as a fraction of the larger frame dimension. */
+const CROP_MARGIN_FRAC = 0.02;
+/** Minimum crop margin in pixels (per side). */
+const MIN_CROP_MARGIN = 4;
 
-export interface SubjectPaddingOptions {
-  /** Max allowed content-box fraction per dimension (default 0.88 → ≥12% padding). */
-  targetFrac?: number;
-}
-
-export async function ensureSubjectPadding(
-  buf: Buffer,
-  opts: SubjectPaddingOptions = {},
-): Promise<Buffer> {
-  const targetFrac = opts.targetFrac ?? DEFAULT_TARGET_FRAC;
+export async function ensureSubjectPadding(buf: Buffer): Promise<Buffer> {
   try {
     const meta = await sharp(buf).metadata();
     if (!meta.width || !meta.height) return buf;
@@ -51,8 +38,7 @@ export async function ensureSubjectPadding(
     const frameH = meta.height;
 
     // 1. Alpha-based trim: strip fully-transparent margins to get the content
-    // bounding box. trim() with a transparent background is a no-op when the
-    // content touches an edge (verified: it neither errors nor shrinks).
+    // bounding box (no-op when content touches an edge — verified).
     const trimmed = await sharp(buf)
       .trim({ background: "rgba(0,0,0,0)" })
       .toBuffer({ resolveWithObject: true });
@@ -62,40 +48,37 @@ export async function ensureSubjectPadding(
     const stats = await sharp(trimmed.data).stats();
     if (stats.channels[3]?.max === 0) return buf;
 
-    // 2. Already enough padding AND nothing touches an edge → byte-identical
-    // pass-through. trimOffset* are NEGATIVE (pixels removed from that side),
-    // so content-left = -trimOffsetLeft, content-top = -trimOffsetTop.
-    const left = -(trimmed.info.trimOffsetLeft ?? 0);
-    const top = -(trimmed.info.trimOffsetTop ?? 0);
-    const touchesEdge =
-      left === 0 || top === 0 || left + trimmed.info.width >= frameW || top + trimmed.info.height >= frameH;
-    const contentFrac = Math.max(trimmed.info.width / frameW, trimmed.info.height / frameH);
-    if (!touchesEdge && contentFrac <= targetFrac) return buf;
-
-    // 3. Full-bleed: shrink the content to 85% of the frame's long edge and
-    // composite it centered on a transparent canvas of the ORIGINAL size.
-    const longEdge = Math.max(frameW, frameH);
-    const target = Math.round(CONTENT_FRAC * longEdge);
-    const content = await sharp(trimmed.data)
-      .resize(target, target, { fit: "inside" })
-      .png()
-      .toBuffer();
-    return await sharp({
-      create: {
-        width: frameW,
-        height: frameH,
-        channels: 4,
-        background: { r: 0, g: 0, b: 0, alpha: 0 },
-      },
-    })
-      .composite([{ input: content, gravity: "centre" }])
-      .png()
-      .toBuffer();
+    // 2. Crop to content + small margin. trimOffset* are NEGATIVE (pixels
+    // removed from that side), so content-left = -trimOffsetLeft.
+    const left = Math.max(
+      0,
+      -(trimmed.info.trimOffsetLeft ?? 0) - marginFor(frameW, frameH),
+    );
+    const top = Math.max(
+      0,
+      -(trimmed.info.trimOffsetTop ?? 0) - marginFor(frameW, frameH),
+    );
+    const width = Math.min(
+      frameW - left,
+      trimmed.info.width + 2 * marginFor(frameW, frameH),
+    );
+    const height = Math.min(
+      frameH - top,
+      trimmed.info.height + 2 * marginFor(frameW, frameH),
+    );
+    if (width === frameW && height === frameH && left === 0 && top === 0) {
+      return buf; // content already fills the frame → nothing to crop
+    }
+    return sharp(buf).extract({ left, top, width, height }).png().toBuffer();
   } catch (err) {
     console.warn(
-      "[pad] subject padding failed — keeping original:",
+      "[pad] content crop failed — keeping original:",
       err instanceof Error ? err.message : err,
     );
     return buf;
   }
+}
+
+function marginFor(frameW: number, frameH: number): number {
+  return Math.max(MIN_CROP_MARGIN, Math.round(CROP_MARGIN_FRAC * Math.max(frameW, frameH)));
 }

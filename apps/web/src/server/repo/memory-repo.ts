@@ -118,6 +118,7 @@ export class MemoryRepo implements Repository {
       round: 1,
       theme: null,
       config: input.config,
+      style: null,
       phaseEndsAt: null,
       cutoffAt: null,
       createdAt: this.now(),

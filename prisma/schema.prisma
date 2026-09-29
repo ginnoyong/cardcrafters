@@ -47,6 +47,7 @@ model Game {
   round       Int         @default(1)
   theme       String?
   config      Json
+  style       Json?
   phaseEndsAt DateTime?
   cutoffAt    DateTime?
   createdAt   DateTime    @default(now())

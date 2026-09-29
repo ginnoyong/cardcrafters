@@ -48,6 +48,7 @@ import { ensureTransparentPng } from "../image/bg-remove";
 import { ensureSubjectPadding } from "../image/pad";
 import { computeVisualWeight } from "../image/weight";
 import { extractContentBox } from "../image/content-box";
+import type { StyleDerivation } from "@cardcrafters/shared";
 import type { ImageJob } from "../queue/queue";
 import type { Repository } from "../repo/repository";
 
@@ -85,6 +86,10 @@ export interface ItemImageHandlerDeps {
   emit: ItemImageEmit;
   /** Override for tests; default apps/web/public/static/items. */
   storageDir?: string;
+  /** Style resolver: the game's theme-derived image style (style pack).
+   *  Default: repo read of Game.style (set once per game by the style flow
+   *  at BUILD start). */
+  getStyle?: (gameId: string) => Promise<StyleDerivation | null>;
 }
 
 /**
@@ -113,11 +118,13 @@ export function createItemImageHandler(
       const item = await deps.repo.getItem(job.itemId);
       if (!item || item.status !== "GENERATING") return;
 
-      // TODO(build-phase step 3): derive styleSuffix from the game/theme
-      // (style_derivation task) once the layout engine step lands.
+      // Theme-consistent style: the game's style pack (derived once at BUILD
+      // start via style_derivation) is appended to every sticker prompt so
+      // all stickers share one look.
+      const style = (await deps.getStyle?.(job.gameId)) ?? null;
       const res = await deps.ai.run(
         "item_image",
-        { prompt: job.prompt, subject: job.subject },
+        { prompt: job.prompt, subject: job.subject, styleSuffix: style?.imagePromptSuffix },
         { gameId: job.gameId },
       );
       if (!res.imageBase64) throw new Error("provider returned no image data");

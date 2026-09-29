@@ -136,8 +136,8 @@ describe("item-image worker (end-to-end: pipeline → queue → handler)", () =>
     expect(item).toMatchObject({
       status: "READY",
       imageUrl,
-      width: 256, // mock sticker size, from the final buffer
-      height: 256,
+      width: expect.any(Number), // final (cropped) buffer — not the 256 source
+      height: expect.any(Number),
       failReason: null,
     });
     expect(item.visualWeight).toBeGreaterThan(0);
@@ -151,7 +151,7 @@ describe("item-image worker (end-to-end: pipeline → queue → handler)", () =>
     expect(s.events).toHaveLength(1);
     expect(s.events[0]).toEqual({
       event: "item:ready",
-      payload: { itemId, imageUrl, width: 256, height: 256 },
+      payload: { itemId, imageUrl, width: expect.any(Number), height: expect.any(Number) },
       ctx: { gameId: s.gameId, teamId: s.teamId, playerId: s.playerId },
     });
     expect(itemReadySchema.parse(s.events[0].payload)).toBeTruthy();
@@ -392,22 +392,21 @@ describe("die-cut post-processing in the worker", () => {
       subject: "a red balloon dog",
     });
 
-    // READY with dims from the FINAL buffer = the original FRAME size
-    // (padding never resizes the canvas, only the content on it).
+    // USER DECISION (content crop): full-bleed content touching ALL edges →
+    // nothing to crop → the final buffer IS the original frame (128×128);
+    // its edge midpoints hold artwork (the crop removed margins, not added
+    // them). Only the cross's transparent corners stay transparent.
     const row = await s.repo.getItem(item.id);
     expect(row).toMatchObject({ status: "READY", width: 128, height: 128 });
     expect(row?.imageUrl).toBe(`/static/items/${item.id}.png`);
 
-    // The written file has transparent padding on all sides now.
     const written = await readFile(path.join(storageDir, `${item.id}.png`));
     const { data } = await sharp(written).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
     const at = (x: number, y: number) => data[(y * 128 + x) * 4 + 3];
-    expect(at(0, 0)).toBe(0);
-    expect(at(127, 0)).toBe(0);
-    expect(at(0, 127)).toBe(0);
+    expect(at(0, 0)).toBe(0); // cross's transparent corner
     expect(at(127, 127)).toBe(0);
-    expect(at(64, 0)).toBe(0);
-    expect(at(64, 127)).toBe(0);
-    expect(at(64, 64)).toBe(255); // content still there, centered
+    expect(at(64, 0)).toBe(255); // edge midpoint holds artwork (full-bleed)
+    expect(at(0, 64)).toBe(255);
+    expect(at(64, 64)).toBe(255);
   });
 });

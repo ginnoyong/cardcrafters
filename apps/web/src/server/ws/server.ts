@@ -15,6 +15,7 @@
 
 import type { Server, Socket } from "socket.io";
 
+import type { StyleDerivation } from "@cardcrafters/shared";
 import {
   MAX_PROMPT_WORDS,
   canSubmit,
@@ -29,6 +30,7 @@ import {
 
 import type { AiRouter } from "../ai/router";
 import { regenerateGreeting } from "../flows/greetings";
+import { deriveGameStyle } from "../flows/style";
 import { createItemImageHandler, type ItemImageEmit } from "../flows/item-image";
 import {
   createLayoutDebouncer,
@@ -291,6 +293,21 @@ export function registerSocketHandlers(
 ): { close(): Promise<void> } {
   io.use(socketAuthMiddleware(repo));
 
+  // Per-game style-pack memo: derived ONCE at BUILD start, reused by the
+  // image worker for every sticker (theme-consistent look).
+  const styleMemo = new Map<string, Promise<StyleDerivation | null>>();
+  const getStyle = async (gameId: string): Promise<StyleDerivation | null> => {
+    let p = styleMemo.get(gameId);
+    if (!p) {
+      p = repo
+        .getGame(gameId)
+        .then((g) => (g?.style as StyleDerivation | null) ?? null)
+        .catch(() => null);
+      styleMemo.set(gameId, p);
+    }
+    return p;
+  };
+
   // Prompt pipeline deps — built ONCE per server: the cooldown map and the
   // image queue are process-wide state. Cooldowns are in-memory only, so a
   // server restart resets them (documented in prompt-pipeline.ts). Per-call
@@ -309,6 +326,7 @@ export function registerSocketHandlers(
   let pipelineDeps: ReturnType<typeof createPromptPipelineDeps> | null = null;
   if (ai) {
     const handler = createItemImageHandler({
+      getStyle,
       repo,
       ai,
       emit: (event, payload, ctx) => queueEmit(event, payload, ctx),
@@ -602,8 +620,17 @@ export function registerSocketHandlers(
           type: "gm:approveGreetings",
           now: Date.now(),
         });
-        if (result.ok) ackOk(ack, { phase: result.state.phase });
-        else ackFailReason(ack, "rejected", result.reason, result.reason);
+        if (result.ok) {
+          ackOk(ack, { phase: result.state.phase });
+          // Theme-consistent sticker style: derive ONCE per game at BUILD
+          // start (fire-and-forget, non-fatal on failure).
+          void deriveGameStyle(hub, repo, ai!, identity.gameId).catch((err: unknown) =>
+            console.error(
+              "[style] derivation failed:",
+              err instanceof Error ? err.message : err,
+            ),
+          );
+        } else ackFailReason(ack, "rejected", result.reason, result.reason);
       } catch (err) {
         ackFail(ack, "approve_failed", err instanceof Error ? err.message : "approveGreetings failed");
       }

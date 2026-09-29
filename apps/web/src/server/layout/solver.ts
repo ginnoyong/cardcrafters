@@ -52,6 +52,7 @@ import {
   placedBox,
   placedFootprint,
   scaleFor,
+  scaleWindow,
   safeMargin,
   textOverlapOk,
   type CardBox,
@@ -189,7 +190,7 @@ const HERO_FIDELITY_WEIGHT = 3.0;
 const COHESION_WEIGHT = 1.0;
 const COHESION_TOUCH_FACTOR = 1.15;
 const COHESION_SEPARATION_FACTOR = 1.6;
-const ORIENTATION_WEIGHT = 0.5;
+const ORIENTATION_WEIGHT = 0; // USER DECISION: orientation disabled
 const ORIENT_TOLERANCE_DEG = 30;
 const HINT_TILT_JITTER_DEG = 8;
 /**
@@ -452,15 +453,12 @@ export function heroItemIdOf(
     if (item && (hero === null || item.orderIndex < hero.orderIndex)) hero = item;
   }
   if (hero === null) {
-    for (const item of items) {
-      if (
-        hero === null ||
-        item.visualWeight > hero.visualWeight ||
-        (item.visualWeight === hero.visualWeight && item.orderIndex < hero.orderIndex)
-      ) {
-        hero = item;
-      }
-    }
+    // USER DECISION: without focal hints, the FIRST sticker (earliest
+    // orderIndex) is the hero — "similar size as the first sticker"; the
+    // layout AI may re-designate a later sticker via role:"focal" (above).
+    // (Previous rule — highest visualWeight — made the hero unpredictable
+    // from the player's perspective.)
+    hero = items.reduce((a, b) => (b.orderIndex < a.orderIndex ? b : a));
   }
   return hero!.id;
 }
@@ -518,18 +516,11 @@ function desiredScales(
   // (legacy mode); every support's desired width is floored at
   // SUPPORT_HERO_FLOOR × the hero's desired width.
   const heroItem = ordered[0]!;
-  const heroEff = (() => {
-    const o = weightOverride?.get(heroItem.id);
-    return o !== undefined ? Math.max(o, 0) : Math.max(heroItem.visualWeight, WEIGHT_FLOOR);
-  })();
-  const heroShare = EQUALIZE_FRAC * 1 + (1 - EQUALIZE_FRAC) * ((n * heroEff) / (sum || 1));
-  const heroDesiredWidth =
-    widthTarget !== undefined
-      ? HERO_WIDTH_TARGET * card.w
-      : Math.sqrt(
-          (Math.min(perItemShare(n) * cardArea, capArea) * heroShare * heroItem.imgW) /
-            heroItem.imgH,
-        );
+  // USER DECISION (hero-montage v2): the hero stays at HERO_WIDTH_TARGET
+  // (0.65 × card width) for ALL item counts — no legacy-curve shrink at
+  // n ≥ 6. The hero only yields if physically infeasible (per-cell fallback
+  // ladder trims; hard constraints always win).
+  const heroDesiredWidth = HERO_WIDTH_TARGET * card.w;
   const supportFloorWidth = SUPPORT_HERO_FLOOR * heroDesiredWidth;
   for (let i = 0; i < n; i++) {
     const item = ordered[i]!;
@@ -540,13 +531,22 @@ function desiredScales(
     // only its distribution changes.
     const weightedShare = (n * eff[i]!) / sum;
     const share = EQUALIZE_FRAC * 1 + (1 - EQUALIZE_FRAC) * weightedShare;
+    // USER DECISION: the 0.5×hero support floor applies only in the few-item
+    // range (n ≤ 5) where geometry allows it alongside a 0.65 hero — beyond
+    // that the floor's sheer area demand (n × 0.106 card areas) exceeds the
+    // card and starves/DROPS supports (measured: 18/25 placed at n=25). The
+    // floor remains a goal via the candidate-level clamp's soft resolution.
+    const floorApplies = supportFloorWidth > 0 && n <= 5;
     if (widthTarget !== undefined) {
       // Few-item width policy: the hero takes the policy-fixed hero width;
       // supports take the table target × share, floored at the hero floor.
       const desiredWidth =
         i === 0
           ? heroDesiredWidth
-          : Math.max(widthTarget * share * card.w, supportFloorWidth);
+          : Math.max(
+              widthTarget * share * card.w,
+              floorApplies ? supportFloorWidth : 0,
+            );
       const scale = desiredWidth / (item.imgW * k);
       map.set(item.id, scaleFor(item, card, k, scale, minSizePct));
       continue;
@@ -560,10 +560,15 @@ function desiredScales(
     // Display area = w × h = w² × (imgH/imgW)  →  w = sqrt(area × imgW/imgH).
     // Supports are floored at SUPPORT_HERO_FLOOR × the hero's desired width
     // (the hero can shrink with the curve, but supports shrink WITH it).
-    const desiredWidth = Math.max(
-      Math.sqrt((desiredArea * item.imgW) / item.imgH),
-      i === 0 ? 0 : supportFloorWidth,
-    );
+    // USER DECISION: rank 0 (hero) is ALWAYS heroDesiredWidth (0.65 × card
+    // width) in every mode; only supports follow the share curve here.
+    const desiredWidth =
+      i === 0
+        ? heroDesiredWidth
+        : Math.max(
+            Math.sqrt((desiredArea * item.imgW) / item.imgH),
+            floorApplies ? supportFloorWidth : 0,
+          );
     const scale = desiredWidth / (item.imgW * k);
     map.set(item.id, scaleFor(item, card, k, scale, minSizePct));
   }
@@ -589,6 +594,7 @@ function attemptSolve(
   opts: SolveOptions,
   minSizePct: number,
   dropTextBeyond: number | null,
+  desiredShrink = 1,
 ): { placed: Placed[]; unplaced: LayoutItem[]; textZoneUsed: boolean } {
   const card = opts.cardDims;
   const k = opts.k ?? baseFit(card);
@@ -655,12 +661,21 @@ function attemptSolve(
   // Coverage-proportional desired scale per item (sizing policy — see the
   // block comment above). Seeds the candidate scale jitter. Hint importance
   // (when present) overrides visualWeight in the share split.
-  const desired = desiredScales(
+  const rawDesired = desiredScales(
     ordered,
     card,
     k,
     minSizePct,
     importanceOverride.size > 0 ? importanceOverride : undefined,
+  );
+  // Relaxation shrink: supports' desired scales shrink toward the floor; the
+  // HERO keeps its full desired width (user rule: hero stays ~0.65).
+  // (heroId is already computed above from the same ordered list + hints.)
+  const desired = new Map(
+    [...rawDesired].map(([id, s]) => [
+      id,
+      id === heroId ? s : s * desiredShrink,
+    ]),
   );
 
   const itemsById = new Map(items.map((i) => [i.id, i] as const));
@@ -776,6 +791,12 @@ function attemptSolve(
     // one position/jitter/scale-jitter/rotation draw set per grid cell and
     // per hint sample, before any constraint checking happens.
     const seeds: Array<{ x: number; y: number; jitter: number; rot: number; rotLocked?: boolean }> = [];
+    // USER DECISION: the HERO is CENTERED in the canvas — its ONLY seed is
+    // the exact card center (no jitter). Supports then orbit it.
+    if (index === 0) {
+      const jitter0 = SCALE_JITTER_MIN + rng() * (SCALE_JITTER_MAX - SCALE_JITTER_MIN);
+      seeds.push({ x: card.w / 2, y: card.h / 2, jitter: jitter0, rot: 0 });
+    } else {
     // Grid positions (6×6) with seeded jitter.
     for (let gy = 0; gy < GRID; gy++) {
       for (let gx = 0; gx < GRID; gx++) {
@@ -784,8 +805,8 @@ function attemptSolve(
         const x = clamp(ax1 + gx * cellX + jx, ax1, ax2);
         const y = clamp(ay1 + gy * cellY + jy, ay1, ay2);
         const jitter = SCALE_JITTER_MIN + rng() * (SCALE_JITTER_MAX - SCALE_JITTER_MIN);
-        // Focal (top-weight) item stays unrotated unless hints suggest otherwise.
-        const rot = index === 0 && !hints ? 0 : (rng() * 2 - 1) * 12;
+        // USER DECISION: all stickers at 0 degrees (orientation disabled).
+        const rot = 0;
         seeds.push({ x, y, jitter, rot });
       }
     }
@@ -822,15 +843,8 @@ function attemptSolve(
         const x = clamp(orientBase.cx + (rng() * 2 - 1) * orientBase.spread, ax1, ax2);
         const y = clamp(orientBase.cy + (rng() * 2 - 1) * orientBase.spread, ay1, ay2);
         const jitter = SCALE_JITTER_MIN + rng() * (SCALE_JITTER_MAX - SCALE_JITTER_MIN);
-        const tiltJitter = (rng() * 2 - 1) * HINT_TILT_JITTER_DEG;
-        const fallback = (rng() * 2 - 1) * 12;
-        seeds.push({
-          x,
-          y,
-          jitter,
-          rot: tiltTarget ? angleDeg({ x, y }, tiltTarget) + tiltJitter : fallback,
-          rotLocked: tiltTarget !== null,
-        });
+        // USER DECISION: orientation/tilt disabled — hint samples rotate 0.
+        seeds.push({ x, y, jitter, rot: 0 });
       }
     }
     // Polar ring samples. Hero-montage: for NON-hero items with the hero
@@ -858,8 +872,8 @@ function attemptSolve(
           (RING_RADIUS_MIN * 0.5 + rng() * (RING_RADIUS_MAX - RING_RADIUS_MIN)) * minDim
         : (RING_RADIUS_MIN + rng() * (RING_RADIUS_MAX - RING_RADIUS_MIN)) * minDim;
       const jitter = SCALE_JITTER_MIN + rng() * (SCALE_JITTER_MAX - SCALE_JITTER_MIN);
-      const rot =
-        index === 0 && !hints ? 0 : (rng() * 2 - 1) * RING_ROT_JITTER_DEG;
+      // USER DECISION: all stickers at 0 degrees (orientation disabled).
+      const rot = 0;
       const rad = (angleDeg * Math.PI) / 180;
       seeds.push({
         x: clamp(ringCx + Math.cos(rad) * radius, ax1, ax2),
@@ -868,6 +882,7 @@ function attemptSolve(
         rot,
       });
     }
+    } // end else (non-hero candidates; hero has only the center seed)
 
     // Per cell: try scale fallback steps largest→smallest inside the cell;
     // the first (largest) scale whose candidate passes the hard constraints
@@ -877,9 +892,16 @@ function attemptSolve(
     // floor run (documented ladder resolution).
     const runCells = (withFloor: boolean): Placement[] => {
       const out: Placement[] = [];
+      // The ladder may fall all the way to the item's MIN-SIZE scale (not
+      // just 0.7×desired): when the card is crowded (many supports around a
+      // 0.65 hero), a support's desired scale is unreachable and its ladder
+      // must bottom out at the (already relaxed) minimum legible size —
+      // otherwise crowded supports get DROPPED instead of shrunk (measured:
+      // 12/16 placed at n=16 before this).
+      const minScale = scaleWindow(item, card, k, minSizePct).min;
       for (const seed of seeds) {
         for (const step of SCALE_FALLBACK_STEPS) {
-          const raw = baseScale * step * seed.jitter;
+          const raw = Math.max(baseScale * step * seed.jitter, minScale);
           const cand = makeCand(
             seed.x,
             seed.y,
@@ -1126,7 +1148,8 @@ function attemptSolve(
           minSizePct,
         ),
       ),
-      rotation: p.placement.rotation + (rng() * 2 - 1) * ROT_NUDGE_DEG,
+      // USER DECISION: orientation disabled — nudge never rotates.
+      rotation: 0,
     };
     const placedBoxes: PlacedFootprint[] = others.map((o) =>
       placedFootprint(o.placement, o.item, k),
@@ -1311,10 +1334,17 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
   let minSizePct = MIN_ITEM_SIZE_PCT;
   let result = attemptSolve(items, opts, minSizePct, null);
   let relaxations = 0;
+  // On retry, ALSO shrink supports' DESIRED scales (not just minSize):
+  // lowering minSize alone doesn't help when the greedy commits early
+  // supports at near-desired size and the card fills up — the stragglers
+  // then find no room at ANY scale ≥ min (measured: 12/16 placed at n=16
+  // before this). The hero keeps its full desired width (user rule).
+  let desiredShrink = 1;
   while (result.unplaced.length > 0 && relaxations < MAX_RELAXATIONS) {
     relaxations++;
     minSizePct = Math.max(MIN_SIZE_FLOOR_PCT, minSizePct - 1);
-    result = attemptSolve(items, opts, minSizePct, null);
+    desiredShrink = Math.max(0.35, desiredShrink - 0.15);
+    result = attemptSolve(items, opts, minSizePct, null, desiredShrink);
   }
   if (relaxations > 0 && minSizePct < MIN_ITEM_SIZE_PCT) {
     warnings.push(`relaxed min item size to ${minSizePct}% of card width`);
