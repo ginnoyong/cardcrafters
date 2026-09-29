@@ -293,7 +293,7 @@ const HERO_MAX_WIDTH = 0.75;
  * beyond the feasible-n the band can no longer fit and supports resolve
  * below it only through hero growth drift, measured in the solver tests).
  */
-const SUPPORT_RATIO_MIN = 0.5;
+const SUPPORT_RATIO_MIN = 0.45; // USER: "ratio of non-hero to hero can be 20% smaller"
 const SUPPORT_RATIO_MAX = 0.6;
 const SUPPORT_RATIO_MID = 0.55;
 /** Beyond this many items the text rule may be dropped (last resort). */
