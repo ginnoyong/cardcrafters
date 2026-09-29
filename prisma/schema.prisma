@@ -121,6 +121,7 @@ model Item {
   width        Int?
   height       Int?
   visualWeight Float?
+  contentBox   Json?
   failReason   String?
   createdAt    DateTime   @default(now())
   placedAt     DateTime?

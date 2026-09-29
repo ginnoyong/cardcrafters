@@ -225,10 +225,12 @@ describe.skipIf(!DB_OK)("PrismaRepo (postgres)", () => {
         width: 100,
         height: 140,
         placedAt: 5,
+        contentBox: { x: 10, y: 20, w: 60, h: 80 },
       });
       const [ready] = await repo.listItems(team.id, 1, ["READY"]);
       expect(ready!.imageUrl).toBe("http://x/y.png");
       expect(ready!.placedAt).toBe(5);
+      expect(ready!.contentBox).toEqual({ x: 10, y: 20, w: 60, h: 80 });
       expect(await repo.listItems(team.id, 1, ["GENERATING"])).toHaveLength(0);
     });
   });

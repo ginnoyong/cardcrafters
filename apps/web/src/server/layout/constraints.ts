@@ -25,6 +25,7 @@ import {
   MIN_ITEM_SIZE_PCT,
   SAFE_MARGIN_PCT,
   type Placement,
+  type ContentBox,
 } from "@cardcrafters/shared";
 
 /** A card fitted into the coordinate space: {w, h} normalized units. */
@@ -65,6 +66,8 @@ export interface LayoutItem {
   visualWeight: number;
   orderIndex: number;
   subject?: string;
+  /** Visible-artwork bbox in frame px (optional; for tighter collision). */
+  contentBox?: ContentBox;
 }
 
 // ---------------------------------------------------------------------------

@@ -68,6 +68,26 @@ export interface GameConfigSummary {
 export type { ItemStatus, Phase };
 
 /**
+ * Axis-aligned bounding box of the VISIBLE artwork inside a sticker's frame,
+ * in FRAME pixel coordinates (same space as Item.width/height; top-left
+ * origin). Stickers are die-cut PNGs: the artwork floats inside a larger
+ * transparent canvas, so the frame's box overestimates the visual footprint.
+ * Extracted at generation time (image/content-box.ts) and consumed by the
+ * layout solver for tighter collision. Clients render the frame and don't
+ * need it.
+ */
+export interface ContentBox {
+  /** Left edge of the visible content, in frame px. */
+  x: number;
+  /** Top edge of the visible content, in frame px. */
+  y: number;
+  /** Visible-content width in frame px. */
+  w: number;
+  /** Visible-content height in frame px. */
+  h: number;
+}
+
+/**
  * A single card item. `promptRaw` is exactly what the player typed; `subject`
  * is the normalized subject extracted by the AI validation step.
  */
@@ -81,6 +101,9 @@ export interface Item {
   width?: number;
   /** Rendered image height in px. */
   height?: number;
+  /** Bounding box of the visible artwork within the frame (server-side layout
+   *  metadata; may be absent for items generated before this field existed). */
+  contentBox?: ContentBox;
   /** Display nickname of the player who submitted the prompt. */
   nickname: string;
   /** Epoch ms. */

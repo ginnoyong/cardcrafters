@@ -11,7 +11,7 @@
  */
 
 import { PrismaClient, Prisma } from "@prisma/client";
-import type { CardConfig, GreetingStyle, ItemStatus, Placement } from "@cardcrafters/shared";
+import type { CardConfig, ContentBox, GreetingStyle, ItemStatus, Placement } from "@cardcrafters/shared";
 
 import { RepoError } from "./memory-repo";
 import type {
@@ -451,6 +451,10 @@ export class PrismaRepo implements Repository {
         where: { id },
         data: {
           ...patch,
+          contentBox:
+            patch.contentBox === undefined
+              ? undefined
+              : (patch.contentBox ?? Prisma.JsonNull) as Prisma.InputJsonValue | typeof Prisma.JsonNull,
           placedAt:
             patch.placedAt === undefined
               ? undefined
@@ -489,6 +493,7 @@ export class PrismaRepo implements Repository {
     width: number | null;
     height: number | null;
     visualWeight: number | null;
+    contentBox: unknown;
     failReason: string | null;
     createdAt: Date;
     placedAt: Date | null;
@@ -505,6 +510,7 @@ export class PrismaRepo implements Repository {
       width: i.width,
       height: i.height,
       visualWeight: i.visualWeight,
+      contentBox: (i.contentBox as ContentBox | null) ?? null,
       failReason: i.failReason,
       createdAt: i.createdAt.getTime(),
       placedAt: ms(i.placedAt),

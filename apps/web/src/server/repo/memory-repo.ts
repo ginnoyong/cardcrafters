@@ -347,6 +347,7 @@ export class MemoryRepo implements Repository {
       width: null,
       height: null,
       visualWeight: null,
+      contentBox: null,
       failReason: null,
       createdAt: this.now(),
       placedAt: null,

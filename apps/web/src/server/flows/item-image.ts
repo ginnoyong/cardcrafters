@@ -47,6 +47,7 @@ import sharp from "sharp";
 import { ensureTransparentPng } from "../image/bg-remove";
 import { ensureSubjectPadding } from "../image/pad";
 import { computeVisualWeight } from "../image/weight";
+import { extractContentBox } from "../image/content-box";
 import type { ImageJob } from "../queue/queue";
 import type { Repository } from "../repo/repository";
 
@@ -149,6 +150,9 @@ export function createItemImageHandler(
         // keep provider dims
       }
       const visualWeight = await computeVisualWeight(buf);
+      // Visible-artwork bbox (post padding) — layout solver consumes it for
+      // tighter collision; null on degenerate images (frame dims used then).
+      const contentBox = await extractContentBox(buf);
 
       const imageUrl = `/static/items/${fileName}`;
       await deps.repo.updateItem(job.itemId, {
@@ -157,6 +161,7 @@ export function createItemImageHandler(
         width: width ?? null,
         height: height ?? null,
         visualWeight,
+        contentBox,
       });
       deps.emit(
         "item:ready",

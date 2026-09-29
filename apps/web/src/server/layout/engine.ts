@@ -35,6 +35,7 @@ import {
   layoutCompositionSchema,
   LAYOUT_DEBOUNCE_MS,
   type Placement,
+  type ContentBox,
 } from "@cardcrafters/shared";
 
 import type { Repository } from "../repo/repository";
@@ -81,15 +82,14 @@ export function defaultTextZone(card: { w: number; h: number }): Rect {
 }
 
 /** Map repo item rows onto the solver's LayoutItem shape (READY + sized only). */
-function toLayoutItems(
-  rows: Array<{
-    id: string;
-    width: number | null;
-    height: number | null;
-    visualWeight: number | null;
-    subject: string | null;
-  }>,
-): LayoutItem[] {
+function toLayoutItems(rows: Array<{
+  id: string;
+  width: number | null;
+  height: number | null;
+  visualWeight: number | null;
+  subject: string | null;
+  contentBox?: ContentBox | null;
+}>): LayoutItem[] {
   return rows
     .filter((r) => (r.width ?? 0) > 0 && (r.height ?? 0) > 0)
     .map((r, orderIndex) => ({
@@ -99,6 +99,7 @@ function toLayoutItems(
       visualWeight: r.visualWeight ?? 0,
       orderIndex,
       subject: r.subject ?? undefined,
+      contentBox: r.contentBox ?? undefined,
     }));
 }
 

@@ -17,6 +17,7 @@
 
 import type {
   CardConfig,
+  ContentBox,
   GreetingStyle,
   ItemStatus,
   Phase,
@@ -83,6 +84,7 @@ export interface ItemRow {
   width: number | null;
   height: number | null;
   visualWeight: number | null;
+  contentBox: ContentBox | null;
   failReason: string | null;
   createdAt: number;
   placedAt: number | null;
@@ -195,6 +197,7 @@ export interface ItemPatch {
   width?: number | null;
   height?: number | null;
   visualWeight?: number | null;
+  contentBox?: ContentBox | null;
   failReason?: string | null;
   placedAt?: number | null;
 }
