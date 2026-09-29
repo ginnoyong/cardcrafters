@@ -115,6 +115,81 @@ describe("POST /api/games (greetings flow)", () => {
   });
 });
 
+describe("POST /api/games — phase timer config", () => {
+  /** Read the stored CardConfig for a freshly created game. */
+  async function storedConfig(code: string): Promise<Record<string, unknown>> {
+    const game = await srv.hub.gameByCode(code);
+    expect(game).not.toBeNull();
+    const state = await srv.hub.getOrCreateHubGame(game!.id);
+    return state.config as unknown as Record<string, unknown>;
+  }
+
+  it("buildTimerSeconds 0 → stored config 0 (untimed), no timer armed", async () => {
+    const res = await fetch(base("/api/games"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ theme: "Zero timers", buildTimerSeconds: 0, scoringTimerSeconds: 0 }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { code: string; gameId: string };
+    const config = await storedConfig(body.code);
+    expect(config.buildTimerSeconds).toBe(0);
+    expect(config.scoringTimerSeconds).toBe(0);
+    // Untimed: nothing armed even after greetings resolve.
+    expect(srv.hub.timers.armedFor(body.gameId)).toBeUndefined();
+  });
+
+  it("buildTimerSeconds 900 (15 min) → stored config 900", async () => {
+    const res = await fetch(base("/api/games"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ theme: "Fifteen minutes", buildTimerSeconds: 900 }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { code: string };
+    const config = await storedConfig(body.code);
+    expect(config.buildTimerSeconds).toBe(900);
+    // Unspecified scoring timer keeps the default (300s).
+    expect(config.scoringTimerSeconds).toBe(300);
+  });
+
+  it("timers inside the config object merge too; top-level overrides win", async () => {
+    const res = await fetch(base("/api/games"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        theme: "Config merge",
+        config: { buildTimerSeconds: 120, scoringTimerSeconds: 60 },
+        scoringTimerSeconds: 0,
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { code: string };
+    const config = await storedConfig(body.code);
+    expect(config.buildTimerSeconds).toBe(120);
+    expect(config.scoringTimerSeconds).toBe(0);
+  });
+
+  it("negative or fractional timers → 400 with a friendly error", async () => {
+    const res = await fetch(base("/api/games"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ theme: "Bad timer", buildTimerSeconds: -5 }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toMatch(/buildTimerSeconds/);
+
+    const resFrac = await fetch(base("/api/games"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ theme: "Bad timer", scoringTimerSeconds: 1.5 }),
+    });
+    expect(resFrac.status).toBe(400);
+  });
+});
+
 function greetingOf(team: Record<string, unknown>): { text: string; status: string } {
   return team.greeting as { text: string; status: string };
 }

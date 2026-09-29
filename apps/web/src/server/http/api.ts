@@ -27,17 +27,28 @@ import type { GameHub, RoomEmitter } from "../game/hub";
 import type { Repository } from "../repo/repository";
 import { gmRoom, teamRoom } from "../ws/rooms";
 
-/** Body schema for POST /api/games — theme is REQUIRED (drives greetings). */
+/**
+ * Body schema for POST /api/games — theme is REQUIRED (drives greetings).
+ * Optional top-level timer overrides (seconds; 0 = untimed, GM stops manually)
+ * are validated as non-negative ints and merged into CardConfig below. They
+ * may also arrive inside the free-form `config` object (merged over defaults
+ * by mergeCardConfig); the top-level fields win when both are present.
+ */
+const MAX_TIMER_SECONDS = 24 * 60 * 60;
 const createGameSchema = z.object({
   teamCount: z.number().int().min(1).max(MAX_TEAMS).optional(),
   theme: z.string().trim().min(1).max(120),
   config: z.unknown().optional(),
+  buildTimerSeconds: z.number().int().min(0).max(MAX_TIMER_SECONDS).optional(),
+  scoringTimerSeconds: z.number().int().min(0).max(MAX_TIMER_SECONDS).optional(),
 });
 
 /** Options for creating a game via POST /api/games. */
 interface CreateGameBody {
   teamCount?: unknown;
   config?: unknown;
+  buildTimerSeconds?: unknown;
+  scoringTimerSeconds?: unknown;
 }
 
 /** Read + JSON-parse a request body (rejects >1MB, malformed JSON). */
@@ -81,14 +92,18 @@ export function mergeCardConfig(partial: unknown): CardConfig {
   const p = partial as Partial<CardConfig>;
   const num = (v: unknown): number | undefined =>
     typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  // Phase timers: whole seconds ≥ 0 ONLY — 0 is meaningful (untimed), anything
+  // else invalid falls back to the default rather than silently disarming.
+  const secs = (v: unknown): number | undefined =>
+    typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : undefined;
   const pl = (p.limits ?? {}) as Partial<CardConfig["limits"]>;
   return {
     cardRatioW: num(p.cardRatioW) ?? base.cardRatioW,
     cardRatioH: num(p.cardRatioH) ?? base.cardRatioH,
-    ...(num(p.buildTimerSeconds) !== undefined ? { buildTimerSeconds: num(p.buildTimerSeconds) } : {}),
-    ...(num(p.scoringTimerSeconds) !== undefined
-      ? { scoringTimerSeconds: num(p.scoringTimerSeconds) }
-      : {}),
+    // Absent/invalid timers fall back to the documented defaults (600s/300s);
+    // an explicit 0 passes through as untimed.
+    buildTimerSeconds: secs(p.buildTimerSeconds) ?? base.buildTimerSeconds,
+    scoringTimerSeconds: secs(p.scoringTimerSeconds) ?? base.scoringTimerSeconds,
     limits: {
       cooldownMs: num(pl.cooldownMs) ?? base.limits.cooldownMs,
       maxInflightPerPlayer: num(pl.maxInflightPerPlayer) ?? base.limits.maxInflightPerPlayer,
@@ -133,14 +148,29 @@ export async function handleApiRequest(
       const friendly =
         field === "theme"
           ? "theme is required (1..120 characters)"
-          : `invalid ${field}: ${issue?.message ?? "invalid payload"}`;
+          : field === "buildTimerSeconds" || field === "scoringTimerSeconds"
+            ? `${field} must be a whole number of seconds between 0 and ${MAX_TIMER_SECONDS} (0 = untimed)`
+            : `invalid ${field}: ${issue?.message ?? "invalid payload"}`;
       sendJson(res, 400, { ok: false, error: friendly });
       return true;
     }
     const teamCount = parsed.data.teamCount ?? 5;
     const theme = parsed.data.theme;
+    // Merge the free-form config with the validated top-level timer overrides
+    // (top level wins) before normalizing over the defaults.
+    const configInput = {
+      ...((typeof parsed.data.config === "object" && parsed.data.config !== null
+        ? parsed.data.config
+        : {}) as Record<string, unknown>),
+      ...(parsed.data.buildTimerSeconds !== undefined
+        ? { buildTimerSeconds: parsed.data.buildTimerSeconds }
+        : {}),
+      ...(parsed.data.scoringTimerSeconds !== undefined
+        ? { scoringTimerSeconds: parsed.data.scoringTimerSeconds }
+        : {}),
+    };
     try {
-      const setup = await hub.createGame(mergeCardConfig(parsed.data.config), { teamCount });
+      const setup = await hub.createGame(mergeCardConfig(configInput), { teamCount });
       // Persist the theme immediately (LOBBY → GREETINGS) so the phase and
       // theme survive even before greeting generation finishes.
       await hub.applyEvent(setup.game.id, {

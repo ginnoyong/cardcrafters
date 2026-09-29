@@ -204,6 +204,24 @@ describe("untimed config: no startTimer effects", () => {
     expect(scoring.state.cutoffAt).toBe(NOW);
     expect(effectTypes(scoring.effects)).toEqual(["setCutoff", "emit"]);
   });
+
+  it("mixed config: untimed BUILD but timed SCORING — stopBuild arms only the scoring timer", () => {
+    const mixed = { ...DEFAULT_CARD_CONFIG, buildTimerSeconds: 0, scoringTimerSeconds: 120 };
+    const lobby = createInitialRuntimeState(GAME, mixed);
+    const greetings = transition(lobby, { type: "gm:setTheme", theme: "t", now: NOW });
+    expect(greetings.ok).toBe(true);
+    if (!greetings.ok) return;
+    const build = transition(greetings.state, { type: "gm:approveGreetings", now: NOW });
+    expect(build.ok).toBe(true);
+    if (!build.ok) return;
+    expect(build.state.phaseEndsAt).toBeUndefined();
+    expect(effectTypes(build.effects)).toEqual(["emit"]);
+    const scoring = transition(build.state, { type: "gm:stopBuild", now: NOW });
+    expect(scoring.ok).toBe(true);
+    if (!scoring.ok) return;
+    expect(scoring.state.phaseEndsAt).toBe(NOW + 120 * 1000);
+    expect(effectTypes(scoring.effects)).toEqual(["setCutoff", "emit", "startTimer"]);
+  });
 });
 
 describe("reveal:auto-expired (30s driver in the hub)", () => {

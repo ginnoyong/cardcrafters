@@ -101,6 +101,36 @@ function PhaseBadge({ phase, round }: { phase: string | null; round: number | nu
   );
 }
 
+/**
+ * Minutes (form string) → seconds; undefined = "use the server default".
+ * "0" is a meaningful value (untimed) and passes through as 0.
+ */
+function minutesToSeconds(minutes: string): number | undefined {
+  const trimmed = minutes.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const value = Number(trimmed);
+  return Number.isSafeInteger(value) ? value : undefined;
+}
+
+/** Human label for a configured phase timer: 600 → "10 min", 0 → "no limit". */
+function timerLabel(seconds: number | null): string | null {
+  if (seconds === null) return null;
+  if (seconds === 0) return "no limit";
+  const minutes = seconds / 60;
+  return Number.isInteger(minutes) ? `${minutes} min` : `${seconds}s`;
+}
+
+/** Configured-timer badge — 0 (or absent) renders "no limit" (manual stop). */
+function TimerBadge({ label, seconds }: { label: string; seconds: number | null }) {
+  const text = timerLabel(seconds);
+  if (!text) return null;
+  return (
+    <span className="cc-badge" aria-label={`${label} timer ${text}`}>
+      ⏱ {label}: {text}
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // One vertical team card: header, greeting (with inline edit + regenerate),
 // a [Edit] [Regenerate] [Show QR] button row and a conditional QR area
@@ -525,6 +555,8 @@ function Console({ game }: { game: CreatedGame }) {
             Game code: <span className="cc-code">{game.code}</span>
           </h2>
           <PhaseBadge phase={phase} round={round} />
+          <TimerBadge label="Build" seconds={snapshot?.buildTimerSeconds ?? null} />
+          <TimerBadge label="Scoring" seconds={snapshot?.scoringTimerSeconds ?? null} />
           {snapshot?.theme ? <span className="cc-badge">Theme: {snapshot.theme}</span> : null}
         </div>
         <ConnectionDot connected={connected} />
@@ -605,6 +637,9 @@ export default function GmPage() {
   const [game, setGame] = useState<CreatedGame | null>(null);
   const [teamCount, setTeamCount] = useState("5");
   const [theme, setTheme] = useState("");
+  // Phase timers in MINUTES (0 = untimed — the GM ends the phase manually).
+  const [buildMinutes, setBuildMinutes] = useState("10");
+  const [scoringMinutes, setScoringMinutes] = useState("5");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -637,10 +672,25 @@ export default function GmPage() {
     setCreating(true);
     try {
       const count = Number(teamCount);
+      // Minutes → seconds; an empty/garbled field falls back to the server
+      // default by simply omitting the value (0 stays 0 = untimed).
+      const buildSeconds = minutesToSeconds(buildMinutes);
+      const scoringSeconds = minutesToSeconds(scoringMinutes);
       const res = await fetch("/api/games", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ teamCount: Number.isInteger(count) ? count : undefined, theme: themeTrim }),
+        body: JSON.stringify({
+          teamCount: Number.isInteger(count) ? count : undefined,
+          theme: themeTrim,
+          ...(buildSeconds !== undefined || scoringSeconds !== undefined
+            ? {
+                config: {
+                  ...(buildSeconds !== undefined ? { buildTimerSeconds: buildSeconds } : {}),
+                  ...(scoringSeconds !== undefined ? { scoringTimerSeconds: scoringSeconds } : {}),
+                },
+              }
+            : {}),
+        }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -701,6 +751,31 @@ export default function GmPage() {
               onChange={(e) => setTheme(e.target.value)}
             />
           </label>
+          <div className="cc-timer-row">
+            <label htmlFor="build-minutes">
+              Build timer (min)
+              <input
+                id="build-minutes"
+                type="number"
+                min={0}
+                step={1}
+                value={buildMinutes}
+                onChange={(e) => setBuildMinutes(e.target.value)}
+              />
+            </label>
+            <label htmlFor="scoring-minutes">
+              Scoring timer (min)
+              <input
+                id="scoring-minutes"
+                type="number"
+                min={0}
+                step={1}
+                value={scoringMinutes}
+                onChange={(e) => setScoringMinutes(e.target.value)}
+              />
+            </label>
+          </div>
+          <p className="cc-hint">0 = no time limit — you end the build manually.</p>
           <button type="submit" className="cc-btn cc-btn-primary" disabled={creating}>
             {creating ? "Creating…" : "Create game"}
           </button>

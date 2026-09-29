@@ -128,6 +128,11 @@ export interface GameSnapshot {
   phase: string;
   round: number;
   theme: string | null;
+  /** Configured BUILD timer in seconds (from CardConfig; null = not sent).
+   *  0 means untimed — the GM ends the phase manually. */
+  buildTimerSeconds?: number | null;
+  /** Configured SCORING timer in seconds (0 = untimed). */
+  scoringTimerSeconds?: number | null;
   phaseEndsAt: number | null;
   cutoffAt: number | null;
   scoresLocked: boolean;
@@ -674,11 +679,19 @@ function normalizeSnapshot(
   for (const [itemId, entry] of Object.entries(prevMyItems)) {
     if (entry.round === round) myItems[itemId] = entry;
   }
+  // Timers ride along inside the server's CardConfig (sync:full always
+  // carries `config`); read them off a loose record since SyncFullEvent is
+  // the client-facing subset type.
+  const config = (raw as unknown as { config?: Record<string, unknown> }).config;
+  const timerSecs = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
   return {
     gameId: String(raw.gameId),
     phase: String(raw.phase),
     round,
     theme: typeof raw.theme === "string" ? raw.theme : null,
+    buildTimerSeconds: timerSecs(config?.buildTimerSeconds),
+    scoringTimerSeconds: timerSecs(config?.scoringTimerSeconds),
     phaseEndsAt: typeof raw.phaseEndsAt === "number" ? raw.phaseEndsAt : null,
     cutoffAt: typeof raw.cutoffAt === "number" ? raw.cutoffAt : null,
     scoresLocked: Boolean(raw.scoresLocked),
