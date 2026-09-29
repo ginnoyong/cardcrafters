@@ -31,7 +31,8 @@
  *      minSize are hard constraints — an item that still cannot fit is simply
  *      omitted from the result (also warned).
  *
- * zIndex = the item's orderIndex (later submissions render on top).
+ * zIndex = the item's orderIndex (later submissions render on top), EXCEPT
+ * the HERO (see the hero-montage policy block) which renders topmost.
  */
 
 import type { LayoutComposition, LayoutItemHint, Placement } from "@cardcrafters/shared";
@@ -46,6 +47,7 @@ import {
   checkItem,
   displayHeight,
   displayWidth,
+  HERO_TUCK_CAP,
   overlapCapFor,
   placedBox,
   placedFootprint,
@@ -136,6 +138,17 @@ const ROT_NUDGE_DEG = 5;
  * candidates in the first place).
  */
 const SCALE_FIDELITY_WEIGHT = 0.5;
+/**
+ * Hero-montage: the HERO's scale shortfall counts this many times more in
+ * the fidelity term than a support's (see `fidelity`). Without the boost the
+ * soft spacing term (score.ts `space`, weight 0.25) rewards a SMALLER hero
+ * whenever it tucks against a support — the hero would settle ~15% under its
+ * 0.65 target (measured 0.543 at n = 2). ×3 makes a hero shrink strictly
+ * more expensive than any positioning gain while hard constraints still
+ * force genuine fallbacks (the term bottoms out at the largest feasible
+ * scale, as before).
+ */
+const HERO_FIDELITY_WEIGHT = 3.0;
 /**
  * Group-cohesion soft terms (semantic-grouping pass — solver-internal, NOT
  * part of scoreLayout, same mechanism as `fidelity`).
@@ -386,6 +399,72 @@ const FILL_BLEND_END = 12;
 const MAX_ITEM_AREA_SHARE = 0.22;
 const MAX_ITEM_CAP_MIN_ITEMS = 8;
 
+// ---------------------------------------------------------------------------
+// Hero-montage policy (dominant hero + orbiting supports)
+// ---------------------------------------------------------------------------
+/**
+ * Hero-montage sizing: the card's TOP-RANKED sticker (the HERO) is sized
+ * dominantly at HERO_WIDTH_TARGET = 0.65 of the card width; the remaining
+ * stickers (SUPPORTS) fill the whitespace AROUND the hero and may tuck
+ * BEHIND it (hero–support pairs get the deeper HERO_TUCK_CAP overlap; the
+ * hero renders on top). Hard floor: every support's display width is at
+ * least SUPPORT_HERO_FLOOR × the hero's width — enforced as a HARD clamp in
+ * the candidate generator (a candidate below the floor is re-clamped UP to
+ * the floor; if even the floor cannot fit the hard constraints in any cell,
+ * the per-cell fallback ladder resolves downward, documented in
+ * candidatesFor — the floor yields to the hard in-bounds/overlap/minSize
+ * constraints, never the other way around).
+ *
+ * HERO DESIGNATION: a hint with role:"focal" (the layout AI's
+ * layout_composition output) designates the hero; absent a focal hint the
+ * highest visualWeight wins (stable tie-break by orderIndex). Ranking runs
+ * EVERY solve from the current hints + weights, so when a new sticker
+ * arrives and the hints designate a different focal, the new sticker takes
+ * the hero size and the previous hero resizes as a support — the solver
+ * re-solves the whole card on every arrival.
+ *
+ * LARGE n: at large item counts the per-item share curve (perItemShare,
+ * legacy TOTAL_COVERAGE_TARGET/n split) shrinks the hero like everyone
+ * else; supports shrink with it and the 0.5× floor is maintained by the
+ * same desired-scale floor + hard clamp (with equal-ish weights the shares
+ * are near-equal, so the floor rarely binds — it is a safety net).
+ */
+/** Hero (rank 0) display-width target: fraction of the card width. */
+const HERO_WIDTH_TARGET = 0.65;
+/** Hard floor: any non-hero sticker's width ≥ this fraction of the hero's. */
+const SUPPORT_HERO_FLOOR = 0.5;
+
+/**
+ * Hero designation (hero-montage policy — see the block above). Deterministic:
+ * a hint with role:"focal" wins (earliest orderIndex among focal-hinted
+ * items); otherwise the highest visualWeight (earliest orderIndex on ties).
+ * Returns null for an empty item list.
+ */
+export function heroItemIdOf(
+  items: LayoutItem[],
+  hints?: LayoutComposition | null,
+): string | null {
+  if (items.length === 0) return null;
+  let hero: LayoutItem | null = null;
+  for (const h of hints?.hints ?? []) {
+    if (h.role !== "focal") continue;
+    const item = items.find((i) => i.id === h.itemId);
+    if (item && (hero === null || item.orderIndex < hero.orderIndex)) hero = item;
+  }
+  if (hero === null) {
+    for (const item of items) {
+      if (
+        hero === null ||
+        item.visualWeight > hero.visualWeight ||
+        (item.visualWeight === hero.visualWeight && item.orderIndex < hero.orderIndex)
+      ) {
+        hero = item;
+      }
+    }
+  }
+  return hero!.id;
+}
+
 /**
  * Desired card-area share per item for an n-item layout (see the
  * sizing-policy v2 doc above). Monotonically non-increasing in n.
@@ -433,6 +512,25 @@ function desiredScales(
   // Few-item width policy for 2 ≤ n ≤ 5 (see PER_ITEM_WIDTH_TARGET); the
   // area-share curve keeps driving n = 1 (solo) and n ≥ 6 (legacy split).
   const widthTarget = PER_ITEM_WIDTH_TARGET[n];
+  // Hero-montage: rank 0 IS the hero (heroItemIdOf decides; `ordered` is
+  // already re-ranked hero-first by the caller). Its desired width is the
+  // policy-fixed HERO_WIDTH_TARGET (few-item mode) or the area-share width
+  // (legacy mode); every support's desired width is floored at
+  // SUPPORT_HERO_FLOOR × the hero's desired width.
+  const heroItem = ordered[0]!;
+  const heroEff = (() => {
+    const o = weightOverride?.get(heroItem.id);
+    return o !== undefined ? Math.max(o, 0) : Math.max(heroItem.visualWeight, WEIGHT_FLOOR);
+  })();
+  const heroShare = EQUALIZE_FRAC * 1 + (1 - EQUALIZE_FRAC) * ((n * heroEff) / (sum || 1));
+  const heroDesiredWidth =
+    widthTarget !== undefined
+      ? HERO_WIDTH_TARGET * card.w
+      : Math.sqrt(
+          (Math.min(perItemShare(n) * cardArea, capArea) * heroShare * heroItem.imgW) /
+            heroItem.imgH,
+        );
+  const supportFloorWidth = SUPPORT_HERO_FLOOR * heroDesiredWidth;
   for (let i = 0; i < n; i++) {
     const item = ordered[i]!;
     // Size equalization: blend the visualWeight-weighted split 50/50 with a
@@ -443,10 +541,12 @@ function desiredScales(
     const weightedShare = (n * eff[i]!) / sum;
     const share = EQUALIZE_FRAC * 1 + (1 - EQUALIZE_FRAC) * weightedShare;
     if (widthTarget !== undefined) {
-      // Few-item width policy: the desired display WIDTH is the policy
-      // target × the blended share factor; the item's aspect sets the
-      // height. Same share for same weight → same desired width.
-      const desiredWidth = widthTarget * share * card.w;
+      // Few-item width policy: the hero takes the policy-fixed hero width;
+      // supports take the table target × share, floored at the hero floor.
+      const desiredWidth =
+        i === 0
+          ? heroDesiredWidth
+          : Math.max(widthTarget * share * card.w, supportFloorWidth);
       const scale = desiredWidth / (item.imgW * k);
       map.set(item.id, scaleFor(item, card, k, scale, minSizePct));
       continue;
@@ -458,7 +558,12 @@ function desiredScales(
     // less, and the intended total stays n × perItemShare.
     const desiredArea = Math.min(perItemShare(n) * cardArea, capArea) * share;
     // Display area = w × h = w² × (imgH/imgW)  →  w = sqrt(area × imgW/imgH).
-    const desiredWidth = Math.sqrt((desiredArea * item.imgW) / item.imgH);
+    // Supports are floored at SUPPORT_HERO_FLOOR × the hero's desired width
+    // (the hero can shrink with the curve, but supports shrink WITH it).
+    const desiredWidth = Math.max(
+      Math.sqrt((desiredArea * item.imgW) / item.imgH),
+      i === 0 ? 0 : supportFloorWidth,
+    );
     const scale = desiredWidth / (item.imgW * k);
     map.set(item.id, scaleFor(item, card, k, scale, minSizePct));
   }
@@ -516,12 +621,25 @@ function attemptSolve(
     if (typeof h.importance === "number") importanceOverride.set(h.itemId, h.importance);
   }
 
-  // Sort: visualWeight desc, stable tie-break by orderIndex.
+  // Sort: visualWeight desc, stable tie-break by orderIndex — then re-rank
+  // so the HERO (hint role:"focal", else highest visualWeight — see
+  // heroItemIdOf) is processed FIRST and claims the dominant spot.
   const ordered = [...items].sort(
     (a, b) => b.visualWeight - a.visualWeight || a.orderIndex - b.orderIndex,
   );
+  const heroId = heroItemIdOf(items, hints);
+  const heroIdx = ordered.findIndex((i) => i.id === heroId);
+  if (heroIdx > 0) ordered.unshift(...ordered.splice(heroIdx, 1));
 
-  const ctx: ConstraintCtx = { card, k, textZone: opts.textZone, minSizePct, overlapCap };
+  const ctx: ConstraintCtx = {
+    card,
+    k,
+    textZone: opts.textZone,
+    minSizePct,
+    overlapCap,
+    heroItemId: heroId ?? undefined,
+    heroOverlapCap: HERO_TUCK_CAP,
+  };
   const m = safeMargin(card);
   const ax1 = m.x;
   const ax2 = card.w - m.x;
@@ -622,6 +740,20 @@ function attemptSolve(
         placedBoxes,
       ).length === 0;
 
+    // Hero-montage support floor: a non-hero candidate's scale is clamped UP
+    // to SUPPORT_HERO_FLOOR × the hero's ACTUAL placed scale (hard clamp —
+    // see the policy doc). If even the floored scale cannot fit the hard
+    // constraints anywhere, the whole pass is retried WITHOUT the floor: the
+    // ladder then resolves below the floor rather than emitting nothing (the
+    // hard in-bounds/overlap/minSize constraints always win over the floor).
+    const heroEntry = placed.find((p) => p.item.id === heroId);
+    const supportFloorScale =
+      item.id !== heroId && heroEntry
+        ? (displayWidth(heroEntry.item, heroEntry.placement.scale, k) /
+            (heroEntry.item.imgW * k)) *
+          SUPPORT_HERO_FLOOR
+        : 0;
+
     // Clamp a candidate's center so THIS item's rotated AABB (at the given
     // scale/rotation) stays inside the safe area — big items get their
     // centers confined near the card middle, small ones keep the full grid.
@@ -701,25 +833,37 @@ function attemptSolve(
         });
       }
     }
-    // Polar ring samples around the composition focus (placement freedom —
-    // see the RING_* constant docs). Same hoisted-draw pattern as above:
-    // angle-jitter, radius, scale-jitter and rotation draws in a fixed
-    // order, one seed per ring slot, regardless of constraint outcomes.
+    // Polar ring samples. Hero-montage: for NON-hero items with the hero
+    // already placed, the ring is centered on the HERO's center (not the
+    // composition focus) and the radius range starts at the hero's half
+    // extent + a small gap, so supports HUG the hero's edge and fill the
+    // whitespace around it (tucking partially behind is allowed via the
+    // hero–tuck cap; the scoring picks the exact offset). The hero itself
+    // (and any item before the hero is placed) keeps the composition-focus
+    // ring. Same hoisted-draw pattern as above: angle-jitter, radius,
+    // scale-jitter and rotation draws in a fixed order, one seed per ring
+    // slot, regardless of constraint outcomes.
     const fx = focalPoint?.x ?? card.w / 2;
     const fy = focalPoint?.y ?? card.h / 2;
     const minDim = Math.min(card.w, card.h);
+    const heroRing = item.id !== heroId ? heroEntry : undefined;
+    const ringCx = heroRing ? heroRing.placement.x : fx;
+    const ringCy = heroRing ? heroRing.placement.y : fy;
+    const ringBase = heroRing ? halfExtentOf(heroRing.placement) : 0;
     for (let r = 0; r < RING_SAMPLES; r++) {
       const angleDeg =
         r * GOLDEN_ANGLE_DEG + (rng() * 2 - 1) * RING_ANGLE_JITTER_DEG;
-      const radius =
-        (RING_RADIUS_MIN + rng() * (RING_RADIUS_MAX - RING_RADIUS_MIN)) * minDim;
+      const radius = heroRing
+        ? ringBase +
+          (RING_RADIUS_MIN * 0.5 + rng() * (RING_RADIUS_MAX - RING_RADIUS_MIN)) * minDim
+        : (RING_RADIUS_MIN + rng() * (RING_RADIUS_MAX - RING_RADIUS_MIN)) * minDim;
       const jitter = SCALE_JITTER_MIN + rng() * (SCALE_JITTER_MAX - SCALE_JITTER_MIN);
       const rot =
         index === 0 && !hints ? 0 : (rng() * 2 - 1) * RING_ROT_JITTER_DEG;
       const rad = (angleDeg * Math.PI) / 180;
       seeds.push({
-        x: clamp(fx + Math.cos(rad) * radius, ax1, ax2),
-        y: clamp(fy + Math.sin(rad) * radius, ay1, ay2),
+        x: clamp(ringCx + Math.cos(rad) * radius, ax1, ax2),
+        y: clamp(ringCy + Math.sin(rad) * radius, ay1, ay2),
         jitter,
         rot,
       });
@@ -727,22 +871,31 @@ function attemptSolve(
 
     // Per cell: try scale fallback steps largest→smallest inside the cell;
     // the first (largest) scale whose candidate passes the hard constraints
-    // (bounds + size + text rule + pairwise overlap) wins that cell.
-    const cands: Placement[] = [];
-    for (const seed of seeds) {
-      for (const step of SCALE_FALLBACK_STEPS) {
-        const cand = makeCand(
-          seed.x,
-          seed.y,
-          baseScale * step * seed.jitter,
-          seed.rotLocked ? seed.rot : seed.rot * step,
-        );
-        if (ok(cand)) {
-          cands.push(cand);
-          break;
+    // (bounds + size + text rule + pairwise overlap) wins that cell. The
+    // support floor (hero-montage) is applied as a hard clamp first; only
+    // when NO cell yields a floored candidate does the retry without the
+    // floor run (documented ladder resolution).
+    const runCells = (withFloor: boolean): Placement[] => {
+      const out: Placement[] = [];
+      for (const seed of seeds) {
+        for (const step of SCALE_FALLBACK_STEPS) {
+          const raw = baseScale * step * seed.jitter;
+          const cand = makeCand(
+            seed.x,
+            seed.y,
+            withFloor ? Math.max(raw, supportFloorScale) : raw,
+            seed.rotLocked ? seed.rot : seed.rot * step,
+          );
+          if (ok(cand)) {
+            out.push(cand);
+            break;
+          }
         }
       }
-    }
+      return out;
+    };
+    let cands = runCells(true);
+    if (cands.length === 0 && supportFloorScale > 0) cands = runCells(false);
     return cands;
   };
 
@@ -765,7 +918,10 @@ function attemptSolve(
     for (const p of placements) {
       const d = desired.get(p.itemId);
       if (d === undefined) continue;
-      s += Math.max(0, 1 - p.scale / d);
+      const shortfall = Math.max(0, 1 - p.scale / d);
+      // Hero-montage: the hero's shortfall is weighted ×HERO_FIDELITY_WEIGHT
+      // so the soft spacing term can never buy a smaller hero.
+      s += p.itemId === heroId ? HERO_FIDELITY_WEIGHT * shortfall : shortfall;
     }
     // SUM, not mean: the per-item gradient (what the greedy/sweeps actually
     // compare between candidates) must not weaken as n grows, or items stop
@@ -939,10 +1095,23 @@ function attemptSolve(
     const others = placed.filter((_, i) => i !== idx);
     const item = p.item;
     const desiredScale = desired.get(item.id);
-    const scaleFloor =
+    let scaleFloor =
       desiredScale !== undefined
         ? Math.min(p.placement.scale, desiredScale)
         : 0;
+    // Hero-montage: non-hero items also keep the 0.5×hero floor through the
+    // local search (measured against the hero's CURRENT scale).
+    if (item.id !== heroId) {
+      const heroEntry = placed.find((e) => e.item.id === heroId);
+      if (heroEntry) {
+        scaleFloor = Math.max(
+          scaleFloor,
+          (displayWidth(heroEntry.item, heroEntry.placement.scale, k) /
+            (heroEntry.item.imgW * k)) *
+            SUPPORT_HERO_FLOOR,
+        );
+      }
+    }
     const moved: Placement = {
       ...p.placement,
       x: p.placement.x + (rng() * 2 - 1) * POS_NUDGE_FRAC * card.w,
@@ -1010,7 +1179,19 @@ function attemptSolve(
       const undersized =
         narrowDesired !== undefined &&
         wMin < narrowDesired - 0.02;
-      if (widest === narrowest || (!undersized && wMax <= wMin * REBALANCE_RATIO + 1e-9)) break;
+      if (widest === narrowest) break;
+      // Hero-montage: when the widest item IS the hero and every support
+      // already clears the 0.5×hero floor, the width imbalance is INTENDED
+      // (dominant hero) — do not shrink the hero to equalize. The undersized
+      // trigger still fires so a starved support can grow.
+      const heroIsWidest = placed[widest]!.item.id === heroId;
+      const floorOk = wMin >= wMax * SUPPORT_HERO_FLOOR - 1e-9;
+      if (
+        !undersized &&
+        (heroIsWidest ? floorOk : wMax <= wMin * REBALANCE_RATIO + 1e-9)
+      ) {
+        break;
+      }
       const wideEntry = placed[widest]!;
       const narrowEntry = placed[narrowest]!;
       const others = placed.filter((_, i) => i !== widest && i !== narrowest);
@@ -1154,8 +1335,16 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
 
   const card = opts.cardDims;
   const k = opts.k ?? baseFit(card);
+  // Hero-montage zIndex: the hero renders TOPMOST (max orderIndex + 1);
+  // supports keep their orderIndex (later submissions render above earlier
+  // supports, always below the hero).
+  const heroId = heroItemIdOf(items, opts.hints ?? null);
+  const maxOrder = items.reduce((m, i) => Math.max(m, i.orderIndex), 0);
   const placements = result.placed
-    .map((p) => ({ ...p.placement, zIndex: p.item.orderIndex }))
+    .map((p) => ({
+      ...p.placement,
+      zIndex: p.item.id === heroId ? maxOrder + 1 : p.item.orderIndex,
+    }))
     .sort((a, b) => a.zIndex - b.zIndex);
   const ctx: ScoreContext = {
     card,

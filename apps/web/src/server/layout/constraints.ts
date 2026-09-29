@@ -414,6 +414,16 @@ export function overlapRatio(a: Vec2[], b: Vec2[]): number {
 }
 
 /**
+ * Hero–support tuck cap (hero-montage policy): the user explicitly asked for
+ * supports to tuck BEHIND the hero ("allow more overlapping (behind the hero
+ * sticker)"), so a pair involving the HERO may overlap up to this ratio
+ * (true rotated-rect measure). The hero renders ON TOP (zIndex), so the
+ * hidden part of a tucked support reads as "behind the hero". Support–
+ * support pairs keep MAX_PAIRWISE_OVERLAP (0.10).
+ */
+export const HERO_TUCK_CAP = 0.25;
+
+/**
  * (d) Pairwise overlap cap — TRUE rotated-rect measure. `a`/`b` are corner
  * sets from rotatedRectCorners; passes when the true intersection ≤
  * `cap` × min(areaA, areaB). `cap` defaults to MAX_PAIRWISE_OVERLAP (the
@@ -491,6 +501,16 @@ export interface ConstraintCtx {
    * single 10% user tolerance for every item count (see overlapCapFor).
    */
   overlapCap?: number;
+  /**
+   * Hero-montage policy: the id of the layout's HERO item. When set, pairs
+   * involving the hero measure against `heroOverlapCap` instead of
+   * `overlapCap` — supports may TUCK BEHIND the hero (the hero renders on
+   * top), so a hero–support pair allows a deeper overlap (HERO_TUCK_CAP =
+   * 0.25) than the 10% support–support tolerance.
+   */
+  heroItemId?: string;
+  /** Pairwise-overlap cap for hero–support pairs (see heroItemId). */
+  heroOverlapCap?: number;
 }
 
 /** A placed item's footprint for the pairwise overlap check (true corners). */
@@ -549,7 +569,15 @@ export function checkItem(
       continue;
     }
     const otherCorners = other.corners ?? [];
-    if (!overlapCapOk(corners, otherCorners as Vec2[], cap)) {
+    // Hero–tuck cap: pairs involving the HERO use the deeper tuck tolerance
+    // (supports may sit partially behind the hero; hero renders on top).
+    const pairCap =
+      ctx.heroItemId !== undefined &&
+      ctx.heroOverlapCap !== undefined &&
+      (ctx.heroItemId === item.id || ctx.heroItemId === other.itemId)
+        ? ctx.heroOverlapCap
+        : cap;
+    if (!overlapCapOk(corners, otherCorners as Vec2[], pairCap)) {
       violations.push({
         itemId: item.id,
         code: "overlap_cap",
