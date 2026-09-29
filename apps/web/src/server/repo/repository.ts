@@ -22,6 +22,7 @@ import type {
   ItemStatus,
   Phase,
   Placement,
+  ScoringOrder,
   StyleDerivation,
 } from "@cardcrafters/shared";
 
@@ -42,6 +43,9 @@ export interface GameRow {
   style: StyleDerivation | null;
   phaseEndsAt: number | null;
   cutoffAt: number | null;
+  /** Anonymous scoring order for the current round (null until SCORING entry;
+   *  cleared when a new round starts). */
+  scoringOrder: ScoringOrder | null;
   createdAt: number;
 }
 
@@ -175,6 +179,7 @@ export interface GamePatch {
   style?: StyleDerivation | null;
   phaseEndsAt?: number | null;
   cutoffAt?: number | null;
+  scoringOrder?: ScoringOrder | null;
 }
 
 export interface TeamPatch {

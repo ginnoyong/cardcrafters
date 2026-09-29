@@ -92,3 +92,47 @@ export function friendlyJoinError(error: string | undefined): string {
   if (/stale session/i.test(e)) return "Your saved session expired. Join again with your team's QR code.";
   return e || "Join failed — please try again.";
 }
+
+// ---------------------------------------------------------------------------
+// Scoring: player rating ack + friendly per-guard errors.
+// ---------------------------------------------------------------------------
+
+/** `score:submit` ack (see ws/server.ts — the flow's stage rides as `code`
+ *  AND `reason` so clients can show the right message). */
+export type ScoreSubmitAck =
+  | { ok: true; cardId: string; score: number }
+  | { ok: false; error: string; code?: string; reason?: string };
+
+/**
+ * Friendly plain-language message for a score:submit rejection stage
+ * (flows/scoring.ts guard order: phase → kicked → unknown_card → own_card →
+ * already_rated → locked). Unknown/absent reasons get a generic fallback.
+ */
+export function friendlyScoreError(reason: string | undefined): string {
+  switch (reason) {
+    case "own_card":
+      return "You can't rate your own team's card.";
+    case "already_rated":
+      return "You already rated this card.";
+    case "locked":
+      return "Scoring has closed for this round.";
+    case "phase":
+      return "Rating isn't open right now.";
+    case "kicked":
+      return "You were removed from this game.";
+    case "unknown_card":
+      return "That card isn't part of this round.";
+    default:
+      return "Something went wrong — please try again.";
+  }
+}
+
+/** Promisified `score:submit` — resolves with the typed ack. */
+export function submitScoreAck(
+  socket: Socket,
+  cardId: string,
+  score: number,
+  timeoutMs = 10_000,
+): Promise<ScoreSubmitAck> {
+  return emitAck<ScoreSubmitAck>(socket, "score:submit", { cardId, score }, timeoutMs);
+}

@@ -31,9 +31,19 @@ import {
   type CardConfig,
 } from "@cardcrafters/shared";
 
-import { gameRoom, playerRoom, teamRoom } from "../ws/rooms";
+import { gameRoom, gmRoom, playerRoom, presenterRoom, teamRoom } from "../ws/rooms";
 import { RepoError } from "../repo/memory-repo";
-import type { GamePatch, GameRow, PlayerRow, Repository, RoundRole, TeamRow } from "../repo/repository";
+import type {
+  GamePatch,
+  GameRow,
+  PlayerRow,
+  Repository,
+  RoundRole,
+  ScoreAggregate,
+  TeamRow,
+} from "../repo/repository";
+import type { ScoringOrder } from "@cardcrafters/shared";
+import { hashString, mulberry32 } from "../ai/mock-provider";
 import { transition } from "./state-machine";
 import { createInitialRuntimeState } from "./types";
 import type { Effect, GameEvent, GameRuntimeState, TransitionResult } from "./types";
@@ -111,6 +121,58 @@ function pickTeamNames(count: number, random: () => number = Math.random): strin
   }
   if (count > pool.length) throw new RepoError(`not enough team names for ${count} teams`);
   return pool.slice(0, count);
+}
+
+/**
+ * Build the round's ANONYMOUS scoring order.
+ *
+ * One card per team, shuffled deterministically per game+round: the seed is
+ * `hashString("${gameId}:${round}")` fed into mulberry32 and a Fisher–Yates
+ * shuffle (same pattern as pickTeamNames), so every hub instance / restart
+ * reproduces the exact same order — the shuffled order is also persisted on
+ * Game.scoringOrder as the single source of truth.
+ *
+ * `cardId`s are opaque anonymous ids ("card-a"…) and `label`s the public
+ * display strings ("Card A"…); the `teamId` mapping is GM/server-only and
+ * must be STRIPPED from every player-facing payload.
+ */
+export function buildScoringOrder(
+  gameId: string,
+  round: number,
+  teams: TeamRow[],
+): ScoringOrder {
+  const pool = [...teams];
+  const random = mulberry32(hashString(`${gameId}:${round}`));
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j]!, pool[i]!];
+  }
+  return {
+    round,
+    cards: pool.map((team, i) => ({
+      cardId: `card-${TEAM_LABELS[i]?.toLowerCase() ?? String(i)}`,
+      label: `Card ${TEAM_LABELS[i] ?? i + 1}`,
+      teamId: team.id,
+    })),
+  };
+}
+
+/** Round `n` to 2 decimal places (avg score display). */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/**
+ * Deterministic standings sort: avg desc → count desc → label asc.
+ */
+export function sortStandings(
+  standings: Array<{ teamId: string; label: string; cardId: string; avg: number; count: number }>,
+): Array<{ teamId: string; label: string; cardId: string; avg: number; count: number }> {
+  return [...standings].sort((a, b) => {
+    if (b.avg !== a.avg) return b.avg - a.avg;
+    if (b.count !== a.count) return b.count - a.count;
+    return a.label.localeCompare(b.label);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +308,40 @@ export class GameHub {
     return this.getOrCreateHubGame(gameId);
   }
 
+  /**
+   * Broadcast `scores:update` for the game's current round: per-card running
+   * averages to the whole game room. The card↔team mapping NEVER leaves the
+   * server — the payload carries `{cards: [{cardId, avg, count}]}` only, so
+   * players cannot tell whose card they are rating live.
+   *
+   * Stale rounds are skipped: when Game.scoringOrder is missing or belongs to
+   * a different round (e.g. the round already advanced), nothing is emitted.
+   */
+  async emitScoresUpdate(gameId: string): Promise<void> {
+    const state = await this.getOrCreateHubGame(gameId);
+    const round = state.round;
+    const [aggregates, game] = await Promise.all([
+      this.repo.aggregateScores(gameId, round),
+      this.repo.getGame(gameId),
+    ]);
+    const order = game?.scoringOrder;
+    if (!order || order.round !== round) return; // stale / not in scoring
+    const byTeam = new Map<string, ScoreAggregate>(
+      aggregates.map((a) => [a.targetTeamId, a]),
+    );
+    // Iterate in the round's card order so payloads are deterministic and
+    // match the scoring screen layout.
+    const cards = order.cards
+      .map((c) => {
+        const agg = byTeam.get(c.teamId);
+        return agg && agg.count > 0
+          ? { cardId: c.cardId, avg: round2(agg.avg), count: agg.count }
+          : null;
+      })
+      .filter((c): c is { cardId: string; avg: number; count: number } => c !== null);
+    this.emitToRooms(gameId, round, "scores:update", { cards }, [gameRoom(gameId)]);
+  }
+
   // -- Event application -------------------------------------------------------
 
   /**
@@ -321,7 +417,11 @@ export class GameHub {
         // Already persisted via updateGame (state.cutoffAt diff, above).
         return;
       case "incrementRound":
-        // Already persisted via updateGame (state.round diff, above).
+        // Round counter is already persisted via updateGame (state.round diff,
+        // above); the round-scoped anonymous scoring order is NOT a runtime
+        // state field, so clear it here — a stale order must never leak into
+        // the next round's scoring screen.
+        await this.repo.updateGame(gameId, { scoringOrder: null });
         return;
       case "notify":
         this.emitToRooms(gameId, state.round, "notify", { playerId: effect.playerId, message: effect.message }, [
@@ -332,6 +432,10 @@ export class GameHub {
         await this.persistWinnerPicks(gameId, state.round, effect.teamId, effect.peoplesChoiceTeamId);
         const teams = await this.repo.listTeams(gameId);
         const winner = teams.find((t) => t.id === effect.teamId);
+        // Public standings for the results table: aggregate the round's scores
+        // and map every scored team to its ANONYMOUS card (avg/count only —
+        // the teamId stays server-side in the mapping below).
+        const standings = await this.buildStandings(gameId, state.round, teams);
         this.emitToRooms(
           gameId,
           state.round,
@@ -339,6 +443,7 @@ export class GameHub {
           {
             winnerTeamId: effect.teamId,
             label: winner?.label ?? null,
+            standings,
             ...(effect.peoplesChoiceTeamId ? { peoplesChoiceTeamId: effect.peoplesChoiceTeamId } : {}),
             revealToken: randomUUID(),
           },
@@ -354,12 +459,82 @@ export class GameHub {
         // validation/moderation and item events live in the pipeline, which
         // is the ONE owner of item rows + item events.
         return;
+      case "beginScoring": {
+        // BUILD → SCORING entry: build the round's anonymous scoring order,
+        // persist it on Game.scoringOrder (source of truth for sync:full,
+        // score submission and the standings), then announce scoring per
+        // audience — players see ANONYMOUS cards + their own card id, the GM
+        // sees the team mapping, the presenter sees anonymous cards only.
+        const teams = await this.repo.listTeams(gameId);
+        const order = buildScoringOrder(gameId, state.round, teams);
+        await this.repo.updateGame(gameId, { scoringOrder: order });
+        for (const team of teams) {
+          const members = await this.repo.listTeamPlayers(team.id);
+          const yourTeamCardId = order.cards.find((c) => c.teamId === team.id)?.cardId ?? null;
+          const anonymousCards = order.cards.map((c) => ({ cardId: c.cardId, label: c.label }));
+          for (const p of members) {
+            this.emitToRooms(
+              gameId,
+              state.round,
+              "scoring:started",
+              { cards: anonymousCards, yourTeamCardId },
+              [playerRoom(gameId, p.id)],
+            );
+          }
+        }
+        // GM copy: the full card→team mapping (moderation duty / judge console).
+        this.emitToRooms(gameId, state.round, "scoring:started", { cards: order.cards }, [
+          gmRoom(gameId),
+        ]);
+        // Presenter copy: ANONYMOUS only (never leak the team mapping to the
+        // big screen before the reveal).
+        this.emitToRooms(
+          gameId,
+          state.round,
+          "scoring:started",
+          { cards: order.cards.map((c) => ({ cardId: c.cardId, label: c.label })) },
+          [presenterRoom(gameId)],
+        );
+        return;
+      }
       default: {
         const exhaustive: never = effect;
         void exhaustive;
         return;
       }
     }
+  }
+
+  /**
+   * Build the PUBLIC standings for a round: one entry per scored team with
+   * its anonymous cardId, sorted avg desc → count desc → label asc. The
+   * teamId is included (used by the GM console + results highlighting); any
+   * player-facing payload derived from these entries must keep ONLY the
+   * anonymous cardId.
+   */
+  private async buildStandings(
+    gameId: string,
+    round: number,
+    teams: TeamRow[],
+  ): Promise<Array<{ teamId: string; label: string; cardId: string; avg: number; count: number }>> {
+    const aggregates = await this.repo.aggregateScores(gameId, round);
+    const game = await this.repo.getGame(gameId);
+    const order = game?.scoringOrder;
+    const byTeam = new Map(aggregates.map((a) => [a.targetTeamId, a]));
+    const standings: Array<{ teamId: string; label: string; cardId: string; avg: number; count: number }> = [];
+    for (const team of teams) {
+      const agg = byTeam.get(team.id);
+      if (!agg || agg.count === 0) continue;
+      const card = order?.round === round ? order.cards.find((c) => c.teamId === team.id) : undefined;
+      standings.push({
+        teamId: team.id,
+        label: team.label,
+        cardId: card?.cardId ?? team.id, // no order row → fall back to the (GM-only) team id
+        avg: round2(agg.avg),
+        count: agg.count,
+      });
+    }
+    return sortStandings(standings);
   }
 
   /** Persist GM_WINNER (+ optional PEOPLES_CHOICE) picks, idempotently. */

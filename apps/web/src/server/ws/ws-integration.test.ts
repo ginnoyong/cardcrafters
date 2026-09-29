@@ -818,3 +818,182 @@ describe("reconnect state preservation (refresh regression)", () => {
   }, 40_000);
 });
 
+
+// ---------------------------------------------------------------------------
+// Scoring phase end-to-end (anonymous 1-10 ratings → judging → results).
+// Exercises the WS surface: scoring:started (audience-scoped anonymity),
+// score:submit acks + guards, live anonymous scores:update, sync:full
+// scoring/myScores shapes, then judging:winner → reveal:ack → RESULTS.
+// ---------------------------------------------------------------------------
+
+describe("scoring phase end-to-end", () => {
+  it("(s1) scoring:started anonymity, submit guards, live averages, judging → RESULTS", { timeout: 15_000 }, async () => {
+    // Theme moves LOBBY → GREETINGS so players may join.
+    await hub.applyEvent(gameId, { type: "gm:setTheme", theme: "Balloon party", now: Date.now() });
+
+    // GM + one player per team (A and B) — the third team stays empty; its
+    // card still appears in the scoring order and can be rated.
+    const gm = connect({ role: "gm", gameCode });
+    await emitAck(gm, "join", { role: "gm", joinToken: gameCode });
+    const alex = connect();
+    const alexAck = await emitAck<{ ok: boolean; identity: { playerId: string; teamId: string } }>(
+      alex,
+      "join",
+      { role: "player", joinToken: joinTokenA, nickname: "Alex" },
+    );
+    const sam = connect();
+    const samAck = await emitAck<{ ok: boolean; identity: { playerId: string; teamId: string } }>(
+      sam,
+      "join",
+      { role: "player", joinToken: joinTokenB, nickname: "Sam" },
+    );
+    expect(alexAck.ok).toBe(true);
+    expect(samAck.ok).toBe(true);
+    expect(alexAck.identity.teamId).toBe(teamAId);
+    expect(samAck.identity.teamId).toBe(teamBId);
+
+    const approve = await emitAck<{ ok: boolean; phase?: string }>(gm, "gm:approveGreetings", {});
+    expect(approve.ok).toBe(true);
+    expect(approve.phase).toBe("BUILD");
+
+    // Waiters registered BEFORE gm:stopBuild so nothing is missed.
+    const alexStarted = waitFor<{ cards: Array<Record<string, unknown>>; yourTeamCardId?: string | null }>(alex, "scoring:started");
+    const samStarted = waitFor<{ cards: Array<Record<string, unknown>>; yourTeamCardId?: string | null }>(sam, "scoring:started");
+    const gmStarted = waitFor<{ cards: Array<{ cardId: string; label: string; teamId: string }> }>(gm, "scoring:started");
+
+    const stop = await emitAck<{ ok: boolean; phase?: string }>(gm, "gm:stopBuild", {});
+    expect(stop.ok).toBe(true);
+    expect(stop.phase).toBe("SCORING");
+
+    // Player copy: ANONYMOUS cards + which card is their own team's — never
+    // a teamId (the card↔team mapping must not reach players).
+    const alexCopy = await alexStarted;
+    const samCopy = await samStarted;
+    expect(alexCopy.cards).toHaveLength(3);
+    expect(alexCopy.cards.map((c) => c.label)).toEqual(["Card A", "Card B", "Card C"]);
+    for (const c of alexCopy.cards) {
+      expect(typeof c.cardId).toBe("string");
+      expect(c).not.toHaveProperty("teamId");
+    }
+    expect(typeof alexCopy.yourTeamCardId).toBe("string");
+    expect(alexCopy.cards.some((c) => c.cardId === alexCopy.yourTeamCardId)).toBe(true);
+    // Each team's "your card" pointer differs (3 distinct teams → distinct cards).
+    expect(typeof samCopy.yourTeamCardId).toBe("string");
+    expect(samCopy.yourTeamCardId).not.toBe(alexCopy.yourTeamCardId);
+
+    // GM copy: the full card→team mapping (moderation / judge console).
+    const gmCopy = await gmStarted;
+    expect(gmCopy.cards).toHaveLength(3);
+    for (const c of gmCopy.cards) expect(typeof c.teamId).toBe("string");
+    expect(new Set(gmCopy.cards.map((c) => c.teamId))).toEqual(
+      new Set((await repo.listTeams(gameId)).map((t) => t.id)),
+    );
+
+    const ownCardA = gmCopy.cards.find((c) => c.teamId === teamAId)!.cardId;
+    const cardB = gmCopy.cards.find((c) => c.teamId === teamBId)!.cardId;
+
+    // score:submit (ok) → GM receives anonymous scores:update.
+    const scoresPromise = waitFor<{ cards: Array<Record<string, unknown>> }>(gm, "scores:update");
+    const submit = await emitAck<{ ok: boolean; cardId?: string; score?: number }>(
+      alex,
+      "score:submit",
+      { cardId: cardB, score: 7 },
+    );
+    expect(submit.ok).toBe(true);
+    const scores = await scoresPromise;
+    expect(scores.cards).toHaveLength(1);
+    expect(scores.cards[0]).toEqual({ cardId: cardB, avg: 7, count: 1 });
+    expect(scores.cards[0]).not.toHaveProperty("teamId"); // NEVER leak the mapping
+
+    // Self-vote refused (own_card).
+    const selfAck = await emitAck<{ ok: boolean; error?: string; code?: string; reason?: string }>(
+      alex,
+      "score:submit",
+      { cardId: ownCardA, score: 9 },
+    );
+    expect(selfAck.ok).toBe(false);
+    expect(selfAck.reason ?? selfAck.code).toBe("own_card");
+
+    // Re-submission refused (already_rated).
+    const again = await emitAck<{ ok: boolean; error?: string; code?: string; reason?: string }>(
+      alex,
+      "score:submit",
+      { cardId: cardB, score: 3 },
+    );
+    expect(again.ok).toBe(false);
+    expect(again.reason ?? again.code).toBe("already_rated");
+
+    // Player resync: sync:full carries the ANONYMOUS scoring shape +
+    // cardId-keyed myScores (teamId mapping resolved SERVER-side).
+    const resynced = new Promise<SyncFullEvent>((resolve) => alex.once("sync:full", resolve));
+    await emitAck(alex, "sync:resync", {});
+    const raw = await resynced;
+    const scoring = raw.scoring as {
+      round: number;
+      cards: Array<Record<string, unknown>>;
+      yourTeamCardId?: string;
+    };
+    expect(scoring.round).toBe(1);
+    expect(scoring.cards).toHaveLength(3);
+    for (const c of scoring.cards) expect(c).not.toHaveProperty("teamId");
+    expect(scoring.yourTeamCardId).toBe(alexCopy.yourTeamCardId);
+    expect(raw.myScores).toEqual([{ cardId: cardB, value: 7 }]);
+
+    // GM resync: ratedX/ratedY progress + the team mapping.
+    const gmResynced = new Promise<SyncFullEvent>((resolve) => gm.once("sync:full", resolve));
+    await emitAck(gm, "sync:resync", {});
+    const gmRaw = await gmResynced;
+    const gmScoring = gmRaw.scoring as {
+      round: number;
+      cards: Array<{ cardId: string; teamId: string }>;
+      ratedX: number;
+      ratedY: number;
+    };
+    expect(gmScoring.ratedX).toBe(1);
+    expect(gmScoring.ratedY).toBe(4); // 2 active players × (3 teams − 1)
+    expect(new Set(gmScoring.cards.map((c) => c.teamId))).toEqual(
+      new Set(gmCopy.cards.map((c) => c.teamId)),
+    );
+
+    // The client reducer accepts the new shapes (players see anonymous cards
+    // + their own card; the mapping stays server-side).
+    const snap = normalizeSyncFull(raw, {}, alexAck.identity.playerId);
+    expect(snap.scoring?.cards.every((c) => !("teamId" in c))).toBe(true);
+    expect(snap.scoring?.yourTeamCardId).toBe(alexCopy.yourTeamCardId);
+    expect(snap.myScores[cardB]).toBe(7);
+
+    // JUDGING: GM picks team A as winner (People's Choice resolves to the
+    // only scored team, B). winnerAnnounced carries the public standings.
+    const winnerPromise = waitFor<{
+      winnerTeamId?: string;
+      label?: string | null;
+      standings?: Array<{ teamId: string; label: string; cardId: string; avg: number; count: number }>;
+      peoplesChoiceTeamId?: string;
+    }>(alex, "winnerAnnounced");
+    const pick = await emitAck<{ ok: boolean; phase?: string; peoplesChoiceTeamId?: string | null }>(
+      gm,
+      "judging:winner",
+      { teamId: teamAId },
+    );
+    expect(pick.ok).toBe(true);
+    expect(pick.phase).toBe("REVEAL");
+    expect(pick.peoplesChoiceTeamId).toBe(teamBId);
+
+    const announced = await winnerPromise;
+    expect(announced.winnerTeamId).toBe(teamAId);
+    expect(announced.standings).toEqual([
+      { teamId: teamBId, label: "B", cardId: cardB, avg: 7, count: 1 },
+    ]);
+    expect(announced.peoplesChoiceTeamId).toBe(teamBId);
+
+    // REVEAL → RESULTS via reveal:ack (done PROMPTLY: pickWinner armed a real
+    // 30s auto-expire timer; srv.close() → hub.shutdown() clears it anyway).
+    const reveal = await emitAck<{ ok: boolean; phase?: string }>(gm, "reveal:ack", {});
+    expect(reveal.ok).toBe(true);
+    expect(reveal.phase).toBe("RESULTS");
+
+    alex.close();
+    sam.close();
+    gm.close();
+  });
+});

@@ -18,18 +18,25 @@ import type { Server, Socket } from "socket.io";
 import type { StyleDerivation } from "@cardcrafters/shared";
 import {
   MAX_PROMPT_WORDS,
+  PHASE,
   canSubmit,
   gmApproveGreetingsSchema,
   gmKickSchema,
   gmRegenGreetingSchema,
   gmSetThemeSchema,
+  gmStopBuildSchema,
+  gmStopScoringSchema,
   gmUpdateGreetingSchema,
   joinSchema,
+  judgePickSchema,
   promptSubmitSchema,
+  revealAckSchema,
+  scoreSubmitSchema,
 } from "@cardcrafters/shared";
 
 import type { AiRouter } from "../ai/router";
 import { regenerateGreeting } from "../flows/greetings";
+import { pickPeoplesChoice, submitScore } from "../flows/scoring";
 import { deriveGameStyle } from "../flows/style";
 import { createItemImageHandler, type ItemImageEmit } from "../flows/item-image";
 import {
@@ -174,7 +181,30 @@ export interface SyncFullPayload extends Record<string, unknown> {
     /** Current-round greeting (empty text + null status until generated). */
     greeting: { text: string; status: string | null };
   }>;
-  myScores?: Array<{ targetTeamId: string; value: number }>;
+  myScores?: Array<{ cardId: string; value: number }>;
+  /**
+   * Per-card anonymous running tallies ({cardId, avg, count}) — GM snapshots
+   * only, so the judging table survives a refresh (live tallies otherwise
+   * ride on scores:update, which stops once scoring locks at JUDGING).
+   * Never carries teamId in the tallies — the card→team mapping stays in
+   * `scoring.cards`.
+   */
+  scores?: Array<{ cardId: string; avg: number; count: number }>;
+  /**
+   * Scoring-order snapshot for the current round — audience-dependent:
+   *  - GM: `cards` carry the card→team mapping plus ratedX (scores cast so
+   *    far) and ratedY (total expected = activePlayers × (teams − 1));
+   *  - players: ANONYMOUS cards + their own team's cardId;
+   *  - presenter: ANONYMOUS cards only (no teamId, no yourTeamCardId).
+   * Absent when no scoring order exists for the current round.
+   */
+  scoring?: {
+    round: number;
+    cards: Array<{ cardId: string; label: string; teamId?: string }>;
+    yourTeamCardId?: string;
+    ratedX?: number;
+    ratedY?: number;
+  };
 }
 
 /**
@@ -244,12 +274,58 @@ export async function buildSyncFull(
     });
   }
 
-  let myScores: Array<{ targetTeamId: string; value: number }> | undefined;
-  if (identity?.role === "player") {
-    const scores = await repo.listScores(gameId, round);
-    myScores = scores
-      .filter((s) => s.voterPlayerId === identity.playerId)
-      .map((s) => ({ targetTeamId: s.targetTeamId, value: s.value }));
+  let myScores: Array<{ cardId: string; value: number }> | undefined;
+  let gmScores: Array<{ cardId: string; avg: number; count: number }> | undefined;
+  let scoring: SyncFullPayload["scoring"];
+
+  // Scoring section — present only when a scoring order exists for the
+  // CURRENT round (stale orders from previous rounds are ignored).
+  const gameRow = await repo.getGame(gameId);
+  const order = gameRow?.scoringOrder;
+  if (order && order.round === round) {
+    if (identity?.role === "gm") {
+      // GM: the full card→team mapping plus progress (ratedX / ratedY) and
+      // the anonymous per-card tallies (the judging console must survive a
+      // refresh — scores:update stops once scoring locks at JUDGING).
+      const scores = await repo.listScores(gameId, round);
+      const aggregates = await repo.aggregateScores(gameId, round);
+      const cardByTeam = new Map(order.cards.map((c) => [c.teamId, c.cardId]));
+      gmScores = aggregates.flatMap((a) => {
+        const cardId = cardByTeam.get(a.targetTeamId);
+        return cardId ? [{ cardId, avg: Math.round(a.avg * 100) / 100, count: a.count }] : [];
+      });
+      const activePlayers = teamSnapshots.reduce((n, t) => n + t.memberCount, 0);
+      scoring = {
+        round,
+        cards: order.cards.map((c) => ({ cardId: c.cardId, label: c.label, teamId: c.teamId })),
+        ratedX: scores.length,
+        ratedY: activePlayers * Math.max(0, teams.length - 1),
+      };
+    } else if (identity?.role === "player") {
+      // Players: anonymous cards + which card is THEIR OWN team's.
+      scoring = {
+        round,
+        cards: order.cards.map((c) => ({ cardId: c.cardId, label: c.label })),
+        yourTeamCardId: order.cards.find((c) => c.teamId === identity.teamId)?.cardId,
+      };
+      // myScores are cardId-keyed for the client — the targetTeamId→cardId
+      // mapping happens HERE, server-side, so the raw team id never reaches
+      // the player's snapshot.
+      const cardByTeam = new Map(order.cards.map((c) => [c.teamId, c.cardId]));
+      const scores = await repo.listScores(gameId, round);
+      myScores = scores
+        .filter((s) => s.voterPlayerId === identity.playerId)
+        .flatMap((s) => {
+          const cardId = cardByTeam.get(s.targetTeamId);
+          return cardId ? [{ cardId, value: s.value }] : [];
+        });
+    } else {
+      // Presenter (and any unknown identity): anonymous cards only.
+      scoring = {
+        round,
+        cards: order.cards.map((c) => ({ cardId: c.cardId, label: c.label })),
+      };
+    }
   }
 
   return {
@@ -266,6 +342,8 @@ export async function buildSyncFull(
     serverNow: Date.now(),
     teams: teamSnapshots,
     myScores,
+    ...(gmScores ? { scores: gmScores } : {}),
+    scoring,
   };
 }
 
@@ -781,6 +859,189 @@ export function registerSocketHandlers(
         });
       } catch (err) {
         ackFail(ack, "regen_failed", err instanceof Error ? err.message : "regen failed");
+      }
+    });
+
+    // ---------------------------------------------------------------------
+    // gm:stopBuild — GM ends BUILD early → SCORING (cutoff + scoring order +
+    // scoring:started broadcast happen inside the hub's beginScoring effect).
+    // ---------------------------------------------------------------------
+    socket.on("gm:stopBuild", async (raw: unknown, ack?: unknown) => {
+      const identity = data.identity;
+      if (!identity || identity.role !== "gm") {
+        ackFail(ack, "forbidden", "GM only");
+        return;
+      }
+      const parsed = gmStopBuildSchema.safeParse(raw ?? {});
+      if (!parsed.success) {
+        ackFail(ack, "invalid_payload", "invalid stopBuild payload");
+        return;
+      }
+      try {
+        const result = await hub.applyEvent(identity.gameId, {
+          type: "gm:stopBuild",
+          now: Date.now(),
+        });
+        if (result.ok) ackOk(ack, { phase: result.state.phase });
+        else ackFailReason(ack, "rejected", result.reason, result.reason);
+      } catch (err) {
+        ackFail(ack, "stop_build_failed", err instanceof Error ? err.message : "stopBuild failed");
+      }
+    });
+
+    // ---------------------------------------------------------------------
+    // gm:stopScoring — GM ends SCORING early → JUDGING (scores lock at
+    // entry; the round's Score rows become read-only).
+    // ---------------------------------------------------------------------
+    socket.on("gm:stopScoring", async (raw: unknown, ack?: unknown) => {
+      const identity = data.identity;
+      if (!identity || identity.role !== "gm") {
+        ackFail(ack, "forbidden", "GM only");
+        return;
+      }
+      const parsed = gmStopScoringSchema.safeParse(raw ?? {});
+      if (!parsed.success) {
+        ackFail(ack, "invalid_payload", "invalid stopScoring payload");
+        return;
+      }
+      try {
+        const result = await hub.applyEvent(identity.gameId, {
+          type: "gm:stopScoring",
+          now: Date.now(),
+        });
+        if (result.ok) ackOk(ack, { phase: result.state.phase });
+        else ackFailReason(ack, "rejected", result.reason, result.reason);
+      } catch (err) {
+        ackFail(ack, "stop_scoring_failed", err instanceof Error ? err.message : "stopScoring failed");
+      }
+    });
+
+    // ---------------------------------------------------------------------
+    // score:submit — player rates ONE anonymous card. The flow (flows/scoring
+    // .ts) owns ALL guards (phase → kicked → card resolution → own-card →
+    // duplicate → lock); the ack carries the machine-readable stage as both
+    // `code` and `reason` so clients can show the right message.
+    // ---------------------------------------------------------------------
+    socket.on("score:submit", async (raw: unknown, ack?: unknown) => {
+      const identity = data.identity;
+      if (!identity || identity.role !== "player") {
+        ackFail(ack, "not_joined", "join as a player first");
+        return;
+      }
+      const parsed = scoreSubmitSchema.safeParse(raw);
+      if (!parsed.success) {
+        ackFail(ack, "invalid_payload", "invalid score payload");
+        return;
+      }
+      // Kicked players must not be able to mutate the game even if their
+      // socket survived (or re-connected before eviction) — the flow re-checks
+      // this too, but the cheap check here keeps the ack uniform.
+      if (await hub.isKicked(identity.playerId)) {
+        ackFailReason(ack, "kicked", "you were removed from this game", "kicked");
+        return;
+      }
+      try {
+        const result = await submitScore(
+          { hub, repo },
+          {
+            gameId: identity.gameId,
+            playerId: identity.playerId,
+            cardId: parsed.data.cardId,
+            score: parsed.data.score,
+          },
+        );
+        if (result.ok) {
+          ackOk(ack, { cardId: parsed.data.cardId, score: parsed.data.score });
+        } else {
+          ackFailReason(ack, result.stage, result.error, result.stage);
+        }
+      } catch (err) {
+        ackFail(ack, "score_failed", err instanceof Error ? err.message : "score submit failed");
+      }
+    });
+
+    // ---------------------------------------------------------------------
+    // judging:winner — GM picks the winning team. The People's Choice is
+    // computed SERVER-SIDE from the round's aggregates (avg desc → count
+    // desc → label asc) so the client cannot spoof it. Both picks are
+    // persisted + broadcast by the hub's announceWinner effect.
+    // ---------------------------------------------------------------------
+    socket.on("judging:winner", async (raw: unknown, ack?: unknown) => {
+      const identity = data.identity;
+      if (!identity || identity.role !== "gm") {
+        ackFail(ack, "forbidden", "GM only");
+        return;
+      }
+      const parsed = judgePickSchema.safeParse(raw);
+      if (!parsed.success) {
+        ackFail(ack, "invalid_payload", "invalid winner pick payload");
+        return;
+      }
+      try {
+        // Own-game-only: the picked team must belong to THIS game.
+        const teams = await repo.listTeams(identity.gameId);
+        if (!teams.some((t) => t.id === parsed.data.teamId)) {
+          ackFailReason(ack, "team_mismatch", "team belongs to a different game", "wrong_game");
+          return;
+        }
+        const state = await hub.runtimeState(identity.gameId);
+        // JUDGING convenience: picking a winner straight from SCORING is
+        // valid — the machine requires JUDGING for gm:pickWinner, so the
+        // handler bridges by ending SCORING first (scores lock at JUDGING
+        // entry; players get the phaseChanged broadcast). From JUDGING this
+        // is a no-op.
+        if (state.phase === PHASE.SCORING) {
+          const stop = await hub.applyEvent(identity.gameId, {
+            type: "gm:stopScoring",
+            now: Date.now(),
+          });
+          if (!stop.ok) {
+            ackFailReason(ack, "rejected", stop.reason, stop.reason);
+            return;
+          }
+        }
+        const peoplesChoice = pickPeoplesChoice(
+          await repo.aggregateScores(identity.gameId, state.round),
+          teams,
+        );
+        const result = await hub.applyEvent(identity.gameId, {
+          type: "gm:pickWinner",
+          teamId: parsed.data.teamId,
+          ...(peoplesChoice ? { peoplesChoiceTeamId: peoplesChoice.id } : {}),
+          now: Date.now(),
+        });
+        if (result.ok) {
+          ackOk(ack, { phase: result.state.phase, peoplesChoiceTeamId: peoplesChoice?.id ?? null });
+        } else ackFailReason(ack, "rejected", result.reason, result.reason);
+      } catch (err) {
+        ackFail(ack, "pick_winner_failed", err instanceof Error ? err.message : "pickWinner failed");
+      }
+    });
+
+    // ---------------------------------------------------------------------
+    // reveal:ack — GM OR presenter acknowledges the reveal → RESULTS (also
+    // clears the hub's 30s REVEAL auto-expiry timer).
+    // ---------------------------------------------------------------------
+    socket.on("reveal:ack", async (raw: unknown, ack?: unknown) => {
+      const identity = data.identity;
+      if (!identity || identity.role === "player") {
+        ackFail(ack, "forbidden", "GM or presenter only");
+        return;
+      }
+      const parsed = revealAckSchema.safeParse(raw ?? {});
+      if (!parsed.success) {
+        ackFail(ack, "invalid_payload", "invalid reveal ack payload");
+        return;
+      }
+      try {
+        const result = await hub.applyEvent(identity.gameId, {
+          type: "reveal:ack",
+          now: Date.now(),
+        });
+        if (result.ok) ackOk(ack, { phase: result.state.phase });
+        else ackFailReason(ack, "rejected", result.reason, result.reason);
+      } catch (err) {
+        ackFail(ack, "reveal_ack_failed", err instanceof Error ? err.message : "reveal ack failed");
       }
     });
 

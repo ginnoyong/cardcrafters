@@ -201,13 +201,23 @@ export const promptSubmitSchema = z
   .strict();
 export type PromptSubmitPayload = z.infer<typeof promptSubmitSchema>;
 
+/**
+ * Player rates one ANONYMOUS card: {cardId, score} — the client only knows
+ * the shuffled card ids ("Card A"…), never team ids (except its own card),
+ * so the server resolves cardId → target team (see flows/scoring.ts).
+ */
 export const scoreSubmitSchema = z
   .object({
-    label: z.string().min(1),
-    value: z.number().int().min(1).max(10),
+    cardId: z.string().min(1),
+    score: z.number().int().min(1).max(10),
   })
   .strict();
 export type ScoreSubmitPayload = z.infer<typeof scoreSubmitSchema>;
+
+/** GM ends BUILD early → SCORING ("Start scoring" button). */
+export const gmStopBuildSchema = z.object({}).strict();
+/** GM ends SCORING early → JUDGING ("Go to judging" button). */
+export const gmStopScoringSchema = z.object({}).strict();
 
 export const gmRemoveItemSchema = z.object({ itemId: z.string().min(1) }).strict();
 export const gmKickSchema = z.object({ playerId: z.string().min(1) }).strict();

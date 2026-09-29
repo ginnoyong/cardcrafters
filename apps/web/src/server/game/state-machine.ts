@@ -10,7 +10,12 @@
  *   LOBBY → GREETINGS → BUILD → SCORING → JUDGING → REVEAL → RESULTS → GREETINGS (round+1)
  */
 
-import { PHASE, type CardConfig, type Phase } from "@cardcrafters/shared";
+import {
+  PHASE,
+  REVEAL_AUTO_EXPIRE_SECONDS,
+  type CardConfig,
+  type Phase,
+} from "@cardcrafters/shared";
 
 import type { Effect, GameEvent, GameRuntimeState, TransitionResult } from "./types";
 
@@ -66,6 +71,7 @@ function endBuild(
       cutoffAt,
       serverNow: now,
     }),
+    { type: "beginScoring" },
   );
   if (phaseEndsAt !== undefined) {
     effects.push({ type: "startTimer", phase: PHASE.SCORING, endsAt: phaseEndsAt });
@@ -179,7 +185,23 @@ export function transition(
         }
         return endScoring(state, event.now);
       }
-      return { ok: false, reason: `timer:expired is only valid in BUILD or SCORING (current: ${state.phase})` };
+      if (state.phase === PHASE.REVEAL) {
+        // Hub-armed REVEAL auto-expiry (30s) — identical outcome to
+        // reveal:auto-expired: RESULTS with the timer cleared.
+        if (event.phase !== state.phase) {
+          return { ok: false, reason: "timer:expired for a phase other than the current one" };
+        }
+        const next = nextState(state, { phase: PHASE.RESULTS, phaseEndsAt: undefined });
+        return {
+          ok: true,
+          state: next,
+          effects: [
+            phaseChangedEmit(state.gameId, { phase: PHASE.RESULTS, round: state.round, serverNow: event.now }),
+            { type: "clearTimer" },
+          ],
+        };
+      }
+      return { ok: false, reason: `timer:expired is only valid in BUILD, SCORING or REVEAL (current: ${state.phase})` };
     }
 
     // ---------------------------------------------------------------------
@@ -200,9 +222,13 @@ export function transition(
       if (state.phase !== PHASE.JUDGING) {
         return { ok: false, reason: `gm:pickWinner is only valid in JUDGING (current: ${state.phase})` };
       }
+      // REVEAL auto-expires after REVEAL_AUTO_EXPIRE_SECONDS (hub-armed):
+      // phaseEndsAt is persisted so hydrateTimers recovers the countdown after
+      // a server restart; the explicit reveal:ack path clears the timer.
+      const phaseEndsAt = timerEndsAt(REVEAL_AUTO_EXPIRE_SECONDS, event.now);
       const next = nextState(state, {
         phase: PHASE.REVEAL,
-        phaseEndsAt: undefined,
+        phaseEndsAt,
         winnerTeamId: event.teamId,
         peoplesChoiceTeamId: event.peoplesChoiceTeamId,
       });
@@ -213,18 +239,24 @@ export function transition(
           ? { peoplesChoiceTeamId: event.peoplesChoiceTeamId }
           : {}),
       };
-      return {
-        ok: true,
-        state: next,
-        effects: [
-          winnerEffect,
-          phaseChangedEmit(state.gameId, { phase: PHASE.REVEAL, round: state.round, serverNow: event.now }),
-        ],
-      };
+      const effects: Effect[] = [
+        winnerEffect,
+        phaseChangedEmit(state.gameId, {
+          phase: PHASE.REVEAL,
+          round: state.round,
+          phaseEndsAt,
+          serverNow: event.now,
+        }),
+      ];
+      if (phaseEndsAt !== undefined) {
+        effects.push({ type: "startTimer", phase: PHASE.REVEAL, endsAt: phaseEndsAt });
+      }
+      return { ok: true, state: next, effects };
     }
 
     // ---------------------------------------------------------------------
-    // REVEAL → RESULTS (presenter ack or 30s auto-expiry driven by the hub).
+    // REVEAL → RESULTS (presenter ack, the hub's 30s auto-expiry timer, or
+    // a recovered timer:expired after a restart — all share one branch).
     // ---------------------------------------------------------------------
     case "reveal:ack":
     case "reveal:auto-expired": {
@@ -237,6 +269,7 @@ export function transition(
         state: next,
         effects: [
           phaseChangedEmit(state.gameId, { phase: PHASE.RESULTS, round: state.round, serverNow: event.now }),
+          { type: "clearTimer" },
         ],
       };
     }
@@ -266,6 +299,8 @@ export function transition(
         effects: [
           { type: "incrementRound" },
           phaseChangedEmit(state.gameId, { phase: PHASE.GREETINGS, round, serverNow: event.now }),
+          // Any lingering REVEAL countdown is dead once the round restarts.
+          { type: "clearTimer" },
         ],
       };
     }

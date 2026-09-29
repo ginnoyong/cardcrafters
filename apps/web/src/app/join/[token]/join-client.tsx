@@ -34,13 +34,17 @@ import ActivityFeed from "@/components/player/ActivityFeed";
 import MySubmissions from "@/components/player/MySubmissions";
 import NoUndoNotice from "@/components/player/NoUndoNotice";
 import PromptBar, { createPromptBarHandle, type PromptBarHandle } from "@/components/player/PromptBar";
+import RatingPanel, { type ScoreSubmitOutcome } from "@/components/player/RatingPanel";
 import { selectMyItems } from "@/components/player/my-items";
+import { PeoplesChoiceBanner, StandingsList, WinnerBanner, teamLabel } from "@/components/Standings";
 import {
   createGameSocket,
   emitAck,
   friendlyJoinError,
+  friendlyScoreError,
   joinPayload,
   onEvent,
+  submitScoreAck,
   type AckResult,
 } from "@/lib/socket";
 import {
@@ -228,6 +232,21 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
       onEvent<Record<string, unknown>>(socket, "item:failed", (payload) =>
         dispatch({ type: "itemFailed", payload }),
       ),
+      // -------------------------------------------------------------------
+      // Scoring-phase events. scoring:started carries THIS round's anonymous
+      // card order + our own team's cardId (own-card guard); scores:update
+      // carries the live anonymous running averages; winnerAnnounced carries
+      // the GM's pick + public standings (REVEAL/RESULTS).
+      // -------------------------------------------------------------------
+      onEvent<Record<string, unknown>>(socket, "scoring:started", (payload) =>
+        dispatch({ type: "scoringStarted", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "scores:update", (payload) =>
+        dispatch({ type: "scoresUpdated", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "winnerAnnounced", (payload) =>
+        dispatch({ type: "winnerAnnounced", payload }),
+      ),
     );
 
     socket.connect();
@@ -265,25 +284,55 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
   // SCORING and the placeholder replaced the whole canvas).
   const locked =
     !!snapshot &&
-    [PHASE.SCORING, PHASE.JUDGING, PHASE.RESULTS].includes(
+    [PHASE.SCORING, PHASE.JUDGING, PHASE.REVEAL, PHASE.RESULTS].includes(
       snapshot.phase as (typeof PHASE)[keyof typeof PHASE],
     );
+  // Scoring-phase surfaces: RatingPanel needs the anonymous card order (it
+  // rides on scoring:started AND sync:full, so it is present even after a
+  // refresh); JUDGING keeps the rated summary + a "waiting" notice; REVEAL
+  // /RESULTS show the winner + standings. The SCORING guard is inlined at
+  // the JSX use site (see below) so TypeScript narrows snapshot.scoring.
+  const judging = snapshot?.phase === PHASE.JUDGING;
+  const revealing = snapshot?.phase === PHASE.REVEAL;
+  const results = snapshot?.phase === PHASE.RESULTS;
+  const winnerLabel =
+    teamLabel(snapshot?.teams ?? [], snapshot?.winnerTeamId) ||
+    snapshot?.standings.find((s) => s.teamId === snapshot.winnerTeamId)?.label ||
+    "";
+  const peoplesChoiceLabel =
+    teamLabel(snapshot?.teams ?? [], snapshot?.peoplesChoiceTeamId) ||
+    snapshot?.standings.find((s) => s.teamId === snapshot.peoplesChoiceTeamId)?.label ||
+    "";
+  // Rated summary for JUDGING ("Your ratings: Card B: 7 · Card C: 5").
+  const ratedSummary =
+    snapshot && Object.keys(snapshot.myScores).length > 0
+      ? Object.entries(snapshot.myScores)
+          .map(([cardId, value]) => {
+            const card = snapshot.scoring?.cards.find((c) => c.cardId === cardId);
+            return `${card?.label ?? "a card"}: ${value}`;
+          })
+          .join(" · ")
+      : null;
   const myItems = snapshot && team ? selectMyItems(snapshot, identity.teamId, identity.playerId) : [];
   // NO-UNDO notice: only before the player's FIRST accepted submission
   // (ledger empty) — NoUndoNotice itself also checks the localStorage ack.
   const noUndoNeeded = build && Object.keys(snapshot?.myItems ?? {}).length === 0;
 
-  // Build-phase countdown (mm:ss) — a 1s tick while a timer is running.
+  // The countdown ticks during BUILD and SCORING (the two timed phases that
+  // matter to players; REVEAL's 30s auto-expiry is presenter/GM business).
+  const timed = build || snapshot?.phase === PHASE.SCORING;
+
+  // Build/scoring countdown (mm:ss) — a 1s tick while a timer is running.
   const [now, setNow] = useState<number | null>(null);
   useEffect(() => {
-    if (!snapshot?.phaseEndsAt || !build) {
+    if (!snapshot?.phaseEndsAt || !timed) {
       setNow(null);
       return;
     }
     setNow(Date.now());
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
-  }, [snapshot?.phaseEndsAt, build]);
+  }, [snapshot?.phaseEndsAt, timed]);
   const remainingMs =
     now !== null && snapshot?.phaseEndsAt
       ? Math.max(0, snapshot.phaseEndsAt - now)
@@ -331,10 +380,43 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
     pendingPromptRef.current = promptRaw;
   }, []);
 
+  // FINAL score submit (RatingPanel): emit score:submit over the live socket,
+  // register the rating client-side on ok (myScoreSubmitted — the RatingPanel
+  // then auto-advances), and surface a plain-language rejection message on
+  // fail. Ratings are FINAL — no undo, no re-rating (the server refuses
+  // duplicates with already_rated).
+  const handleSubmitScore = useCallback(
+    async (cardId: string, value: number): Promise<ScoreSubmitOutcome> => {
+      const socket = activeSocketRef.current;
+      if (!socket) return { ok: false, error: "Not connected yet — please wait a moment." };
+      try {
+        const ack = await submitScoreAck(socket, cardId, value);
+        if (ack.ok) {
+          dispatch({ type: "myScoreSubmitted", cardId: ack.cardId, value: ack.score });
+          return { ok: true };
+        }
+        const reason = ack.reason ?? ack.code;
+        return { ok: false, reason, error: friendlyScoreError(reason) };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : "Something went wrong — please try again.",
+        };
+      }
+    },
+    [dispatch],
+  );
+
   return (
     <main className="cc-main">
       <header className="cc-header">
-        <h1>{build ? "Build the card!" : locked ? "Card complete!" : "Waiting to craft…"}</h1>
+        <h1>
+          {build
+            ? "Build the card!"
+            : locked && snapshot
+              ? phaseLabel(snapshot.phase)
+              : "Waiting to craft…"}
+        </h1>
         <ConnectionDot connected={connected} />
       </header>
       {error ? (
@@ -371,6 +453,47 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
 
               {noUndoNeeded ? <NoUndoNotice /> : null}
             </>
+          ) : snapshot.phase === PHASE.SCORING && snapshot.scoring ? (
+            // SCORING: the rating surface (browse cards, skip our own, 1–10
+            // FINAL ratings, live averages). The finished card stays visible
+            // above.
+            <RatingPanel
+              scoring={snapshot.scoring}
+              scores={snapshot.scores}
+              myScores={snapshot.myScores}
+              onSubmit={handleSubmitScore}
+              testId="player-rating-panel"
+            />
+          ) : judging ? (
+            // JUDGING: ratings are locked — keep the rated summary + the
+            // waiting notice; the card view above persists.
+            <section className="cc-card" aria-label="judging wait" role="status" data-testid="judging-wait">
+              <h3>Waiting for the game master</h3>
+              <p className="cc-hint">Ratings are locked — the host is picking the winner.</p>
+              {ratedSummary ? <p className="cc-hint">Your ratings: {ratedSummary}</p> : null}
+            </section>
+          ) : revealing || results ? (
+            // REVEAL/RESULTS: the winner ("The winner is…") + the public
+            // standings when the server has broadcast them.
+            <>
+              <WinnerBanner label={winnerLabel || "…"} testId="player-winner-banner" />
+              {results && peoplesChoiceLabel ? (
+                <PeoplesChoiceBanner label={peoplesChoiceLabel} testId="player-peoples-choice" />
+              ) : null}
+              {snapshot.standings.length > 0 ? (
+                <StandingsList
+                  standings={snapshot.standings}
+                  winnerTeamId={snapshot.winnerTeamId}
+                  peoplesChoiceTeamId={snapshot.peoplesChoiceTeamId}
+                  testId="player-standings"
+                />
+              ) : null}
+            </>
+          ) : snapshot?.phase === PHASE.SCORING ? (
+            <section className="cc-card" aria-label="scoring wait" role="status" data-testid="scoring-wait">
+              <h3>Getting the rating cards ready…</h3>
+              <p className="cc-hint">Rating opens in a moment.</p>
+            </section>
           ) : (
             <section className="cc-card" aria-label="build ended" role="status">
               <h3>Time's up — the host locked the cards</h3>

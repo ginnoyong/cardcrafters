@@ -34,8 +34,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import QRCode from "qrcode";
 
-import { LAYOUT_CRITIQUE_LOW_SCORE, MAX_TEAMS } from "@cardcrafters/shared";
+import { LAYOUT_CRITIQUE_LOW_SCORE, MAX_TEAMS, PHASE } from "@cardcrafters/shared";
 
+import { PeoplesChoiceBanner, StandingsList, WinnerBanner, teamLabel } from "@/components/Standings";
 import {
   createGameSocket,
   emitAck,
@@ -521,6 +522,21 @@ function Console({ game }: { game: CreatedGame }) {
       onEvent<Record<string, unknown>>(socket, "layout:critique", (payload) =>
         dispatch({ type: "critiqueReceived", payload }),
       ),
+      // -------------------------------------------------------------------
+      // Scoring-phase events. The GM's scoring:started carries the FULL
+      // card→team mapping (moderation duty); scores:update carries the
+      // anonymous running averages; winnerAnnounced carries the pick +
+      // public standings for the results banner.
+      // -------------------------------------------------------------------
+      onEvent<Record<string, unknown>>(socket, "scoring:started", (payload) =>
+        dispatch({ type: "scoringStarted", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "scores:update", (payload) =>
+        dispatch({ type: "scoresUpdated", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "winnerAnnounced", (payload) =>
+        dispatch({ type: "winnerAnnounced", payload }),
+      ),
     );
 
     socket.connect();
@@ -546,6 +562,59 @@ function Console({ game }: { game: CreatedGame }) {
   });
   const pendingTeams = teams.filter((t) => t.greetingText.trim().length === 0);
   const building = phase !== null && phase !== "GREETINGS" && phase !== "LOBBY";
+
+  // ---------------------------------------------------------------------
+  // Scoring/judging/results derived data. The GM's scoring.cards carry the
+  // card→team mapping (server-side only) — the chips/table below resolve
+  // team names through the snapshot's teams list. GM never votes; the GM
+  // judges.
+  // ---------------------------------------------------------------------
+  const scoringCards = snapshot?.scoring?.cards ?? [];
+  const scoringChips = scoringCards
+    .filter((c) => typeof c.teamId === "string")
+    .map((c) => {
+      const team = snapshot?.teams.find((t) => t.id === c.teamId);
+      const tally = snapshot?.scores[c.cardId];
+      return {
+        cardId: c.cardId,
+        cardLabel: c.label,
+        teamId: c.teamId!,
+        teamLabel: team?.label ?? c.teamId!,
+        teamName: team?.name ?? "",
+        avg: tally?.avg ?? null,
+        count: tally?.count ?? 0,
+      };
+    });
+  // Readiness: ratedX is live-computed from the tallies (every score:submit
+  // lands as scores:update); the sync snapshot's ratedX/ratedY is the
+  // refresh/resync fallback. ratedY = active players × (teams − 1).
+  const ratedLive = snapshot
+    ? Object.values(snapshot.scores).reduce((n, t) => n + t.count, 0)
+    : 0;
+  const ratedX = ratedLive || snapshot?.scoring?.ratedX || 0;
+  const ratedY = snapshot?.scoring?.ratedY ?? null;
+  // Judging table rows: sorted avg desc → count desc → label (unscored
+  // cards last). Same ordering the server uses for the public standings.
+  const judgingRows = scoringChips
+    .slice()
+    .sort((a, b) => {
+      const aAvg = a.avg ?? -1;
+      const bAvg = b.avg ?? -1;
+      if (aAvg !== bAvg) return bAvg - aAvg;
+      if (b.count !== a.count) return b.count - a.count;
+      return a.teamLabel.localeCompare(b.teamLabel);
+    });
+  // RESULTS banners: winner + People's Choice labels (snapshot teams first,
+  // the public standings' labels as the refresh fallback).
+  const winnerLabel =
+    teamLabel(snapshot?.teams ?? [], snapshot?.winnerTeamId) ||
+    snapshot?.standings.find((s) => s.teamId === snapshot.winnerTeamId)?.label ||
+    "";
+  const peoplesChoiceLabel =
+    teamLabel(snapshot?.teams ?? [], snapshot?.peoplesChoiceTeamId) ||
+    snapshot?.standings.find((s) => s.teamId === snapshot.peoplesChoiceTeamId)?.label ||
+    "";
+  const resultsStage = phase === PHASE.REVEAL || phase === PHASE.RESULTS;
 
   return (
     <div>
@@ -614,6 +683,116 @@ function Console({ game }: { game: CreatedGame }) {
             <p className="cc-hint">All greetings are ready — starting hands each team its card brief.</p>
           )}
         </section>
+      ) : null}
+
+      {/* BUILD: "Start scoring" next to the phase-timer badges — ends the
+          build early (gm:stopBuild) and opens anonymous player ratings. */}
+      {phase === PHASE.BUILD ? (
+        <section className="cc-start" aria-label="start scoring" data-testid="gm-start-scoring">
+          <button
+            type="button"
+            className="cc-btn cc-btn-primary cc-btn-start"
+            onClick={() => void gmAction("gm:stopBuild", {})}
+          >
+            Start scoring
+          </button>
+          <p className="cc-hint">
+            Ends building now — each player rates the other teams' cards from 1 to 10.
+          </p>
+        </section>
+      ) : null}
+
+      {/* SCORING: per-team live chips {team, avg, votes} + readiness + the
+          "Go to judging" control (gm:stopScoring locks the scores). */}
+      {phase === PHASE.SCORING && scoringChips.length > 0 ? (
+        <section className="cc-card cc-scoring-console" aria-label="scoring progress" data-testid="gm-scoring">
+          <h3>Rate the cards — live scores</h3>
+          <p className="cc-hint" aria-live="polite" data-testid="gm-scoring-progress">
+            {ratedY !== null ? `${ratedX} of ${ratedY} ratings in` : `${ratedX} ratings in`}
+          </p>
+          <ul className="cc-score-chips">
+            {scoringChips.map((chip) => (
+              <li key={chip.cardId} className="cc-score-chip" data-testid={`gm-score-chip-${chip.teamId}`}>
+                <span className="cc-score-chip-team">
+                  {chip.teamName || chip.teamLabel} <span className="cc-muted">({chip.cardLabel})</span>
+                </span>
+                <span className="cc-score-chip-score" aria-live="polite">
+                  {chip.avg !== null ? `${chip.avg} avg` : "no votes yet"} · {chip.count} vote
+                  {chip.count === 1 ? "" : "s"}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <div className="cc-btn-row">
+            <button
+              type="button"
+              className="cc-btn cc-btn-primary"
+              onClick={() => void gmAction("gm:stopScoring", {})}
+            >
+              Go to judging
+            </button>
+          </div>
+          <p className="cc-hint">Going to judging locks the scores — nobody can rate after that.</p>
+        </section>
+      ) : null}
+
+      {/* JUDGING: the judging table below the vertical team cards — sorted
+          avg desc → count desc → label, with a Pick winner button per row
+          (judging:winner; the server bridges SCORING→JUDGING if needed). */}
+      {phase === PHASE.JUDGING && judgingRows.length > 0 ? (
+        <section className="cc-card cc-judging" aria-label="judging table" data-testid="gm-judging">
+          <h3>Pick the winner</h3>
+          <p className="cc-hint">
+            Sorted by the players' scores. Your pick wins the round; the crowd's favourite is announced too.
+          </p>
+          <table className="cc-judging-table">
+            <thead>
+              <tr>
+                <th scope="col">Card</th>
+                <th scope="col">Team</th>
+                <th scope="col">Score</th>
+                <th scope="col">Votes</th>
+                <th scope="col">Winner</th>
+              </tr>
+            </thead>
+            <tbody>
+              {judgingRows.map((row) => (
+                <tr key={row.cardId} data-testid={`gm-judging-row-${row.teamId}`}>
+                  <td>{row.cardLabel}</td>
+                  <td>{row.teamName || row.teamLabel}</td>
+                  <td>{row.avg !== null ? row.avg : "—"}</td>
+                  <td>{row.count}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="cc-btn cc-btn-primary cc-btn-small"
+                      aria-label={`pick ${row.teamName || row.teamLabel} as the winner`}
+                      onClick={() => void gmAction("judging:winner", { teamId: row.teamId })}
+                    >
+                      Pick winner
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      ) : null}
+
+      {/* REVEAL/RESULTS: the winner banner + People's Choice + standings. */}
+      {resultsStage && snapshot?.winnerTeamId ? (
+        <>
+          <WinnerBanner label={winnerLabel || "…"} testId="gm-winner-banner" />
+          {peoplesChoiceLabel ? (
+            <PeoplesChoiceBanner label={peoplesChoiceLabel} testId="gm-peoples-choice" />
+          ) : null}
+          <StandingsList
+            standings={snapshot.standings}
+            winnerTeamId={snapshot.winnerTeamId}
+            peoplesChoiceTeamId={snapshot.peoplesChoiceTeamId}
+            testId="gm-standings"
+          />
+        </>
       ) : null}
 
       {/* Live previews: one read-only mini canvas per team. GREETINGS: the

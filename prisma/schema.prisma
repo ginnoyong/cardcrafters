@@ -48,6 +48,9 @@ model Game {
   theme       String?
   config      Json
   style       Json?
+  /** Anonymous scoring order for the current round:
+   *  { round, cards: [{cardId, label, teamId}] } — null until SCORING entry. */
+  scoringOrder Json?
   phaseEndsAt DateTime?
   cutoffAt    DateTime?
   createdAt   DateTime    @default(now())

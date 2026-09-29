@@ -11,7 +11,13 @@
  */
 
 import { PrismaClient, Prisma } from "@prisma/client";
-import type { CardConfig, ContentBox, GreetingStyle, ItemStatus, Placement ,
+import type {
+  CardConfig,
+  ContentBox,
+  GreetingStyle,
+  ItemStatus,
+  Placement,
+  ScoringOrder,
   StyleDerivation,
 } from "@cardcrafters/shared";
 
@@ -140,6 +146,12 @@ export class PrismaRepo implements Repository {
               : patch.style === null
                 ? Prisma.DbNull
                 : (patch.style as unknown as Prisma.InputJsonValue),
+          scoringOrder:
+            patch.scoringOrder === undefined
+              ? undefined
+              : patch.scoringOrder === null
+                ? Prisma.DbNull
+                : (patch.scoringOrder as unknown as Prisma.InputJsonValue),
           phaseEndsAt: patch.phaseEndsAt === undefined ? undefined : patch.phaseEndsAt === null ? null : new Date(patch.phaseEndsAt),
           cutoffAt: patch.cutoffAt === undefined ? undefined : patch.cutoffAt === null ? null : new Date(patch.cutoffAt),
         },
@@ -158,6 +170,7 @@ export class PrismaRepo implements Repository {
     theme: string | null;
     config: unknown;
     style: unknown;
+    scoringOrder: unknown;
     phaseEndsAt: Date | null;
     cutoffAt: Date | null;
     createdAt: Date;
@@ -170,6 +183,7 @@ export class PrismaRepo implements Repository {
       theme: g.theme,
       config: g.config as CardConfig,
       style: (g.style as StyleDerivation | null) ?? null,
+      scoringOrder: (g.scoringOrder as ScoringOrder | null) ?? null,
       phaseEndsAt: ms(g.phaseEndsAt),
       cutoffAt: ms(g.cutoffAt),
       createdAt: g.createdAt.getTime(),

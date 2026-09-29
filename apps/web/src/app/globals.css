@@ -746,6 +746,246 @@ label {
   font-weight: 700;
 }
 
+/* --- Scoring / results (RatingPanel, GM console, presenter board) --------
+
+Same design system: card fills, hairline color-mix borders, var(--radius),
+plain-language typography. Ratings are large/touch-friendly (two rows of
+five on phones, ten across on wide screens); transitions are subtle only —
+no animations requiring sound. */
+
+/* Rating panel (player scoring surface — already a cc-card). */
+.cc-rating {
+  gap: 0.75rem;
+}
+
+/* Head row: prev · card title · next. */
+.cc-rating-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.cc-rating-head h3 {
+  margin: 0;
+  flex: 1;
+  text-align: center;
+}
+
+/* Confirm affordance: an emphasised inner block before the FINAL submit. */
+.cc-rating-confirm {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-elevated));
+}
+
+.cc-rating-confirm p {
+  margin: 0;
+}
+
+/* TEN large rate buttons: two rows of five on phones, ten across on wide
+   screens. ≥56px tall — comfortably over the 44px tap target. */
+.cc-rating-buttons {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0.5rem;
+}
+
+@media (min-width: 720px) {
+  .cc-rating-buttons {
+    grid-template-columns: repeat(10, 1fr);
+  }
+}
+
+.cc-btn-rate {
+  min-height: 56px;
+  font-size: 1.25rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.cc-btn-rate.is-pending {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: #1c0d14;
+}
+
+/* The big "The winner is… 🏆" banner (REVEAL/RESULTS, GM + presenter). */
+.cc-winner-banner {
+  text-align: center;
+  gap: 0.25rem;
+  padding: 1.5rem 1rem;
+  border-color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent-strong) 14%, var(--bg-card));
+}
+
+.cc-winner-kicker {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+}
+
+.cc-winner-name {
+  margin: 0;
+  font-size: 2.5rem;
+  font-weight: 800;
+  line-height: 1.15;
+  color: var(--accent-strong);
+}
+
+/* People's Choice banner — the same family, one step down in size. */
+.cc-peoples-choice {
+  text-align: center;
+  gap: 0.25rem;
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.cc-peoples-name {
+  font-size: 1.75rem;
+  font-weight: 700;
+}
+
+/* Public standings table (REVEAL/RESULTS; GM + presenter + players). */
+.cc-standings-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.cc-standings-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: var(--tap);
+  padding: 0.25rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--text-muted) 30%, transparent);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+}
+
+.cc-standings-list li.is-winner {
+  border-color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent-strong) 16%, var(--bg-elevated));
+}
+
+.cc-standings-list li.is-peoples-choice {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.cc-standings-rank {
+  color: var(--text-muted);
+  min-width: 1.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.cc-standings-label {
+  flex: 1 1 auto;
+  font-weight: 600;
+}
+
+.cc-standings-score {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Live score chips (GM scoring console + presenter anonymous scoreboard). */
+.cc-score-chips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 720px) {
+  .cc-score-chips {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.cc-score-chip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem 0.75rem;
+  min-height: var(--tap);
+  padding: 0.25rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--text-muted) 30%, transparent);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+}
+
+.cc-score-chip-team {
+  font-weight: 600;
+}
+
+.cc-score-chip-score {
+  color: var(--accent-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+/* GM scoring console + judging table. */
+.cc-scoring-console,
+.cc-judging {
+  gap: 0.75rem;
+}
+
+.cc-scoring-console h3,
+.cc-judging h3 {
+  margin: 0;
+}
+
+.cc-judging {
+  overflow-x: auto; /* narrow hosts scroll the table, nothing is cut */
+}
+
+.cc-judging-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.cc-judging-table th,
+.cc-judging-table td {
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--text-muted) 25%, transparent);
+}
+
+.cc-judging-table th {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.cc-judging-table th:last-child,
+.cc-judging-table td:last-child {
+  text-align: right;
+}
+
+/* Presenter REVEAL block: the big winner banner + the Show results button. */
+.cc-reveal {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.cc-reveal-actions {
+  justify-content: center;
+}
+
 /* --- Print: one big QR card per team ------------------------------------ */
 
 @media print {

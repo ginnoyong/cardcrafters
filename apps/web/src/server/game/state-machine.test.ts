@@ -79,12 +79,20 @@ describe("happy path: full round LOBBY → RESULTS → GREETINGS (round 2)", () 
     expect(state.phase).toBe(PHASE.SCORING);
     expect(state.cutoffAt).toBe(stopAt);
     expect(state.phaseEndsAt).toBe(stopAt + config.scoringTimerSeconds! * 1000);
-    expect(effectTypes(r.effects)).toEqual(["setCutoff", "emit", "startTimer"]);
+    expect(effectTypes(r.effects)).toEqual(["setCutoff", "emit", "beginScoring", "startTimer"]);
     expect(r.effects[0]).toEqual({ type: "setCutoff", at: stopAt });
     expect(emitOf(r.effects).payload).toMatchObject({
       phase: PHASE.SCORING,
       cutoffAt: stopAt,
       serverNow: stopAt,
+    });
+    // beginScoring tells the hub to build the anonymous scoring order and
+    // emit scoring:started (per player + GM copy).
+    expect(r.effects[2]).toEqual({ type: "beginScoring" });
+    expect(r.effects[3]).toEqual({
+      type: "startTimer",
+      phase: PHASE.SCORING,
+      endsAt: stopAt + config.scoringTimerSeconds! * 1000,
     });
   });
 
@@ -114,8 +122,17 @@ describe("happy path: full round LOBBY → RESULTS → GREETINGS (round 2)", () 
     expect(state.phase).toBe(PHASE.REVEAL);
     expect(state.winnerTeamId).toBe("team-a");
     expect(state.peoplesChoiceTeamId).toBe("team-b");
-    expect(effectTypes(r.effects)).toEqual(["announceWinner", "emit"]);
-    expect(emitOf(r.effects).payload).toMatchObject({ phase: PHASE.REVEAL, serverNow: NOW });
+    expect(effectTypes(r.effects)).toEqual(["announceWinner", "emit", "startTimer"]);
+    // REVEAL auto-expires: phaseEndsAt is NOW + REVEAL_AUTO_EXPIRE_SECONDS,
+    // persisted on the state AND included in the phaseChanged payload so the
+    // hub can arm the timer and clients can show the countdown.
+    expect(state.phaseEndsAt).toBe(NOW + 30_000);
+    expect(emitOf(r.effects).payload).toMatchObject({
+      phase: PHASE.REVEAL,
+      phaseEndsAt: NOW + 30_000,
+      serverNow: NOW,
+    });
+    expect(r.effects[2]).toEqual({ type: "startTimer", phase: PHASE.REVEAL, endsAt: NOW + 30_000 });
     // The announceWinner effect carries the picks for the hub to persist/broadcast.
     const winner = r.effects.find((e) => e.type === "announceWinner");
     expect(winner).toMatchObject({ type: "announceWinner", teamId: "team-a", peoplesChoiceTeamId: "team-b" });
@@ -127,7 +144,8 @@ describe("happy path: full round LOBBY → RESULTS → GREETINGS (round 2)", () 
     if (!r.ok) return;
     state = r.state;
     expect(state.phase).toBe(PHASE.RESULTS);
-    expect(effectTypes(r.effects)).toEqual(["emit"]);
+    expect(state.phaseEndsAt).toBeUndefined();
+    expect(effectTypes(r.effects)).toEqual(["emit", "clearTimer"]);
   });
 
   it("RESULTS + gm:newRound → GREETINGS round=2, round-scoped state cleared", () => {
@@ -143,7 +161,7 @@ describe("happy path: full round LOBBY → RESULTS → GREETINGS (round 2)", () 
     expect(state.scoresLocked).toBe(false);
     expect(state.winnerTeamId).toBeUndefined();
     expect(state.peoplesChoiceTeamId).toBeUndefined();
-    expect(effectTypes(r.effects)).toEqual(["incrementRound", "emit"]);
+    expect(effectTypes(r.effects)).toEqual(["incrementRound", "emit", "clearTimer"]);
     expect(emitOf(r.effects).payload).toMatchObject({ phase: PHASE.GREETINGS, round: 2, serverNow: NOW });
   });
 
@@ -165,7 +183,7 @@ describe("natural timer expiry paths", () => {
     if (!r.ok) return;
     expect(r.state.phase).toBe(PHASE.SCORING);
     expect(r.state.cutoffAt).toBeUndefined();
-    expect(effectTypes(r.effects)).toEqual(["emit", "startTimer"]);
+    expect(effectTypes(r.effects)).toEqual(["emit", "beginScoring", "startTimer"]);
   });
 
   it("SCORING + timer:expired → JUDGING", () => {
@@ -202,7 +220,7 @@ describe("untimed config: no startTimer effects", () => {
     if (!scoring.ok) return;
     expect(scoring.state.phaseEndsAt).toBeUndefined();
     expect(scoring.state.cutoffAt).toBe(NOW);
-    expect(effectTypes(scoring.effects)).toEqual(["setCutoff", "emit"]);
+    expect(effectTypes(scoring.effects)).toEqual(["setCutoff", "emit", "beginScoring"]);
   });
 
   it("mixed config: untimed BUILD but timed SCORING — stopBuild arms only the scoring timer", () => {
@@ -220,17 +238,40 @@ describe("untimed config: no startTimer effects", () => {
     expect(scoring.ok).toBe(true);
     if (!scoring.ok) return;
     expect(scoring.state.phaseEndsAt).toBe(NOW + 120 * 1000);
-    expect(effectTypes(scoring.effects)).toEqual(["setCutoff", "emit", "startTimer"]);
+    expect(effectTypes(scoring.effects)).toEqual(["setCutoff", "emit", "beginScoring", "startTimer"]);
   });
 });
 
-describe("reveal:auto-expired (30s driver in the hub)", () => {
-  it("REVEAL + reveal:auto-expired → RESULTS", () => {
+describe("reveal:auto-expired + reveal timer expiry (30s driver in the hub)", () => {
+  it("REVEAL + reveal:auto-expired → RESULTS with the timer cleared", () => {
     const state = mkState({ phase: PHASE.REVEAL, winnerTeamId: "team-a" });
     const r = transition(state, { type: "reveal:auto-expired", now: NOW + 30_000 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.state.phase).toBe(PHASE.RESULTS);
+    expect(r.state.phaseEndsAt).toBeUndefined();
+    expect(effectTypes(r.effects)).toEqual(["emit", "clearTimer"]);
+  });
+
+  it("REVEAL + timer:expired → RESULTS with the timer cleared (recovered timer after restart)", () => {
+    const state = mkState({ phase: PHASE.REVEAL, winnerTeamId: "team-a", phaseEndsAt: NOW + 30_000 });
+    const r = transition(state, { type: "timer:expired", phase: PHASE.REVEAL, now: NOW + 30_000 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.state.phase).toBe(PHASE.RESULTS);
+    expect(r.state.phaseEndsAt).toBeUndefined();
+    expect(effectTypes(r.effects)).toEqual(["emit", "clearTimer"]);
+    expect(emitOf(r.effects).payload).toMatchObject({
+      phase: PHASE.RESULTS,
+      round: 1,
+      serverNow: NOW + 30_000,
+    });
+  });
+
+  it("timer:expired with a mismatched phase during REVEAL is rejected", () => {
+    const state = mkState({ phase: PHASE.REVEAL, winnerTeamId: "team-a" });
+    const r = transition(state, { type: "timer:expired", phase: PHASE.SCORING, now: NOW });
+    expect(r).toEqual({ ok: false, reason: expect.any(String) });
   });
 });
 

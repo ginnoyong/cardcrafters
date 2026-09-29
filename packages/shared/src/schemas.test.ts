@@ -5,6 +5,8 @@ import {
   gmKickSchema,
   gmRegenGreetingSchema,
   gmRemoveItemSchema,
+  gmStopBuildSchema,
+  gmStopScoringSchema,
   greetingVariationsSchema,
   joinSchema,
   judgePickSchema,
@@ -307,15 +309,16 @@ describe("promptSubmitSchema", () => {
 });
 
 describe("scoreSubmitSchema", () => {
-  const base = { label: "Team A" };
-  it("accepts values 1 and 10", () => {
-    expect(scoreSubmitSchema.parse({ ...base, value: 1 })).toEqual({ ...base, value: 1 });
-    expect(scoreSubmitSchema.parse({ ...base, value: 10 })).toEqual({ ...base, value: 10 });
+  const base = { cardId: "card-b" };
+  it("accepts scores 1 and 10", () => {
+    expect(scoreSubmitSchema.parse({ ...base, score: 1 })).toEqual({ ...base, score: 1 });
+    expect(scoreSubmitSchema.parse({ ...base, score: 10 })).toEqual({ ...base, score: 10 });
   });
-  it("rejects 0 and 11 and non-integers", () => {
-    expect(() => scoreSubmitSchema.parse({ ...base, value: 0 })).toThrow();
-    expect(() => scoreSubmitSchema.parse({ ...base, value: 11 })).toThrow();
-    expect(() => scoreSubmitSchema.parse({ ...base, value: 2.5 })).toThrow();
+  it("rejects 0, 11, non-integers and a missing cardId", () => {
+    expect(() => scoreSubmitSchema.parse({ ...base, score: 0 })).toThrow();
+    expect(() => scoreSubmitSchema.parse({ ...base, score: 11 })).toThrow();
+    expect(() => scoreSubmitSchema.parse({ ...base, score: 2.5 })).toThrow();
+    expect(() => scoreSubmitSchema.parse({ score: 5 })).toThrow();
   });
 });
 
@@ -336,6 +339,12 @@ describe("gm / judge / reveal payloads", () => {
   it("revealAckSchema accepts empty object only", () => {
     expect(revealAckSchema.parse({})).toEqual({});
     expect(() => revealAckSchema.parse({ teamId: "t1" })).toThrow();
+  });
+  it("gmStopBuildSchema / gmStopScoringSchema accept only empty objects", () => {
+    expect(gmStopBuildSchema.parse({})).toEqual({});
+    expect(gmStopScoringSchema.parse({})).toEqual({});
+    expect(() => gmStopBuildSchema.parse({ teamId: "t1" })).toThrow();
+    expect(() => gmStopScoringSchema.parse({ teamId: "t1" })).toThrow();
   });
 });
 

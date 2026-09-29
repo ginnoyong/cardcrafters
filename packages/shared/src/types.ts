@@ -171,6 +171,28 @@ export interface ScoreRow {
   value: ScoreValue;
 }
 
+/**
+ * One ANONYMOUS card in the scoring order. `cardId`/`label` are what players
+ * see ("Card A"…); `teamId` is the server/GM-side mapping and is STRIPPED
+ * from every player-facing payload (see buildSyncFull + flows/scoring.ts).
+ */
+export interface ScoringCard {
+  /** Opaque anonymous id ("card-a", "card-b", …) — never the team id. */
+  cardId: string;
+  /** Public display label ("Card A", "Card B", …). */
+  label: string;
+  /** The card's team — GM/presenter/server ONLY, never sent to players. */
+  teamId: string;
+}
+
+/** Persisted on Game.scoringOrder when a round enters SCORING. */
+export interface ScoringOrder {
+  /** Round the order belongs to (stale orders from previous rounds are ignored). */
+  round: number;
+  /** One entry per team, shuffled deterministically per game+round. */
+  cards: ScoringCard[];
+}
+
 /** Team summary used in lobby, scoring and results views. */
 export interface TeamSummary {
   id: string;

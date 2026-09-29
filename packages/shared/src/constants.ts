@@ -41,6 +41,8 @@ export const LIMITS = {
 export const BUILD_TIMER_SECONDS = 600;
 /** Default SCORING phase length in seconds (5 minutes). */
 export const SCORING_TIMER_SECONDS = 300;
+/** REVEAL auto-advances to RESULTS after this many seconds (hub-armed timer). */
+export const REVEAL_AUTO_EXPIRE_SECONDS = 30;
 
 // ---------------------------------------------------------------------------
 // Card canvas & layout geometry

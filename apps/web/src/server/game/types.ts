@@ -85,6 +85,11 @@ export type Effect =
   | { type: "lockScores" }
   /** BUILD submissions after `at` are refused; in-flight items keep generating. */
   | { type: "setCutoff"; at: number }
+  /** BUILD → SCORING entry — the caller builds the round's anonymous scoring
+   *  order (seeded per game+round), persists it on Game.scoringOrder and
+   *  emits `scoring:started` (personalized per player, GM copy with the
+   *  team mapping). */
+  | { type: "beginScoring" }
   /** Round counter advanced — persist and broadcast. */
   | { type: "incrementRound" }
   /** Direct message to a single player. */

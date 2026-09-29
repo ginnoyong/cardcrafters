@@ -5,13 +5,22 @@
  * QR) plus a LIVE card grid: one read-only CardCanvas mini per team, fed by
  * the store's build-phase events (item:pending / item:ready /
  * layout:updated — the presenter socket joins every team room).
+ *
+ * Scoring/results phases (big-screen duty):
+ *  - SCORING: an ANONYMOUS live scoreboard ("Card B · 7.5 avg · 3 votes") —
+ *    the card↔team mapping never reaches this surface (server-side rule).
+ *  - REVEAL: the large "The winner is… 🏆" display + a "Show results" button
+ *    (reveal:ack — the server allows GM OR presenter; the hub also auto-
+ *    expires REVEAL after 30 s, the button just moves things along).
+ *  - RESULTS: winner banner + People's Choice banner + public standings
+ *    (shared components/Standings.tsx, fed by the winnerAnnounced payload).
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import QRCode from "qrcode";
 
-import { MAX_TEAM_MEMBERS } from "@cardcrafters/shared";
+import { MAX_TEAM_MEMBERS, PHASE } from "@cardcrafters/shared";
 
 // Client-only: react-konva throws at module load under Next's bundled React
 // (version check) — never evaluate it during SSR/prerender.
@@ -28,6 +37,12 @@ import {
   onEvent,
   type AckResult,
 } from "@/lib/socket";
+import {
+  PeoplesChoiceBanner,
+  StandingsList,
+  WinnerBanner,
+  teamLabel,
+} from "@/components/Standings";
 import { GameStoreProvider, normalizeSyncFull, phaseLabel, useGameStore, type SyncFullEvent } from "@/lib/store";
 
 function useCountdown(phaseEndsAt: number | null, serverNow: number): number | null {
@@ -118,9 +133,13 @@ function PresenterBoard({ code }: { code: string }) {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [joinTokens, setJoinTokens] = useState<Record<string, string>>({});
+  // Live socket ref — the REVEAL "Show results" button emits reveal:ack over
+  // the SAME socket the board joined with.
+  const socketRef = useRef<ReturnType<typeof createGameSocket> | null>(null);
 
   useEffect(() => {
     const socket = createGameSocket({ role: "presenter", gameCode: code });
+    socketRef.current = socket;
     const unsubscribers: Array<() => void> = [];
 
     socket.on("connect", () => {
@@ -165,14 +184,45 @@ function PresenterBoard({ code }: { code: string }) {
       // NOTE: no item:rejected / item:failed listeners here — those events
       // are OWNER-ONLY (emitted directly to the submitting player's sockets)
       // and never reach the presenter.
+      // -------------------------------------------------------------------
+      // Scoring/results events. The presenter's scoring:started carries
+      // ANONYMOUS cards only (no teamId, no yourTeamCardId — the server
+      // strips the mapping for this surface); scores:update rides the whole
+      // game room (anonymous per-card tallies); winnerAnnounced carries the
+      // winner + People's Choice + public standings for the results board.
+      // -------------------------------------------------------------------
+      onEvent<Record<string, unknown>>(socket, "scoring:started", (payload) =>
+        dispatch({ type: "scoringStarted", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "scores:update", (payload) =>
+        dispatch({ type: "scoresUpdated", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "winnerAnnounced", (payload) =>
+        dispatch({ type: "winnerAnnounced", payload }),
+      ),
     );
 
     socket.connect();
     return () => {
       for (const off of unsubscribers) off();
       socket.close();
+      socketRef.current = null;
     };
   }, [code, dispatch]);
+
+  // REVEAL → RESULTS via reveal:ack ("Show results" button). The server
+  // allows GM OR presenter; failure surfaces once in the banner (the hub's
+  // 30 s auto-expiry still moves the game to RESULTS as a backstop).
+  const showResults = useCallback(async (): Promise<void> => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    try {
+      const ack = await emitAck<AckResult>(socket, "reveal:ack", {});
+      if (!ack.ok) setError(ack.error ?? "Could not show the results yet.");
+    } catch {
+      setError("Could not reach the game server — please try again.");
+    }
+  }, []);
 
   // The presenter snapshot has no join tokens — fetch them once (full=1 is
   // the GM/QR convenience route).
@@ -190,6 +240,18 @@ function PresenterBoard({ code }: { code: string }) {
       }
     })();
   }, [code]);
+
+  // Results-stage labels: the live team list first (the presenter knows the
+  // teams), the public standings' labels as the refresh fallback (a sync:full
+  // resync carries winnerTeamId but never the standings rows).
+  const winnerLabel =
+    teamLabel(snapshot?.teams ?? [], snapshot?.winnerTeamId) ||
+    snapshot?.standings.find((s) => s.teamId === snapshot.winnerTeamId)?.label ||
+    "";
+  const peoplesChoiceLabel =
+    teamLabel(snapshot?.teams ?? [], snapshot?.peoplesChoiceTeamId) ||
+    snapshot?.standings.find((s) => s.teamId === snapshot.peoplesChoiceTeamId)?.label ||
+    "";
 
   return (
     <main className="cc-main">
@@ -254,6 +316,71 @@ function PresenterBoard({ code }: { code: string }) {
         <p className="cc-hint">No teams yet…</p>
       ) : null}
       {!snapshot ? <p className="cc-hint">Waiting for the first sync…</p> : null}
+
+      {/* SCORING: anonymous live scoreboard — card labels + running averages
+          only. The card↔team mapping NEVER reaches the big screen before the
+          reveal (server strips it from every presenter payload). */}
+      {snapshot?.phase === PHASE.SCORING && (snapshot.scoring?.cards.length ?? 0) > 0 ? (
+        <section className="cc-card cc-scoring-console" aria-label="scoring progress" data-testid="presenter-scoring">
+          <h3>Rate the cards</h3>
+          <p className="cc-hint" aria-live="polite">
+            Players are rating the cards from 1 to 10 — scores update live.
+          </p>
+          <ul className="cc-score-chips">
+            {snapshot.scoring!.cards.map((card) => {
+              const tally = snapshot.scores[card.cardId];
+              return (
+                <li key={card.cardId} className="cc-score-chip">
+                  <span className="cc-score-chip-team">{card.label}</span>
+                  <span className="cc-score-chip-score" aria-live="polite">
+                    {tally
+                      ? `${tally.avg} avg · ${tally.count} vote${tally.count === 1 ? "" : "s"}`
+                      : "no votes yet"}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
+
+      {/* REVEAL: the large winner display. winnerTeamId rides the phase
+          change; the name lands with the winnerAnnounced broadcast a moment
+          later — the banner reads "The winner is…" until then. The "Show
+          results" button (reveal:ack) skips the 30 s auto-expiry wait. */}
+      {snapshot?.phase === PHASE.REVEAL && snapshot.winnerTeamId ? (
+        <section className="cc-reveal" aria-label="the reveal" data-testid="presenter-reveal">
+          <WinnerBanner label={winnerLabel || "…"} testId="presenter-winner-banner" />
+          <div className="cc-btn-row cc-reveal-actions">
+            <button
+              type="button"
+              className="cc-btn cc-btn-primary cc-btn-start"
+              onClick={() => void showResults()}
+            >
+              Show results
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      {/* RESULTS: winner + People's Choice + the public standings (fed by the
+          winnerAnnounced payload / the post-pick snapshot). */}
+      {snapshot?.phase === PHASE.RESULTS && snapshot.winnerTeamId ? (
+        <>
+          <WinnerBanner label={winnerLabel || "…"} testId="presenter-winner-banner" />
+          {peoplesChoiceLabel ? (
+            <PeoplesChoiceBanner label={peoplesChoiceLabel} testId="presenter-peoples-choice" />
+          ) : null}
+          {snapshot.standings.length > 0 ? (
+            <StandingsList
+              standings={snapshot.standings}
+              winnerTeamId={snapshot.winnerTeamId}
+              peoplesChoiceTeamId={snapshot.peoplesChoiceTeamId}
+              testId="presenter-standings"
+            />
+          ) : null}
+        </>
+      ) : null}
     </main>
   );
 }

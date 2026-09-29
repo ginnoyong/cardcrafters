@@ -1,0 +1,243 @@
+"use client";
+
+/**
+ * RatingPanel — the player's SCORING surface.
+ *
+ * Binding decisions (see phase spec):
+ *  - ONE anonymous card at a time, browsed with prev/next ("Card B · 2 / 3");
+ *  - the player's OWN team's card is skipped entirely (own-card guard) —
+ *    it never appears in the rateable list;
+ *  - each card shows its LIVE anonymous average + vote count (scores:update);
+ *  - TEN large buttons, 1–10;
+ *  - a tap shows a brief confirm ("Rate Card B: 7?") — confirming submits the
+ *    rating as FINAL (no undo, no re-rating) and auto-advances to the next
+ *    unrated card;
+ *  - when every rateable card has been rated: "All rated — waiting for the
+ *    game master".
+ *
+ * No sound anywhere (party game, phones on silent anyway). All copy is
+ * plain language — no jargon.
+ */
+
+import { useEffect, useMemo, useState } from "react";
+
+import type { ClientScoring, ClientScoreTally } from "@/lib/store";
+import { friendlyScoreError } from "@/lib/socket";
+
+/** Outcome of one FINAL submit (delivered by the parent's socket ack). */
+export interface ScoreSubmitOutcome {
+  ok: boolean;
+  /** Machine-readable rejection stage (own_card / already_rated / …). */
+  reason?: string;
+  /** Pre-formatted friendly error (parent uses friendlyScoreError). */
+  error?: string;
+}
+
+export interface RatingPanelProps {
+  scoring: ClientScoring;
+  /** Live anonymous tallies (scores:update), keyed by cardId. */
+  scores: Record<string, ClientScoreTally>;
+  /** THIS player's already-submitted ratings (cardId → 1..10). */
+  myScores: Record<string, number>;
+  /** FINAL submit — the parent emits score:submit over the socket. */
+  onSubmit: (cardId: string, value: number) => Promise<ScoreSubmitOutcome>;
+  testId?: string;
+}
+
+/** How long the confirm affordance waits before collapsing (ms). */
+const CONFIRM_RESET_MS = 6000;
+
+export default function RatingPanel({
+  scoring,
+  scores,
+  myScores,
+  onSubmit,
+  testId = "rating-panel",
+}: RatingPanelProps) {
+  // Rateable cards: everything EXCEPT our own team's card (own-card guard —
+  // the server would refuse it with own_card anyway).
+  const rateable = useMemo(
+    () => scoring.cards.filter((c) => c.cardId !== scoring.yourTeamCardId),
+    [scoring.cards, scoring.yourTeamCardId],
+  );
+  const ownCard = scoring.cards.find((c) => c.cardId === scoring.yourTeamCardId) ?? null;
+
+  // Which card is on screen (index into `rateable`).
+  const [index, setIndex] = useState(0);
+  // Pending tap: the value awaiting its brief confirm (null = no pending tap).
+  const [pending, setPending] = useState<number | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Auto-collapse the confirm affordance if the player doesn't confirm.
+  useEffect(() => {
+    if (pending === null) return;
+    const t = setTimeout(() => setPending(null), CONFIRM_RESET_MS);
+    return () => clearTimeout(t);
+  }, [pending]);
+
+  // Clamp the index when the card list changes (scores/rounds stay stable
+  // within SCORING, but resyncs can shrink the list defensively).
+  useEffect(() => {
+    if (index >= rateable.length) setIndex(0);
+  }, [rateable.length, index]);
+
+  const card = rateable[index] ?? null;
+  const mine = card ? myScores[card.cardId] : undefined;
+  const tally = card ? scores[card.cardId] : undefined;
+
+  // Done = every rateable card has a FINAL rating.
+  const allRated = rateable.length > 0 && rateable.every((c) => myScores[c.cardId] !== undefined);
+
+  if (rateable.length === 0) {
+    return (
+      <section className="cc-card" aria-label="rate the cards" data-testid={testId}>
+        <h3>Rate the cards</h3>
+        <p className="cc-hint">No cards to rate this round.</p>
+      </section>
+    );
+  }
+
+  if (allRated) {
+    return (
+      <section className="cc-card" aria-label="all cards rated" data-testid={testId} role="status">
+        <h3>All rated — waiting for the game master</h3>
+        <p className="cc-hint">
+          Your scores are in. The host will pick the winner next.
+        </p>
+        {ownCard ? (
+          <p className="cc-hint">Your own team's card ({ownCard.label}) can't be rated by you.</p>
+        ) : null}
+      </section>
+    );
+  }
+
+  if (!card) return null;
+
+  const go = (delta: number): void => {
+    setPending(null);
+    setError(null);
+    setIndex((i) => (i + delta + rateable.length) % rateable.length);
+  };
+
+  const confirmAndSubmit = async (): Promise<void> => {
+    if (pending === null || submitting) return;
+    const value = pending;
+    setSubmitting(true);
+    setError(null);
+    const outcome = await onSubmit(card.cardId, value);
+    setSubmitting(false);
+    setPending(null);
+    if (!outcome.ok) {
+      setError(outcome.error ?? friendlyScoreError(outcome.reason));
+      return;
+    }
+    // FINAL — registered client-side by the parent (myScoreSubmitted) from
+    // the ack; auto-advance to the next UNRATED card (this card just became
+    // rated, and React may not have re-rendered myScores yet — treat it as
+    // rated explicitly).
+    const rated = new Set(Object.keys(myScores));
+    rated.add(card.cardId);
+    const nextIdx = rateable.findIndex((c) => !rated.has(c.cardId));
+    if (nextIdx !== -1) setIndex(nextIdx);
+  };
+
+  return (
+    <section className="cc-card cc-rating" aria-label="rate the cards" data-testid={testId}>
+      <div className="cc-rating-head">
+        {rateable.length > 1 ? (
+          <button
+            type="button"
+            className="cc-btn cc-btn-small"
+            aria-label="previous card"
+            disabled={submitting}
+            onClick={() => go(-1)}
+          >
+            ‹ Prev
+          </button>
+        ) : null}
+        <h3>
+          {card.label}{" "}
+          <span className="cc-muted">
+            · {index + 1} / {rateable.length}
+          </span>
+        </h3>
+        {rateable.length > 1 ? (
+          <button
+            type="button"
+            className="cc-btn cc-btn-small"
+            aria-label="next card"
+            disabled={submitting}
+            onClick={() => go(1)}
+          >
+            Next ›
+          </button>
+        ) : null}
+      </div>
+
+      {/* Live anonymous average + vote count (never whose card it is). */}
+      <p className="cc-hint" aria-live="polite">
+        {tally
+          ? `Score so far: ${tally.avg} from ${tally.count} vote${tally.count === 1 ? "" : "s"}`
+          : "No votes yet — be the first!"}
+      </p>
+
+      {mine !== undefined ? (
+        <p className="cc-hint" role="status">
+          You rated this card {mine} — locked in.
+        </p>
+      ) : pending !== null ? (
+        <div className="cc-rating-confirm" role="group" aria-label="confirm your rating">
+          <p>
+            Rate {card.label}: <strong>{pending}</strong>? This can't be changed after.
+          </p>
+          <div className="cc-btn-row">
+            <button
+              type="button"
+              className="cc-btn cc-btn-primary"
+              disabled={submitting}
+              onClick={() => void confirmAndSubmit()}
+            >
+              {submitting ? "Sending…" : "Yes, rate it"}
+            </button>
+            <button
+              type="button"
+              className="cc-btn"
+              disabled={submitting}
+              onClick={() => setPending(null)}
+            >
+              Pick again
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {error ? (
+        <p role="alert" className="cc-error">
+          {error}
+        </p>
+      ) : null}
+
+      {/* TEN large buttons, 1–10 (hidden once this card is finally rated —
+          ratings are FINAL, no undo). */}
+      {mine === undefined ? (
+        <div className="cc-rating-buttons" role="group" aria-label={`rate ${card.label} from 1 to 10`}>
+          {Array.from({ length: 10 }, (_, i) => i + 1).map((value) => (
+            <button
+              key={value}
+              type="button"
+              className={`cc-btn cc-btn-rate${pending === value ? " is-pending" : ""}`}
+              disabled={submitting}
+              aria-label={`rate ${card.label} ${value}`}
+              onClick={() => {
+                setError(null);
+                setPending(value);
+              }}
+            >
+              {value}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}

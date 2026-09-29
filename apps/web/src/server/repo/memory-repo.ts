@@ -121,6 +121,7 @@ export class MemoryRepo implements Repository {
       style: null,
       phaseEndsAt: null,
       cutoffAt: null,
+      scoringOrder: null,
       createdAt: this.now(),
     };
     this.games.set(row.id, row);

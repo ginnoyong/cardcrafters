@@ -123,6 +123,41 @@ export interface ClientCritique {
   focalOk: boolean;
 }
 
+/** One ANONYMOUS card in the round's scoring order ("Card A"…).
+ *  `teamId` is present ONLY on GM snapshots (the card↔team mapping is
+ *  server/GM-side — player and presenter payloads carry cardId+label only). */
+export interface ClientScoringCard {
+  cardId: string;
+  label: string;
+  teamId?: string;
+}
+
+/** The SCORING phase slice: the round's anonymous card order. */
+export interface ClientScoring {
+  round: number;
+  cards: ClientScoringCard[];
+  /** THIS player's own team's card (players only; null/absent for GM). */
+  yourTeamCardId?: string | null;
+  /** Server-reported readiness progress (GM snapshots only). */
+  ratedX?: number;
+  ratedY?: number;
+}
+
+/** One card's live anonymous running average (scores:update). */
+export interface ClientScoreTally {
+  avg: number;
+  count: number;
+}
+
+/** One public standings row (winnerAnnounced): avg desc → count desc → label asc. */
+export interface ClientStanding {
+  teamId: string;
+  label: string;
+  cardId: string;
+  avg: number;
+  count: number;
+}
+
 export interface GameSnapshot {
   gameId: string;
   phase: string;
@@ -138,6 +173,18 @@ export interface GameSnapshot {
   scoresLocked: boolean;
   serverNow: number;
   teams: ClientTeam[];
+  /** SCORING: the round's anonymous card order (+ GM team mapping when the
+   *  snapshot is the GM's). Null before scoring starts / after a new round. */
+  scoring: ClientScoring | null;
+  /** Live anonymous running averages (scores:update), keyed by cardId. */
+  scores: Record<string, ClientScoreTally>;
+  /** THIS player's submitted ratings (cardId → 1..10). GM/presenter: empty. */
+  myScores: Record<string, number>;
+  /** RESULTS: the GM's winning pick + the crowd's People's Choice. */
+  winnerTeamId: string | null;
+  peoplesChoiceTeamId: string | null;
+  /** Public standings rows from winnerAnnounced (already server-sorted). */
+  standings: ClientStanding[];
   /** Owner-only submission ledger (see MyItemEvent). */
   myItems: Record<string, MyItemEvent>;
   /** THIS client's player id (client-only; null for GM/presenter sockets). */
@@ -147,10 +194,31 @@ export interface GameSnapshot {
 /** Max entries kept per team's activity feed (newest first). */
 export const ACTIVITY_FEED_MAX = 30;
 
-/** Shape of a `sync:full` payload as the UI consumes it. */
-export interface SyncFullEvent extends GameSnapshot {
+/**
+ * Shape of a `sync:full` payload AS IT ARRIVES OVER THE WIRE (raw, untrusted
+ * JSON — the scoring section is audience-dependent and myScores is an array,
+ * not yet the client Record). normalizeSnapshot parses every field below;
+ * the validated client shape is GameSnapshot.
+ */
+export interface SyncFullEvent
+  extends Omit<
+    GameSnapshot,
+    "scoring" | "scores" | "myScores" | "winnerTeamId" | "peoplesChoiceTeamId" | "standings"
+  > {
   seq?: number;
   ts?: number;
+  /** Raw scoring section (GM: teamId mapping + ratedX/ratedY; players:
+   *  anonymous cards + yourTeamCardId; presenter: anonymous cards only). */
+  scoring?: unknown;
+  /** Raw per-card tallies broadcast on scores:update. */
+  scores?: unknown;
+  /** Raw cardId-keyed ratings array ({cardId, value}) — players only. */
+  myScores?: unknown;
+  /** Raw winner / People's Choice team ids (RESULTS). */
+  winnerTeamId?: unknown;
+  peoplesChoiceTeamId?: unknown;
+  /** Raw public standings rows (already server-sorted). */
+  standings?: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +253,16 @@ export type StoreAction =
   | { type: "itemRemoved"; itemId: string }
   // Submit ack ok: register the new submission in the owner's ledger.
   | { type: "mySubmitted"; itemId: string; promptRaw: string }
+  // ---------------------------------------------------------------------
+  // Scoring-phase events. scoring:started / scores:update /
+  // winnerAnnounced are hub-stamped envelopes; reducers round-guard.
+  // ---------------------------------------------------------------------
+  | { type: "scoringStarted"; payload: Record<string, unknown> }
+  | { type: "scoresUpdated"; payload: Record<string, unknown> }
+  | { type: "winnerAnnounced"; payload: Record<string, unknown> }
+  // A successful score:submit ack — register THIS player's rating so the
+  // JUDGING summary survives re-renders (sync:full rebuilds it on refresh).
+  | { type: "myScoreSubmitted"; cardId: string; value: number }
   | { type: "reset" };
 
 // ---------------------------------------------------------------------------
@@ -237,6 +315,79 @@ function roundGuard(state: GameSnapshot | null, payload: Record<string, unknown>
 /** Newest-first, capped at ACTIVITY_FEED_MAX. */
 function trimActivity(entries: ClientActivityEntry[]): ClientActivityEntry[] {
   return entries.slice(0, ACTIVITY_FEED_MAX);
+}
+
+// ---------------------------------------------------------------------------
+// Scoring-phase helpers: defensive parsers for the raw event payloads (see
+// SyncFullEvent — everything over the wire is untrusted JSON).
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a scoring:started / sync:full `cards` array into ClientScoringCard[]
+ * (null when the payload is malformed so callers keep their previous state).
+ * `teamId` is kept ONLY when present (GM copies) — player/presenter payloads
+ * never carry it and the parsed shape mirrors that exactly.
+ */
+export function parseScoringCards(raw: unknown): ClientScoringCard[] | null {
+  if (!Array.isArray(raw)) return null;
+  const cards: ClientScoringCard[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") return null;
+    const e = entry as Record<string, unknown>;
+    if (typeof e.cardId !== "string" || typeof e.label !== "string") return null;
+    cards.push({
+      cardId: e.cardId,
+      label: e.label,
+      ...(typeof e.teamId === "string" ? { teamId: e.teamId } : {}),
+    });
+  }
+  return cards;
+}
+
+/**
+ * Parse a scores:update `cards` array ({cardId, avg, count}) into the client
+ * tallies Record keyed by cardId (null when malformed → caller keeps old).
+ */
+export function parseScoreTallies(raw: unknown): Record<string, ClientScoreTally> | null {
+  if (!Array.isArray(raw)) return null;
+  const tallies: Record<string, ClientScoreTally> = {};
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") return null;
+    const e = entry as Record<string, unknown>;
+    const avg = Number(e.avg);
+    const count = Number(e.count);
+    if (typeof e.cardId !== "string" || !Number.isFinite(avg) || !Number.isFinite(count)) {
+      return null;
+    }
+    tallies[e.cardId] = { avg, count };
+  }
+  return tallies;
+}
+
+/**
+ * Parse the winnerAnnounced public standings rows (avg desc → count desc →
+ * label asc, already server-sorted) — null when malformed → caller keeps old.
+ */
+export function parseStandings(raw: unknown): ClientStanding[] | null {
+  if (!Array.isArray(raw)) return null;
+  const rows: ClientStanding[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") return null;
+    const e = entry as Record<string, unknown>;
+    const avg = Number(e.avg);
+    const count = Number(e.count);
+    if (
+      typeof e.teamId !== "string" ||
+      typeof e.label !== "string" ||
+      typeof e.cardId !== "string" ||
+      !Number.isFinite(avg) ||
+      !Number.isFinite(count)
+    ) {
+      return null;
+    }
+    rows.push({ teamId: e.teamId, label: e.label, cardId: e.cardId, avg, count });
+  }
+  return rows;
 }
 
 /** Update THIS player's ledger entry (create when absent). Every entry is
@@ -345,6 +496,19 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
               critique: null,
             }))
           : base.teams,
+        // Round-scoped scoring state is cleared on a round BUMP exactly like
+        // items/layout — a new round means a new anonymous card order, fresh
+        // tallies, and no winner yet (prev rounds' results never leak in).
+        ...(bump
+          ? {
+              scoring: null,
+              scores: {},
+              myScores: {},
+              standings: [],
+              winnerTeamId: null,
+              peoplesChoiceTeamId: null,
+            }
+          : {}),
       };
     }
     case "playerJoined": {
@@ -644,6 +808,63 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
         status: prev?.status ?? "pending",
       }));
     }
+    // ---------------------------------------------------------------------
+    // Scoring-phase events (see StoreAction). scoring:started / scores:update
+    // / winnerAnnounced are hub-stamped envelopes; every case round-guards so
+    // stale events from a previous round can never mutate this one. myScores
+    // / scores / winner state are ROUND-SCOPED: the phaseChanged round-bump
+    // branch clears them (like items/layout), so no per-event round stamping
+    // is needed beyond the guard.
+    // ---------------------------------------------------------------------
+    case "scoringStarted": {
+      const base = roundGuard(state, action.payload);
+      if (!base) return state;
+      const cards = parseScoringCards(action.payload.cards);
+      if (cards === null) return state; // malformed → keep the old section
+      const yourTeamCardId = action.payload.yourTeamCardId;
+      return {
+        ...base,
+        scoring: {
+          round: base.round,
+          cards,
+          // GM/presenter copies carry no yourTeamCardId (own-card protection
+          // only makes sense for a player).
+          ...(typeof yourTeamCardId === "string" ? { yourTeamCardId } : {}),
+        },
+        // A fresh scoring order means a fresh tally — never keep scores from
+        // a stale/aborted attempt in the same round.
+        scores: {},
+      };
+    }
+    case "scoresUpdated": {
+      const base = roundGuard(state, action.payload);
+      if (!base) return state;
+      const tallies = parseScoreTallies(action.payload.cards);
+      if (tallies === null) return state;
+      return { ...base, scores: tallies };
+    }
+    case "winnerAnnounced": {
+      const base = roundGuard(state, action.payload);
+      if (!base) return state;
+      const winnerTeamId = action.payload.winnerTeamId;
+      const peoplesChoiceTeamId = action.payload.peoplesChoiceTeamId;
+      const standings = parseStandings(action.payload.standings);
+      if (typeof winnerTeamId !== "string" || standings === null) return state;
+      return {
+        ...base,
+        winnerTeamId,
+        peoplesChoiceTeamId: typeof peoplesChoiceTeamId === "string" ? peoplesChoiceTeamId : null,
+        standings,
+      };
+    }
+    case "myScoreSubmitted": {
+      const base = state;
+      if (!base) return state;
+      // The submit ack is always for the CURRENT round (scoring is locked at
+      // JUDGING; scores/myScores are cleared on the round bump), so no round
+      // stamping is needed — keying by cardId is round-safe.
+      return { ...base, myScores: { ...base.myScores, [action.cardId]: action.value } };
+    }
     case "reset":
       return null;
     default:
@@ -685,6 +906,61 @@ function normalizeSnapshot(
   const config = (raw as unknown as { config?: Record<string, unknown> }).config;
   const timerSecs = (v: unknown): number | null =>
     typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+  // ---- Scoring slice (all defensively parsed; the wire shape is
+  // ---- audience-dependent, see SyncFullEvent docs).
+  const rawScoring = (raw.scoring ?? null) as
+    | {
+        round?: unknown;
+        cards?: unknown;
+        yourTeamCardId?: unknown;
+        ratedX?: unknown;
+        ratedY?: unknown;
+      }
+    | null;
+  const parsedCards = rawScoring ? parseScoringCards(rawScoring.cards) : null;
+  let scoring: ClientScoring | null = null;
+  if (rawScoring && parsedCards && parsedCards.length > 0) {
+    // Scoring-order round: the payload's own round when finite, else the
+    // snapshot round (scoring orders are per-round; they always agree).
+    const scoringRound = Number.isFinite(Number(rawScoring.round))
+      ? Number(rawScoring.round)
+      : round;
+    scoring = {
+      round: scoringRound,
+      cards: parsedCards,
+      // Players carry their own team's cardId; GM/presenter never do.
+      ...(typeof rawScoring.yourTeamCardId === "string"
+        ? { yourTeamCardId: rawScoring.yourTeamCardId }
+        : {}),
+      ...(Number.isFinite(Number(rawScoring.ratedX))
+        ? { ratedX: Number(rawScoring.ratedX) }
+        : {}),
+      ...(Number.isFinite(Number(rawScoring.ratedY))
+        ? { ratedY: Number(rawScoring.ratedY) }
+        : {}),
+    };
+  }
+  // Live tallies from a scores:update ride along on resync snapshots? No —
+  // sync:full never carries `scores`; the map starts empty and rebuilds from
+  // the next broadcast (kept defensive anyway).
+  const scores = parseScoreTallies(raw.scores) ?? {};
+  // THIS player's ratings: the wire carries an array of {cardId, value}
+  // (server-side team→card resolution); the client stores a Record.
+  const myScores: Record<string, number> = {};
+  if (Array.isArray(raw.myScores)) {
+    for (const entry of raw.myScores) {
+      if (!entry || typeof entry !== "object") continue;
+      const e = entry as Record<string, unknown>;
+      const value = Number(e.value);
+      if (typeof e.cardId === "string" && Number.isFinite(value)) {
+        myScores[e.cardId] = value;
+      }
+    }
+  }
+  const winnerTeamId = typeof raw.winnerTeamId === "string" ? raw.winnerTeamId : null;
+  const peoplesChoiceTeamId =
+    typeof raw.peoplesChoiceTeamId === "string" ? raw.peoplesChoiceTeamId : null;
+  const standings = parseStandings(raw.standings) ?? [];
   return {
     gameId: String(raw.gameId),
     phase: String(raw.phase),
@@ -696,6 +972,12 @@ function normalizeSnapshot(
     cutoffAt: typeof raw.cutoffAt === "number" ? raw.cutoffAt : null,
     scoresLocked: Boolean(raw.scoresLocked),
     serverNow: Number(raw.serverNow ?? Date.now()),
+    scoring,
+    scores,
+    myScores,
+    winnerTeamId,
+    peoplesChoiceTeamId,
+    standings,
     myItems,
     myPlayerId,
     teams: teams.map((t) => {
@@ -840,16 +1122,16 @@ export function useGameStore(): GameStoreValue {
 
 /** Convenience hook: plain-language phase label (never internal jargon).
  *  LOBBY→"Waiting for players", GREETINGS→"Getting card text ready",
- *  BUILD→"Building the cards", SCORING→"Scoring", JUDGING→"Judging",
- *  REVEAL→"Winner!", RESULTS→"Results". Unknown phases fall back to a
- *  title-cased raw value. */
+ *  BUILD→"Building the cards", SCORING→"Rate the cards",
+ *  JUDGING→"Picking the winner", REVEAL→"The winner is…",
+ *  RESULTS→"Results". Unknown phases fall back to a title-cased raw value. */
 const PHASE_LABELS: Record<string, string> = {
   LOBBY: "Waiting for players",
   GREETINGS: "Getting card text ready",
   BUILD: "Building the cards",
-  SCORING: "Scoring",
-  JUDGING: "Judging",
-  REVEAL: "Winner!",
+  SCORING: "Rate the cards",
+  JUDGING: "Picking the winner",
+  REVEAL: "The winner is…",
   RESULTS: "Results",
 };
 
