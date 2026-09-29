@@ -25,8 +25,15 @@
  *      the card dimension, scale ±10%, rotation ±5°), accepted only when the
  *      constraints still hold and the incremental score improves.
  *   5. Relaxation: if not everything fits, retry the whole solve with minSize
- *      relaxed by −1% steps (floor 3%, max 5 relaxations); as a last resort
- *      the text-overlap rule is dropped for items beyond the first 20 (with a
+ *      relaxed by −1% steps (floor 3%, max 5 relaxations). Each step first
+ *      runs a SPACE CHECK (placed AABB-union coverage of the usable area):
+ *      while coverage < 0.70 the card is not crowded, so desired scales are
+ *      NOT shrunk — instead the placement order is retried once with the
+ *      non-hero order REVERSED (smaller-weight late arrivals get first pick
+ *      of the empty space, hero still first). Only when coverage ≥ 0.70 or
+ *      the reversed retry still leaves items unplaced do supports' desired
+ *      scales shrink (desiredShrink, floor 0.35); as a last resort the
+ *      text-overlap rule is dropped for items beyond the first 20 (with a
  *      warning). Out-of-bounds placements are NEVER emitted: bounds and
  *      minSize are hard constraints — an item that still cannot fit is simply
  *      omitted from the result (also warned).
@@ -54,6 +61,7 @@ import {
   scaleFor,
   scaleWindow,
   safeMargin,
+  TEXT_ZONE_PAD_FRAC,
   textOverlapOk,
   type CardBox,
   type ConstraintCtx,
@@ -416,6 +424,36 @@ const MAX_ITEM_CAP_MIN_ITEMS = 8;
  * candidatesFor — the floor yields to the hard in-bounds/overlap/minSize
  * constraints, never the other way around).
  *
+ * SPACE-AWARE FLOOR RESOLUTION (top-corner utilization pass): the floor's
+ * soft resolution (the no-floor retry in candidatesFor) used to run
+ * unconditionally whenever no cell fit the floored scale — supports shrank
+ * below 0.5×hero even when the card still had room. Now the yield is gated
+ * by a SPACE CHECK: the placed AABB-union coverage of the USABLE area (below
+ * the padded text strip, inside the safe margin, sampled on a fixed grid —
+ * usableAreaCoverage below). While coverage < SPACE_CHECK_COVERAGE (0.70)
+ * the floor stays HARD for few-item layouts (n ≤ 5): supports keep ≥ 0.5×hero
+ * and fill the roomy bottom band / lower corner-tuck slots; only when the
+ * card is actually crowded (coverage ≥ 0.70), or once the relaxation regime
+ * has engaged (desiredShrink < 1 — every space-preserving option is
+ * exhausted, see solveLayout), does the floor yield as before. Large-n
+ * layouts (n > 5) keep the UNCONDITIONAL yield: there the floor is a pure
+ * safety net over the legacy per-item share curve and gating it would
+ * starve/drop supports (measured 18/25 placed at n = 25 with a hard floor).
+ *
+ * HERO TOP CORNERS: the hero is centered, so its top corners (x flanks at
+ * hero top, y between the text-strip bottom and the hero's top edge) are
+ * prime empty space the polar ring under-samples. candidatesFor adds
+ * corner-anchor seeds there for the first few supports (see
+ * CORNER_SEED_MAX_SUPPORT_RANK): positions at (heroX ± (heroHalfW +
+ * supportHalfW) × CORNER_SEED_TUCK, textZoneBottom + pad + supportHalfH),
+ * i.e. tucked up beside the hero's top half, plus one fully-outward anchor
+ * per side (tuck 1.0) that the per-cell ladder can resolve at sub-desired
+ * scales against the outer margin. Measured (equal squares, seeds 1–5):
+ * top-corner region coverage (x ∈ [0, 0.25] ∪ [0.75, 1], y ∈ [0.24, 0.45])
+ * at n = 4 rises from 0.31–0.52 to ≈ 0.5–0.62 (the yielding supports now
+ * land in OPTIMAL corner slots instead of wherever the below-floor ladder
+ * happened to fit).
+ *
  * HERO DESIGNATION: a hint with role:"focal" (the layout AI's
  * layout_composition output) designates the hero; absent a focal hint the
  * highest visualWeight wins (stable tie-break by orderIndex). Ranking runs
@@ -434,6 +472,59 @@ const MAX_ITEM_CAP_MIN_ITEMS = 8;
 const HERO_WIDTH_TARGET = 0.65;
 /** Hard floor: any non-hero sticker's width ≥ this fraction of the hero's. */
 const SUPPORT_HERO_FLOOR = 0.5;
+/**
+ * SPACE CHECK threshold (space-aware support floor, see the block below):
+ * the placed AABB-union coverage of the USABLE area (below the padded text
+ * strip, inside the safe margin). Below this the card is NOT crowded and the
+ * 0.5×hero floor must NOT soft-resolve; at/above it the card is crowded and
+ * the floor may yield (per-cell ladder below the floor) so late supports can
+ * still be placed instead of dropped.
+ */
+const SPACE_CHECK_COVERAGE = 0.7;
+/**
+ * Hero-corner anchor seeds (top-corner utilization, see candidatesFor): only
+ * the FIRST FEW SUPPORTS get the corner anchors — by the time later supports
+ * are placed, coverage has picked up and the corners are contested anyway
+ * ("until coverage picks up" is implemented as BOTH a rank cap and the same
+ * SPACE_CHECK_COVERAGE gate used by the floor resolution).
+ */
+const CORNER_SEED_MAX_SUPPORT_RANK = 4;
+/**
+ * Corner-anchor x tuck factor: the anchor sits at heroX ± (heroHalfW +
+ * supportHalfW) × this fraction of the summed half-widths — tucked up beside
+ * the hero's top half, partially BEHIND its edge (hero renders topmost and
+ * hero–support pairs ride the deeper HERO_TUCK_CAP). A second anchor per
+ * side at tuck 1.0 (box edge at the hero's edge) gives the ladder a feasible
+ * slot once the scale steps below the desired scale.
+ */
+const CORNER_SEED_TUCK = 0.55;
+/**
+ * Fallback text-strip bottom (fraction of card height) for the corner-anchor
+ * y when NO text zone is reserved: the greeting strip's policy position
+ * (6%–22% of the card height) — the anchors still target the band under it.
+ */
+const TEXT_ZONE_FALLBACK_BOTTOM_FRAC = 0.22;
+/** Sample grid resolution for usableAreaCoverage (deterministic, pure). */
+const COVERAGE_GRID = 48;
+/**
+ * Corner-fill region: the hero's TOP-corner band spans from the (padded)
+ * text-strip bottom down to this fraction of the card height (the brief's
+ * measurement region y ∈ [0.24, 0.45]); its x extent is the ACTUAL flanks
+ * beside the placed hero's box (inside the safe margin).
+ */
+const CORNER_REGION_Y2_FRAC = 0.45;
+/**
+ * Weight of the solver-internal CORNER FILL term (see `cornerFill` in
+ * attemptSolve). Tuned so the term reorders SUB-floor candidates toward the
+ * hero's top corners (a corner slot covers ≈ 0.3–0.4 of the corner region
+ * vs ≈ 0.05 for the centre-hugging lower-flank slot the focal/spacing terms
+ * prefer → 0.25 × 0.3 ≈ 0.08 beats their combined ≈ 0.02 preference), while
+ * the scale-fidelity gradient still dominates ACROSS floor boundaries (a
+ * floor-scale bottom-band slot costs ≈ 0.19 less fidelity shortfall than a
+ * ~0.3×hero corner slot → fidelity wins and the floor is honoured first).
+ * Hard constraints always win over both (only feasible candidates score).
+ */
+const CORNER_FILL_WEIGHT = 0.25;
 
 /**
  * Hero designation (hero-montage policy — see the block above). Deterministic:
@@ -585,6 +676,51 @@ interface Placed {
 }
 
 /**
+ * SPACE CHECK (space-aware support floor — see the hero-montage policy
+ * block): placed AABB-union coverage of the USABLE area, i.e. the card
+ * inside the safe margin and BELOW the (2%-padded) greeting-text strip —
+ * the region the solver can actually paint. Sampled on a fixed COVERAGE_GRID
+ * grid (pure + deterministic; placement x/y ARE the centroids). Used to
+ * decide (a) whether the 0.5×hero support floor may soft-resolve in
+ * candidatesFor and (b) whether the relaxation loop may shrink desired
+ * scales or must first retry the placement order (solveLayout).
+ */
+function usableAreaCoverage(
+  placed: readonly Placed[],
+  card: CardBox,
+  k: number,
+  textZone: Rect | null,
+): number {
+  if (placed.length === 0) return 0;
+  const m = safeMargin(card);
+  const pad = TEXT_ZONE_PAD_FRAC * Math.min(card.w, card.h);
+  const ux1 = m.x;
+  const ux2 = card.w - m.x;
+  const uy1 = Math.max(
+    m.y,
+    textZone ? textZone.y + textZone.h + pad : 0,
+  );
+  const uy2 = card.h - m.y;
+  if (!(ux2 > ux1) || !(uy2 > uy1)) return 1; // degenerate usable area → crowded
+  const N = COVERAGE_GRID;
+  let covered = 0;
+  for (let gy = 0; gy < N; gy++) {
+    const cy = uy1 + ((gy + 0.5) * (uy2 - uy1)) / N;
+    for (let gx = 0; gx < N; gx++) {
+      const cx = ux1 + ((gx + 0.5) * (ux2 - ux1)) / N;
+      for (const p of placed) {
+        const b = placedBox(p.placement, p.item, k);
+        if (cx >= b.x1 && cx <= b.x2 && cy >= b.y1 && cy <= b.y2) {
+          covered++;
+          break;
+        }
+      }
+    }
+  }
+  return covered / (N * N);
+}
+
+/**
  * One solve attempt at a given minSize / text-rule policy. Items that cannot
  * satisfy the hard constraints are returned in `unplaced` (never placed
  * illegally).
@@ -595,6 +731,7 @@ function attemptSolve(
   minSizePct: number,
   dropTextBeyond: number | null,
   desiredShrink = 1,
+  reverseNonHero = false,
 ): { placed: Placed[]; unplaced: LayoutItem[]; textZoneUsed: boolean } {
   const card = opts.cardDims;
   const k = opts.k ?? baseFit(card);
@@ -630,12 +767,22 @@ function attemptSolve(
   // Sort: visualWeight desc, stable tie-break by orderIndex — then re-rank
   // so the HERO (hint role:"focal", else highest visualWeight — see
   // heroItemIdOf) is processed FIRST and claims the dominant spot.
-  const ordered = [...items].sort(
+  const ranked = [...items].sort(
     (a, b) => b.visualWeight - a.visualWeight || a.orderIndex - b.orderIndex,
   );
   const heroId = heroItemIdOf(items, hints);
-  const heroIdx = ordered.findIndex((i) => i.id === heroId);
-  if (heroIdx > 0) ordered.unshift(...ordered.splice(heroIdx, 1));
+  const heroIdx = ranked.findIndex((i) => i.id === heroId);
+  if (heroIdx > 0) ranked.unshift(...ranked.splice(heroIdx, 1));
+  // SPACE-AWARE ORDER RETRY (see solveLayout): when the greedy starves late
+  // arrivals on a NOT-yet-crowded card, the retry pass re-runs the solve with
+  // the non-hero order REVERSED — the SMALLER-weight (later) items get first
+  // pick of the empty space while the hero still claims its spot first. The
+  // greedy's first pick is the biggest feasible slot, so reversed order lets
+  // the starved supports grow instead of resigning to desiredShrink.
+  const ordered =
+    reverseNonHero && ranked.length > 1
+      ? [ranked[0]!, ...ranked.slice(1).reverse()]
+      : ranked;
 
   const ctx: ConstraintCtx = {
     card,
@@ -882,6 +1029,53 @@ function attemptSolve(
         rot,
       });
     }
+    // Hero-corner anchor seeds (top-corner utilization pass — see the
+    // hero-montage policy block): for the FIRST FEW SUPPORTS, add fixed
+    // anchors tucked into the hero's TOP CORNERS: x flanks the hero's top
+    // half at CORNER_SEED_TUCK × the summed half-widths, y sits just under
+    // the (padded) greeting-text strip with the support's top edge at it
+    // (textZoneBottom + pad + supportHalfH — smaller ladder steps then only
+    // move the box's top edge FURTHER from the strip, so the anchor stays
+    // text-safe as it shrinks). One anchor per side at the brief's 0.55 tuck
+    // (partially behind the hero edge, which renders on top) plus one
+    // fully-outward anchor per side (tuck 1.0) that the per-cell ladder
+    // resolves against the outer margin — measured, that second anchor is
+    // the one that catches the largest feasible corner support. The polar
+    // ring is radial and under-samples exactly this band; without these
+    // anchors the hero's top corners stayed empty.
+    // NOTE — deliberately NOT gated on the SPACE CHECK coverage (an earlier
+    // draft gated them "until coverage picks up"): measured, the corner
+    // slots are filled by the LATE, yielding supports (the early supports
+    // place at their desired scale ≥ the floor in the roomy bottom band,
+    // pushing coverage past SPACE_CHECK_COVERAGE before any support needs
+    // the corners) — a coverage gate switched the anchors off exactly when
+    // they were needed and measurably changed nothing. The rank cap is the
+    // deterministic "first few supports" proxy.
+    if (heroEntry && index <= CORNER_SEED_MAX_SUPPORT_RANK) {
+      const pad = TEXT_ZONE_PAD_FRAC * Math.min(card.w, card.h);
+      const stripBottom = opts.textZone
+        ? opts.textZone.y + opts.textZone.h
+        : TEXT_ZONE_FALLBACK_BOTTOM_FRAC * card.h;
+      const heroHalfW =
+        displayWidth(heroEntry.item, heroEntry.placement.scale, k) / 2;
+      const supHalfW = displayWidth(item, baseScale, k) / 2;
+      const supHalfH = displayHeight(item, baseScale, k) / 2;
+      const cornerY = clamp(stripBottom + pad + supHalfH, ay1, ay2);
+      for (const side of [-1, 1] as const) {
+        for (const tuck of [CORNER_SEED_TUCK, 1] as const) {
+          seeds.push({
+            x: clamp(
+              heroEntry.placement.x + side * (heroHalfW + supHalfW) * tuck,
+              ax1,
+              ax2,
+            ),
+            y: cornerY,
+            jitter: 1,
+            rot: 0,
+          });
+        }
+      }
+    }
     } // end else (non-hero candidates; hero has only the center seed)
 
     // Per cell: try scale fallback steps largest→smallest inside the cell;
@@ -889,7 +1083,14 @@ function attemptSolve(
     // (bounds + size + text rule + pairwise overlap) wins that cell. The
     // support floor (hero-montage) is applied as a hard clamp first; only
     // when NO cell yields a floored candidate does the retry without the
-    // floor run (documented ladder resolution).
+    // floor run (documented ladder resolution) — and, for few-item layouts,
+    // ONLY when the SPACE CHECK says the card is actually crowded (coverage
+    // ≥ SPACE_CHECK_COVERAGE) or the relaxation regime has already engaged
+    // (desiredShrink < 1): while empty space remains the floor stays hard
+    // (supports keep ≥ 0.5×hero; unplaceable-at-floor supports go to the
+    // solveLayout relaxation which retries the ORDER before shrinking).
+    // Large-n layouts (n > 5) keep the unconditional yield — there the floor
+    // is a pure safety net (see the policy block).
     const runCells = (withFloor: boolean): Placement[] => {
       const out: Placement[] = [];
       // The ladder may fall all the way to the item's MIN-SIZE scale (not
@@ -917,7 +1118,14 @@ function attemptSolve(
       return out;
     };
     let cands = runCells(true);
-    if (cands.length === 0 && supportFloorScale > 0) cands = runCells(false);
+    if (cands.length === 0 && supportFloorScale > 0) {
+      const floorMayYield =
+        items.length > 5 ||
+        desiredShrink < 1 ||
+        usableAreaCoverage(placed, card, k, opts.textZone) >=
+          SPACE_CHECK_COVERAGE;
+      if (floorMayYield) cands = runCells(false);
+    }
     return cands;
   };
 
@@ -1005,6 +1213,57 @@ function attemptSolve(
     return s;
   };
 
+  /**
+   * CORNER FILL soft term (top-corner utilization pass — solver-internal,
+   * NOT part of scoreLayout, same mechanism as `fidelity`): the hero is
+   * CENTERED, so its top corners — the x flanks beside the hero's top half,
+   * y between the (padded) greeting-text strip and ≈ 45% of the card — are
+   * prime empty space that the scoreLayout terms actively pull AWAY from
+   * (focal pulls toward the composition centre, spacing prefers
+   * centre-hugging placements). This term REWARDS placements whose AABB
+   * covers corner-region area: the fraction of the flank region (left +
+   * right of the placed hero's box, inside the safe margin, from the strip
+   * bottom down to CORNER_REGION_Y2_FRAC × card height) covered by support
+   * AABBs. Inactive until the hero is placed (always first in the greedy).
+   * Weight tuned in CORNER_FILL_WEIGHT's doc: reorders sub-floor candidates
+   * toward the corners without ever overriding the floor (fidelity wins
+   * across floor boundaries) or the hard constraints (only feasible
+   * candidates are ever scored).
+   */
+  const cornerFill = (placements: Placement[]): number => {
+    const heroP = placements.find((p) => p.itemId === heroId);
+    const heroItem = heroP ? itemsById.get(heroP.itemId) : undefined;
+    if (!heroP || !heroItem) return 0;
+    const hb = placedBox(heroP, heroItem, k);
+    const pad = TEXT_ZONE_PAD_FRAC * Math.min(card.w, card.h);
+    const stripBottom = opts.textZone
+      ? opts.textZone.y + opts.textZone.h + pad
+      : TEXT_ZONE_FALLBACK_BOTTOM_FRAC * card.h;
+    const ry1 = Math.min(stripBottom, CORNER_REGION_Y2_FRAC * card.h);
+    const ry2 = Math.max(stripBottom, CORNER_REGION_Y2_FRAC * card.h);
+    const regionH = ry2 - ry1;
+    if (!(regionH > 0)) return 0;
+    const flankL = Math.max(0, hb.x1 - ax1);
+    const flankR = Math.max(0, ax2 - hb.x2);
+    const regionArea = (flankL + flankR) * regionH;
+    if (!(regionArea > 0)) return 0;
+    let covered = 0;
+    for (const p of placements) {
+      if (p.itemId === heroId) continue;
+      const item = itemsById.get(p.itemId);
+      if (!item) continue;
+      const b = placedBox(p, item, k);
+      const iy1 = Math.max(b.y1, ry1);
+      const iy2 = Math.min(b.y2, ry2);
+      if (!(iy2 > iy1)) continue;
+      const ly = iy2 - iy1;
+      covered +=
+        Math.max(0, Math.min(b.x2, hb.x1) - Math.max(b.x1, ax1)) * ly +
+        Math.max(0, Math.min(b.x2, ax2) - Math.max(b.x1, hb.x2)) * ly;
+    }
+    return Math.min(1, covered / regionArea);
+  };
+
   /** Incremental score of `cand` + `item` against the already-placed set. */
   const incremental = (cand: Placement, item: LayoutItem, placed: Placed[]): number => {
     const placements = [cand, ...placed.map((p) => p.placement)];
@@ -1015,7 +1274,8 @@ function attemptSolve(
       scoreLayout(placements, subset, sctx) +
       SCALE_FIDELITY_WEIGHT * fidelity(placements) +
       COHESION_WEIGHT * cohesion(placements) +
-      ORIENTATION_WEIGHT * orientation(placements)
+      ORIENTATION_WEIGHT * orientation(placements) -
+      CORNER_FILL_WEIGHT * cornerFill(placements)
     );
   };
 
@@ -1036,7 +1296,8 @@ function attemptSolve(
       scoreLayout(placements, subset, sctx) +
       SCALE_FIDELITY_WEIGHT * fidelity(placements) +
       COHESION_WEIGHT * cohesion(placements) +
-      ORIENTATION_WEIGHT * orientation(placements)
+      ORIENTATION_WEIGHT * orientation(placements) -
+      CORNER_FILL_WEIGHT * cornerFill(placements)
     );
   };
 
@@ -1332,6 +1593,8 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
   }
 
   let minSizePct = MIN_ITEM_SIZE_PCT;
+  const card = opts.cardDims;
+  const k = opts.k ?? baseFit(card);
   let result = attemptSolve(items, opts, minSizePct, null);
   let relaxations = 0;
   // On retry, ALSO shrink supports' DESIRED scales (not just minSize):
@@ -1339,12 +1602,35 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
   // supports at near-desired size and the card fills up — the stragglers
   // then find no room at ANY scale ≥ min (measured: 12/16 placed at n=16
   // before this). The hero keeps its full desired width (user rule).
+  //
+  // SPACE-AWARE FLOOR RESOLUTION (top-corner utilization pass): shrinking
+  // used to kick in on EVERY retry — supports went below 0.5×hero even when
+  // empty space remained. Now each relaxation step first runs a SPACE CHECK
+  // (usableAreaCoverage of the failed attempt's placed set): while coverage
+  // < SPACE_CHECK_COVERAGE the card is NOT crowded, so desired scales are
+  // NOT shrunk; instead the placement ORDER is retried (reverseNonHero —
+  // the smaller-weight late arrivals get FIRST pick of the empty space, the
+  // hero still first; a one-shot pass, tracked by `reversedTried`). Only
+  // when coverage ≥ SPACE_CHECK_COVERAGE (card actually crowded) OR the
+  // reversed retry still leaves items unplaced does desiredShrink engage as
+  // before (which also unlocks the floor's soft resolution in
+  // candidatesFor — every space-preserving option is exhausted at that
+  // point, so the hard constraints win as always).
   let desiredShrink = 1;
+  let reversedTried = false;
   while (result.unplaced.length > 0 && relaxations < MAX_RELAXATIONS) {
     relaxations++;
     minSizePct = Math.max(MIN_SIZE_FLOOR_PCT, minSizePct - 1);
-    desiredShrink = Math.max(0.35, desiredShrink - 0.15);
-    result = attemptSolve(items, opts, minSizePct, null, desiredShrink);
+    const coverage = usableAreaCoverage(result.placed, card, k, opts.textZone ?? null);
+    if (coverage < SPACE_CHECK_COVERAGE && !reversedTried) {
+      // Space exists — do NOT shrink; give the starved late arrivals first
+      // pick of it (hero still first).
+      reversedTried = true;
+      result = attemptSolve(items, opts, minSizePct, null, desiredShrink, true);
+    } else {
+      desiredShrink = Math.max(0.35, desiredShrink - 0.15);
+      result = attemptSolve(items, opts, minSizePct, null, desiredShrink);
+    }
   }
   if (relaxations > 0 && minSizePct < MIN_ITEM_SIZE_PCT) {
     warnings.push(`relaxed min item size to ${minSizePct}% of card width`);
@@ -1363,8 +1649,6 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
     warnings.push(`item ${item.id} could not be placed within card constraints`);
   }
 
-  const card = opts.cardDims;
-  const k = opts.k ?? baseFit(card);
   // Hero-montage zIndex: the hero renders TOPMOST (max orderIndex + 1);
   // supports keep their orderIndex (later submissions render above earlier
   // supports, always below the hero).
