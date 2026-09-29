@@ -25,14 +25,17 @@
  *      the card dimension, scale ±10%, rotation ±5°), accepted only when the
  *      constraints still hold and the incremental score improves.
  *   5. Relaxation: if not everything fits, retry the whole solve with minSize
- *      relaxed by −1% steps (floor 3%, max 5 relaxations). Each step first
+ *      relaxed by −1% steps (floor 3%, max 12 relaxations). Each step first
  *      runs a SPACE CHECK (placed AABB-union coverage of the usable area):
- *      while coverage < 0.70 the card is not crowded, so desired scales are
- *      NOT shrunk — instead the placement order is retried once with the
- *      non-hero order REVERSED (smaller-weight late arrivals get first pick
- *      of the empty space, hero still first). Only when coverage ≥ 0.70 or
- *      the reversed retry still leaves items unplaced do supports' desired
- *      scales shrink (desiredShrink, floor 0.35); as a last resort the
+ *      while coverage < 0.75 the card is not crowded, so the placement order
+ *      is retried once with the non-hero order REVERSED (smaller-weight late
+ *      arrivals get first pick of the empty space, hero still first). After
+ *      that the HERO yields first (v3 degradation ladder): its width target
+ *      drops in 0.05 steps down to 0.30 while the 0.5×hero support floor
+ *      holds RELATIVE to the shrunk hero — supports never shrink below half
+ *      the hero at ANY item count. Only when the hero is at its minimum do
+ *      supports' desired scales shrink toward the floor (desiredShrink,
+ *      clamped AT the floor — never below); as a last resort the
  *      text-overlap rule is dropped for items beyond the first 20 (with a
  *      warning). Out-of-bounds placements are NEVER emitted: bounds and
  *      minSize are hard constraints — an item that still cannot fit is simply
@@ -46,7 +49,6 @@ import type { LayoutComposition, LayoutItemHint, Placement } from "@cardcrafters
 import {
   MIN_ITEM_SIZE_PCT,
   SOLO_ITEM_COVERAGE,
-  TOTAL_COVERAGE_TARGET,
 } from "@cardcrafters/shared";
 
 import {
@@ -152,7 +154,7 @@ const SCALE_FIDELITY_WEIGHT = 0.5;
  * the fidelity term than a support's (see `fidelity`). Without the boost the
  * soft spacing term (score.ts `space`, weight 0.25) rewards a SMALLER hero
  * whenever it tucks against a support — the hero would settle ~15% under its
- * 0.65 target (measured 0.543 at n = 2). ×3 makes a hero shrink strictly
+ * 0.60 target (measured 0.543 at n = 2 with the 0.65 target). ×3 makes a hero shrink strictly
  * more expensive than any positioning gain while hard constraints still
  * force genuine fallbacks (the term bottoms out at the largest feasible
  * scale, as before).
@@ -242,7 +244,29 @@ const RING_RADIUS_MAX = 0.5;
 const RING_ROT_JITTER_DEG = 15;
 /** Relaxation bounds. */
 const MIN_SIZE_FLOOR_PCT = 3;
-const MAX_RELAXATIONS = 5;
+/**
+ * v3 relaxation-ladder budget (see solveLayout): 1 reversed-order retry + up
+ * to 6 hero-shrink steps (0.60 → 0.30 in 0.05 steps) + up to 5 desiredShrink
+ * steps (1 → 0.35) = 12.
+ */
+const MAX_RELAXATIONS = 12;
+/**
+ * v3 degradation ladder: when stickers do not all fit, the HERO yields
+ * FIRST — its width target drops by HERO_SHRINK_STEP per relaxation down to
+ * HERO_MIN_WIDTH_TARGET — while the 0.5×hero support floor holds relative to
+ * the shrunk hero (supports never go below half the hero; the hero is what
+ * gives). Measured hero curve (default 5:7 card, greeting zone reserved,
+ * seeds 1–5; equal 256×256 squares AND the mixed-aspect fixture alike):
+ * the 0.60 target holds through n = 3 (n_max = 3 — hero 0.56–0.62, supports
+ * ≥ 0.6×hero, no ladder step fires); at n = 4–7 the placed hero lands
+ * ≈ 0.45–0.55, at n = 8–11 ≈ 0.32–0.50, at n = 12–21 ≈ 0.30–0.40 and at
+ * n = 22–25 ≈ 0.29–0.32 (the ladder bottoms out at the 0.30 minimum target).
+ * The DROP path never triggers for equal squares (n ≤ 25 all placed); the
+ * mixed-aspect fixture starts dropping at n = 15 (n = 16: 1–3 dropped,
+ * n = 25: 3–8 dropped — see the solver tests).
+ */
+const HERO_SHRINK_STEP = 0.05;
+const HERO_MIN_WIDTH_TARGET = 0.3;
 /** Beyond this many items the text rule may be dropped (last resort). */
 const TEXT_RULE_DROP_LIMIT = 20;
 // ---------------------------------------------------------------------------
@@ -270,175 +294,101 @@ const REBALANCE_LADDER = [1, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7];
 /** How many of the re-ranked wide-item candidates get expanded per rung. */
 const REBALANCE_WIDE_EXPAND = 6;
 /**
- * Sizing policy v2 (few items FILL the card — coverage-proportional targets):
+ * Sizing policy v3 (layout hierarchy v3 — hero-montage + total-canvas
+ * coverage):
  *
- * Each item's DESIRED area is perItemShare(n) × card area, split by
- * visualWeight (heavier → larger; equal shares as the fallback when weights
- * are missing/near-zero). The per-item share curve is:
+ * The layout chases a TOTAL coverage of CANVAS_COVERAGE_TARGET = 0.80 of the
+ * USABLE canvas — the card inside the safe margins and below the (padded)
+ * greeting-text strip, i.e. the region the solver can actually paint (the
+ * user rule "all stickers together take up at least 80% of the canvas"; the
+ * greeting strip + margins are not paintable, so the CARD-area equivalent of
+ * the target is ≈ 0.53 on the default 5:7 card with a text zone).
  *
- *   perItemShare(n) =
- *     n = 1         → SOLO_ITEM_COVERAGE (0.65 — "as big as possible")
- *     2 ≤ n ≤ 5     → FILL_COVERAGE / n   (n=2 → 0.30, n=3 → 0.20, n=5 → 0.12)
- *     5 < n < 12    → lerp(FILL_COVERAGE/n, TOTAL_COVERAGE_TARGET/n, t),
- *                     t = (n − 5) / 7
- *     n ≥ 12        → TOTAL_COVERAGE_TARGET / n (the legacy total-coverage
- *                     split; large-n behavior unchanged)
+ * Desired areas (see desiredScales):
+ *   n = 1  → SOLO_ITEM_COVERAGE (0.65) of the card area — the solo card
+ *            keeps its "as big as possible" curve (the 85% width window caps
+ *            it at ≈ 0.75–0.85 display width); the 0.60 hero target is a
+ *            MONTAGE rule (dominance over orbiting supports) and does not
+ *            apply to a support-less card.
+ *   n ≥ 2  → the HERO is policy-fixed at HERO_WIDTH_TARGET (0.60 × card
+ *            width, centered) and its desired area is committed against the
+ *            coverage budget first; the REMAINING budget
+ *            (0.80 × usableArea − heroArea) is split across the supports
+ *            (EQUALIZE_FRAC blend of a flat equal split and the
+ *            visualWeight-weighted split, as in v2 — heavier supports get
+ *            modestly more). Each support's desired display width is then
+ *            clamped into [SUPPORT_HERO_FLOOR × heroWidth, heroWidth]:
+ *            supports are ALWAYS at least half the hero (at EVERY item
+ *            count — the former n ≤ 5 floor gate is retired) and never
+ *            larger than the hero (focal prominence).
  *
- * Rationale (v2): the previous policy capped every n ≥ 2 item at 22% card
- * area, so the SECOND sticker arrived visibly small (~55% width) while the
- * card still had room. v2 keeps per-item share HIGH for small n so few
- * stickers together fill the card: two stickers chase 0.35 card area each
- * (≈ 65–70% display width on the default 5:7 card — see the feasibility
- * note below), the curve converges back to the legacy
- * TOTAL_COVERAGE_TARGET/n split by n = 12, so large-n behavior (including
- * the 25-item stress case) is unchanged.
- *
- * Feasibility (measured, see the sizing-policy tests): the brief's initial
- * n = 2 target of 0.45 area share per item (and even 0.40) is INFEASIBLE on
- * the default 5:7 card — two squares at 0.40 share (75% width) cannot
- * coexist under the greeting-text zone, the 4% safe margin and the pairwise
- * overlap cap; at the general 25% cap the largest jointly-feasible pair of
- * squares measures ≈ 0.30 area share ≈ 64–65% width (staggered diagonally,
- * SIZING-ACCURACY PASS (true rotated-rect overlap + 10% tolerance +
- * equalization): the pairwise overlap is now measured on the actual rotated
- * rectangles (SAT-exact intersection area, see rotatedRectOverlapArea) with
- * a SINGLE user-set tolerance of 10% for every item count — the previous
- * AABB measure + relaxed 0.35 small-n cap rejected feasible big placements
- * (bounding boxes of rotated stickers overlap far more than the stickers
- * themselves) and still produced visible overlap. Freeing that phantom
- * overlap lets FILL_COVERAGE rise to 0.7 while both stickers keep growing
- * (measured: n = 2 avg width 0.546 → 0.67, smallest item 0.44 → 0.58 across
- * 5 seeds; true overlap stays ≤ 0.10 per pair by construction).
- *
- * SIZE EQUALIZATION: the per-item share is blended 50/50 between the
- * visualWeight-weighted split and a flat equal split ( EQUALIZE_FRAC = 0.5,
- * weight floor unchanged). Rationale: the user reported sizes "not equal or
- * similar" — with the pure weight split, two same-weight items could still
- * land at ratio > 1.3 (the greedy first-mover takes the bigger feasible
- * spot); the blend keeps heavy items modestly larger (hierarchy term) while
- * pinning similar-weight items within ~1.25× of each other.
- *
- * (Superseded feasibility note kept for the record: under the OLD AABB
- * overlap measure, raising FILL_COVERAGE past 0.6 made n = 2 WORSE — the
- * sequential greedy let the first sticker consume the extra wish while the
- * second starved. With the true measure the starvation mechanism is gone,
- * so the higher share translates into size for BOTH stickers.)
- *
- * Share → desired display area → desired display width window. The
- * candidate generator seeds its ±10% scale jitter around this desired
- * scale instead of the geometric window middle, and the size-window clamp
- * plus the hard in-bounds/overlap constraints remain the safety net: when
- * the desired scale cannot fit, the largest in-bounds candidate wins.
- *
- * n = 1 → 0.65 → w ≈ 0.95×card.w raw, clamped to the 85% MAX window → the
- * solo item fills the card.
+ * Feasibility + degradation (measured, see the hero-montage policy block and
+ * the solver tests): with a hard 0.5×hero floor and a 0.60 hero the area
+ * budget reaches ≈ 0.80 of the usable canvas up to n_max = 3 (equal squares:
+ * 0.80–0.82 area coverage; the placed AABB-union coverage stays ≈ 0.61–0.79
+ * at every n — packing + tuck overlap); beyond that the HERO shrinks
+ * progressively (measured curve documented at HERO_SHRINK_STEP) while the
+ * floor holds RELATIVE to the shrunk hero (the hero is what gives, never the
+ * floor; soft-resolution points at 0.47–0.50×hero are documented in the
+ * solver tests). The per-candidate fallback ladder + scale-fidelity term do
+ * the feasibility trimming as before; items that still cannot fit are
+ * omitted (drop path, warned — measured: never for equal squares n ≤ 25,
+ * from n = 15 for the mixed-aspect fixture).
  */
 const WEIGHT_FLOOR = 0.05; // keeps zero-weight items from getting a zero share
 /**
- * Total card-area fraction the items chase while the card still looks
- * "full" (2 ≤ n ≤ 5): perItemShare = FILL_COVERAGE / n. Raised from 0.6 to
- * 0.7 in the sizing-accuracy pass: the SAT fix freed the phantom AABB
- * overlap budget, so larger jointly-feasible targets actually convert into
- * size now (n = 2 → 0.35, n = 3 → 0.233, n = 5 → 0.14). Measured jointly
- * feasible on the default 5:7 card at the 10% true-overlap tolerance (see
- * the measured-curve block above and the solver tests).
+ * Total USABLE-canvas fraction ALL stickers chase together (v3 — see the
+ * sizing-policy doc above). The usable canvas is the paintable region: card
+ * minus safe margins, below the (padded) greeting-text strip.
  */
-const FILL_COVERAGE = 0.7;
+const CANVAS_COVERAGE_TARGET = 0.8;
 /**
- * Size-equalization blend (0..1): the fraction of the per-item share that
- * comes from the FLAT equal split rather than the visualWeight-weighted
- * split (see the equalization note above; 0 = old pure weight split). 0.5
+ * Size-equalization blend (0..1): the fraction of the support pool that comes
+ * from the FLAT equal split rather than the visualWeight-weighted
+ * split (see the sizing-policy doc above; 0 = pure weight split). 0.5
  * keeps a visible size hierarchy for very different weights while similar
  * weights land within ~1.25× of each other (tested).
  */
 const EQUALIZE_FRAC = 0.5;
-/**
- * Per-item DISPLAY-WIDTH targets (fraction of card width) for few-item
- * layouts (2 ≤ n ≤ 5) — the few-item sizing policy of the sizing-accuracy
- * pass. Width, not area, because the user-visible complaint is width
- * ("stickers do not maximize the card space", "sizes not equal or similar")
- * and because an AREA share translates into aspect-dependent widths (a
- * landscape sticker's share-faithful width is 1.3× a portrait's at the same
- * share — the direct cause of unequal siblings; see the measured-ceilings
- * block above).
- *
- * Values are tuned just under the measured jointly-feasible ceilings at the
- * 10% true-overlap tolerance (binary-search probe over exact SAT overlap on
- * the default card: two squares ≈ 0.55–0.58 width, portrait-mix pair ≈ 0.50,
- * three mixed items ≈ 0.48, five ≈ 0.41; landscape pairs reach ≈ 0.72):
- *   n=2 → 0.56, n=3 → 0.48, n=4 → 0.42, n=5 → 0.38.
- * (The brief's aspirational "n=2 both ≥ 0.60" is geometrically unreachable
- * for SQUARE stickers on the 5:7 card under the fixed greeting zone + 4%
- * margins + honest 10% overlap — documented; landscape pairs DO exceed 0.60.)
- * The n = 2 target sits AT the measured axis-aligned ceiling (≈ 0.58): the
- * solver's fidelity term + refinement converge to the largest jointly
- * feasible pair, so a target at the ceiling drives both stickers to ≥ 0.55
- * without overshooting into infeasibility (final-pass measurement, seeds
- * 1–5, two equal 256×256 squares: both ≥ 0.55 on every seed, worst-pair SAT
- * overlap ≤ 0.10).
- * The visualWeight blend (EQUALIZE_FRAC) and the size-window clamp still
- * modulate the target; the per-candidate scale fallback + fidelity term
- * remain the feasibility mechanism. n = 1 keeps the solo area target and
- * n ≥ 6 keeps the area-share curve (perItemShare) — legacy behavior.
- */
-const PER_ITEM_WIDTH_TARGET: Record<number, number> = {
-  // n=2 must sit BELOW the geometric ceiling (~0.576 for equal squares under
-  // the 10% overlap cap on the 5:7 card: (2w−657)(2w−720) ≤ 0.1w² ⇒ w ≤ 411px).
-  // A target above the ceiling guarantees one item starves while the other
-  // holds the target (measured: 0.58 target → pairs like 0.55/0.42). 0.55
-  // leaves the ~10% overlap budget as headroom for the diagonal packing.
-  2: 0.55,
-  3: 0.48,
-  4: 0.42,
-  5: 0.38,
-};
-/** Blend window [start, end] over which the fill curve converges to the
- * legacy TOTAL_COVERAGE_TARGET/n split (fully legacy from n = 12 on). */
-const FILL_BLEND_START = 5;
-const FILL_BLEND_END = 12;
-/**
- * Per-item cap on the DESIRED area as a fraction of the card area — kept as
- * a SAFEGUARD for large n only (applied when n ≥ MAX_ITEM_CAP_MIN_ITEMS).
- * It used to apply from n = 2 and was the direct cause of the small second
- * sticker; with the v2 curve the share for n ≥ 8 is always well below the
- * cap, so the cap no longer binds at any n — it only guards against a future
- * target-curve change pushing large-n desired areas past the crowded-card
- * ceiling. The solo target (65%) is intentionally exempt.
- */
-const MAX_ITEM_AREA_SHARE = 0.22;
-const MAX_ITEM_CAP_MIN_ITEMS = 8;
 
 // ---------------------------------------------------------------------------
 // Hero-montage policy (dominant hero + orbiting supports)
 // ---------------------------------------------------------------------------
 /**
- * Hero-montage sizing: the card's TOP-RANKED sticker (the HERO) is sized
- * dominantly at HERO_WIDTH_TARGET = 0.65 of the card width; the remaining
- * stickers (SUPPORTS) fill the whitespace AROUND the hero and may tuck
- * BEHIND it (hero–support pairs get the deeper HERO_TUCK_CAP overlap; the
- * hero renders on top). Hard floor: every support's display width is at
- * least SUPPORT_HERO_FLOOR × the hero's width — enforced as a HARD clamp in
- * the candidate generator (a candidate below the floor is re-clamped UP to
- * the floor; if even the floor cannot fit the hard constraints in any cell,
- * the per-cell fallback ladder resolves downward, documented in
- * candidatesFor — the floor yields to the hard in-bounds/overlap/minSize
- * constraints, never the other way around).
+ * Hero-montage sizing (layout hierarchy v3): the card's TOP-RANKED sticker
+ * (the HERO) is sized dominantly at HERO_WIDTH_TARGET = 0.60 of the card
+ * width and CENTERED; the remaining stickers (SUPPORTS) fill the canvas
+ * AROUND the hero and may tuck BEHIND it (hero–support pairs get the deeper
+ * HERO_TUCK_CAP overlap; the hero renders on top). HARD floor at EVERY item
+ * count: every support's display width is at least SUPPORT_HERO_FLOOR × the
+ * hero's width — enforced as a hard clamp in the candidate generator, the
+ * local search and the rebalance pass. There is NO soft resolution below the
+ * floor anymore (the former space-check-gated / large-n unconditional yield
+ * is retired): when the floor cannot fit, the HERO yields instead — see the
+ * degradation ladder in solveLayout — and the floor follows the shrunk hero
+ * (it is measured against the hero's ACTUAL placed scale). Only when even
+ * the minimum hero cannot make room do supports' desired scales shrink
+ * toward the floor (never below it) and, last, items are dropped (warned).
  *
- * SPACE-AWARE FLOOR RESOLUTION (top-corner utilization pass): the floor's
- * soft resolution (the no-floor retry in candidatesFor) used to run
- * unconditionally whenever no cell fit the floored scale — supports shrank
- * below 0.5×hero even when the card still had room. Now the yield is gated
- * by a SPACE CHECK: the placed AABB-union coverage of the USABLE area (below
- * the padded text strip, inside the safe margin, sampled on a fixed grid —
- * usableAreaCoverage below). While coverage < SPACE_CHECK_COVERAGE (0.70)
- * the floor stays HARD for few-item layouts (n ≤ 5): supports keep ≥ 0.5×hero
- * and fill the roomy bottom band / lower corner-tuck slots; only when the
- * card is actually crowded (coverage ≥ 0.70), or once the relaxation regime
- * has engaged (desiredShrink < 1 — every space-preserving option is
- * exhausted, see solveLayout), does the floor yield as before. Large-n
- * layouts (n > 5) keep the UNCONDITIONAL yield: there the floor is a pure
- * safety net over the legacy per-item share curve and gating it would
- * starve/drop supports (measured 18/25 placed at n = 25 with a hard floor).
+ * TOTAL-CANVAS COVERAGE: all stickers together chase CANVAS_COVERAGE_TARGET
+ * = 0.80 of the usable canvas (see the sizing-policy v3 doc). Measured on
+ * the default 5:7 card (equal squares, seeds 1–5, greeting zone reserved):
+ * the 0.60 hero + hard floor regime holds through n = 3 (n_max = 3); beyond
+ * that the hero-shrink ladder engages and the measured hero curve is (see
+ * HERO_SHRINK_STEP's doc for the final numbers). The AREA budget reaches
+ * ≈ 0.80 of the usable canvas at n = 3; the placed AABB-union coverage
+ * plateaus ≈ 0.61–0.79 across n = 2–25 (packing + tuck overlap keep the
+ * union below the area budget — see the solver tests for the pinned
+ * windows).
+ *
+ * SPACE-AWARE ORDER RETRY: the relaxation ladder's FIRST step (see
+ * solveLayout) is gated by a SPACE CHECK: the placed AABB-union coverage of
+ * the USABLE area (below the padded text strip, inside the safe margin,
+ * sampled on a fixed grid — usableAreaCoverage below). While coverage <
+ * SPACE_CHECK_COVERAGE (0.75) the card is not crowded, so the placement
+ * ORDER is retried once with the non-hero order REVERSED (smaller-weight
+ * late arrivals get first pick of the empty space, hero still first) before
+ * the hero is shrunk.
  *
  * HERO TOP CORNERS: the hero is centered, so its top corners (x flanks at
  * hero top, y between the text-strip bottom and the hero's top edge) are
@@ -450,9 +400,8 @@ const MAX_ITEM_CAP_MIN_ITEMS = 8;
  * per side (tuck 1.0) that the per-cell ladder can resolve at sub-desired
  * scales against the outer margin. Measured (equal squares, seeds 1–5):
  * top-corner region coverage (x ∈ [0, 0.25] ∪ [0.75, 1], y ∈ [0.24, 0.45])
- * at n = 4 rises from 0.31–0.52 to ≈ 0.5–0.62 (the yielding supports now
- * land in OPTIMAL corner slots instead of wherever the below-floor ladder
- * happened to fit).
+ * at n = 4 is 0.46–0.81 (the yielding supports land in corner slots instead
+ * of wherever the below-floor ladder happened to fit).
  *
  * HERO DESIGNATION: a hint with role:"focal" (the layout AI's
  * layout_composition output) designates the hero; absent a focal hint the
@@ -462,25 +411,27 @@ const MAX_ITEM_CAP_MIN_ITEMS = 8;
  * the hero size and the previous hero resizes as a support — the solver
  * re-solves the whole card on every arrival.
  *
- * LARGE n: at large item counts the per-item share curve (perItemShare,
- * legacy TOTAL_COVERAGE_TARGET/n split) shrinks the hero like everyone
- * else; supports shrink with it and the 0.5× floor is maintained by the
- * same desired-scale floor + hard clamp (with equal-ish weights the shares
- * are near-equal, so the floor rarely binds — it is a safety net).
+ * LARGE n: at large item counts the supports sit at their 0.5×hero floor and
+ * the hero-shrink ladder (solveLayout) sizes the hero so the floor-sized
+ * supports fit; supports shrink WITH the hero, keeping the 0.5× ratio (the
+ * floor is measured against the hero's ACTUAL placed scale). The measured
+ * hero curve is documented at HERO_SHRINK_STEP and pinned in the solver
+ * tests.
  */
 /** Hero (rank 0) display-width target: fraction of the card width. */
-const HERO_WIDTH_TARGET = 0.65;
+const HERO_WIDTH_TARGET = 0.6;
 /** Hard floor: any non-hero sticker's width ≥ this fraction of the hero's. */
 const SUPPORT_HERO_FLOOR = 0.5;
 /**
- * SPACE CHECK threshold (space-aware support floor, see the block below):
- * the placed AABB-union coverage of the USABLE area (below the padded text
- * strip, inside the safe margin). Below this the card is NOT crowded and the
- * 0.5×hero floor must NOT soft-resolve; at/above it the card is crowded and
- * the floor may yield (per-cell ladder below the floor) so late supports can
- * still be placed instead of dropped.
+ * SPACE CHECK threshold (space-aware order retry, see solveLayout): the
+ * placed AABB-union coverage of the USABLE area (below the padded text
+ * strip, inside the safe margin). Below this the card is NOT crowded and
+ * the relaxation ladder's first step is the reversed-order retry (not a
+ * shrink). Raised 0.70 → 0.75 to match the v3 total-coverage target
+ * (CANVAS_COVERAGE_TARGET = 0.80): the check now asks "is the canvas ≥ ¾
+ * full".
  */
-const SPACE_CHECK_COVERAGE = 0.7;
+const SPACE_CHECK_COVERAGE = 0.75;
 /**
  * Hero-corner anchor seeds (top-corner utilization, see candidatesFor): only
  * the FIRST FEW SUPPORTS get the corner anchors — by the time later supports
@@ -555,113 +506,100 @@ export function heroItemIdOf(
 }
 
 /**
- * Desired card-area share per item for an n-item layout (see the
- * sizing-policy v2 doc above). Monotonically non-increasing in n.
+ * The paintable region: card inside the safe margins, below the (2%-padded)
+ * greeting-text strip. Shared by the coverage budget (desiredScales) and the
+ * SPACE CHECK (usableAreaCoverage) so both measure the same canvas.
  */
-export function perItemShare(n: number): number {
-  if (n <= 1) return SOLO_ITEM_COVERAGE;
-  const fill = FILL_COVERAGE / n;
-  const legacy = TOTAL_COVERAGE_TARGET / n;
-  const t = Math.min(
-    1,
-    Math.max(0, (n - FILL_BLEND_START) / (FILL_BLEND_END - FILL_BLEND_START)),
-  );
-  return Math.min(SOLO_ITEM_COVERAGE, fill + (legacy - fill) * t);
+function usableAreaRect(card: CardBox, textZone: Rect | null): Rect {
+  const m = safeMargin(card);
+  const pad = TEXT_ZONE_PAD_FRAC * Math.min(card.w, card.h);
+  const y1 = Math.max(m.y, textZone ? textZone.y + textZone.h + pad : 0);
+  return {
+    x: m.x,
+    y: y1,
+    w: card.w - 2 * m.x,
+    h: card.h - m.y - y1,
+  };
 }
 
 /**
- * Desired display scale per item under the coverage-proportional policy.
- * Returns itemId → scale (already clamped to the size window).
+ * Desired display scale per item under the v3 hero-montage + canvas-coverage
+ * policy (see the sizing-policy doc above). Returns itemId → scale (already
+ * clamped to the size window).
  */
 function desiredScales(
   ordered: LayoutItem[],
   card: CardBox,
   k: number,
   minSizePct: number,
+  /** Area of the usable canvas (see usableAreaRect) — the coverage budget's
+   *  denominator. */
+  usableArea: number,
+  /** This attempt's hero width target (fraction of card width) — the v3
+   *  degradation ladder passes a shrunk value on later relaxations. */
+  heroWidthTarget: number,
   /** Optional itemId → importance (0..1 hint) overriding visualWeight in the
-   *  share split — hint importance orders size WITHIN a group so the group's
-   *  focal item gets the larger share (equalization blend unchanged). */
+   *  support split — hint importance orders size WITHIN a group so the
+   *  group's focal item gets the larger share (equalization blend unchanged). */
   weightOverride?: Map<string, number>,
 ): Map<string, number> {
   const n = ordered.length;
-  // Desired area per item under the v2 share curve (see the sizing-policy
-  // doc above). The MAX_ITEM_AREA_SHARE safeguard only engages for large n
-  // (n ≥ MAX_ITEM_CAP_MIN_ITEMS); for small n the share itself IS the
-  // target and the hard constraints do the feasibility trimming via the
-  // per-candidate scale fallback.
   const cardArea = card.w * card.h;
-  const capArea =
-    n >= MAX_ITEM_CAP_MIN_ITEMS ? MAX_ITEM_AREA_SHARE * cardArea : Infinity;
   const eff = ordered.map((i) => {
     const o = weightOverride?.get(i.id);
     return o !== undefined ? Math.max(o, 0) : Math.max(i.visualWeight, WEIGHT_FLOOR);
   });
-  const sum = eff.reduce((s, w) => s + w, 0);
   const map = new Map<string, number>();
-  // Few-item width policy for 2 ≤ n ≤ 5 (see PER_ITEM_WIDTH_TARGET); the
-  // area-share curve keeps driving n = 1 (solo) and n ≥ 6 (legacy split).
-  const widthTarget = PER_ITEM_WIDTH_TARGET[n];
-  // Hero-montage: rank 0 IS the hero (heroItemIdOf decides; `ordered` is
-  // already re-ranked hero-first by the caller). Its desired width is the
-  // policy-fixed HERO_WIDTH_TARGET (few-item mode) or the area-share width
-  // (legacy mode); every support's desired width is floored at
-  // SUPPORT_HERO_FLOOR × the hero's desired width.
   const heroItem = ordered[0]!;
-  // USER DECISION (hero-montage v2): the hero stays at HERO_WIDTH_TARGET
-  // (0.65 × card width) for ALL item counts — no legacy-curve shrink at
-  // n ≥ 6. The hero only yields if physically infeasible (per-cell fallback
-  // ladder trims; hard constraints always win).
-  const heroDesiredWidth = HERO_WIDTH_TARGET * card.w;
+  // n = 1 keeps the solo "as big as possible" curve (see the sizing-policy
+  // doc); the 0.60 hero target is a montage rule (dominance over supports).
+  // Display area = w × h = w² × (imgH/imgW)  →  w = sqrt(area × imgW/imgH).
+  const heroDesiredWidth =
+    n === 1
+      ? Math.sqrt(
+          (SOLO_ITEM_COVERAGE * cardArea * heroItem.imgW) / heroItem.imgH,
+        )
+      : heroWidthTarget * card.w;
   const supportFloorWidth = SUPPORT_HERO_FLOOR * heroDesiredWidth;
+  // Remaining canvas-coverage budget after the hero's committed area, split
+  // across the supports (see the sizing-policy doc above).
+  const heroDesiredArea =
+    (heroDesiredWidth * heroDesiredWidth * heroItem.imgH) / heroItem.imgW;
+  const supportPool = Math.max(
+    0,
+    CANVAS_COVERAGE_TARGET * usableArea - heroDesiredArea,
+  );
+  const nS = n - 1;
+  const sumS = eff.slice(1).reduce((s, w) => s + w, 0);
   for (let i = 0; i < n; i++) {
     const item = ordered[i]!;
-    // Size equalization: blend the visualWeight-weighted split 50/50 with a
-    // flat equal split (EQUALIZE_FRAC; WEIGHT_FLOOR unchanged). Both splits
-    // normalize to the same total (n × perItemShare for areas, n ×
-    // widthTarget for widths), so the blend preserves the policy total —
-    // only its distribution changes.
-    const weightedShare = (n * eff[i]!) / sum;
-    const share = EQUALIZE_FRAC * 1 + (1 - EQUALIZE_FRAC) * weightedShare;
-    // USER DECISION: the 0.5×hero support floor applies only in the few-item
-    // range (n ≤ 5) where geometry allows it alongside a 0.65 hero — beyond
-    // that the floor's sheer area demand (n × 0.106 card areas) exceeds the
-    // card and starves/DROPS supports (measured: 18/25 placed at n=25). The
-    // floor remains a goal via the candidate-level clamp's soft resolution.
-    const floorApplies = supportFloorWidth > 0 && n <= 5;
-    if (widthTarget !== undefined) {
-      // Few-item width policy: the hero takes the policy-fixed hero width;
-      // supports take the table target × share, floored at the hero floor.
-      const desiredWidth =
-        i === 0
-          ? heroDesiredWidth
-          : Math.max(
-              widthTarget * share * card.w,
-              floorApplies ? supportFloorWidth : 0,
-            );
-      const scale = desiredWidth / (item.imgW * k);
-      map.set(item.id, scaleFor(item, card, k, scale, minSizePct));
+    if (i === 0) {
+      // Rank 0 IS the hero (heroItemIdOf decides; `ordered` is already
+      // re-ranked hero-first by the caller).
+      map.set(
+        item.id,
+        scaleFor(item, card, k, heroDesiredWidth / (item.imgW * k), minSizePct),
+      );
       continue;
     }
-    // Area path (n = 1 solo target; n ≥ 6 legacy coverage split):
-    // perItemShare(n) is ALREADY a per-item share of the card area, so the
-    // visualWeight proportions are normalized by n·share (= 1 for equal
-    // weights): heavier items get more than perItemShare, lighter ones
-    // less, and the intended total stays n × perItemShare.
-    const desiredArea = Math.min(perItemShare(n) * cardArea, capArea) * share;
-    // Display area = w × h = w² × (imgH/imgW)  →  w = sqrt(area × imgW/imgH).
-    // Supports are floored at SUPPORT_HERO_FLOOR × the hero's desired width
-    // (the hero can shrink with the curve, but supports shrink WITH it).
-    // USER DECISION: rank 0 (hero) is ALWAYS heroDesiredWidth (0.65 × card
-    // width) in every mode; only supports follow the share curve here.
-    const desiredWidth =
-      i === 0
-        ? heroDesiredWidth
-        : Math.max(
-            Math.sqrt((desiredArea * item.imgW) / item.imgH),
-            floorApplies ? supportFloorWidth : 0,
-          );
-    const scale = desiredWidth / (item.imgW * k);
-    map.set(item.id, scaleFor(item, card, k, scale, minSizePct));
+    // Size equalization: blend the visualWeight-weighted split 50/50 with a
+    // flat equal split of the support pool (EQUALIZE_FRAC; WEIGHT_FLOOR
+    // unchanged). Both splits spend the whole pool, so the blend preserves
+    // the policy total — only its distribution changes.
+    const share = EQUALIZE_FRAC / nS + (1 - EQUALIZE_FRAC) * (eff[i]! / sumS);
+    const desiredArea = supportPool * share;
+    let desiredWidth = Math.sqrt((desiredArea * item.imgW) / item.imgH);
+    // v3: supports sit in [SUPPORT_HERO_FLOOR × hero, hero] — at least half
+    // the hero at EVERY item count, never larger than the hero (focal
+    // prominence).
+    desiredWidth = Math.min(
+      heroDesiredWidth,
+      Math.max(supportFloorWidth, desiredWidth),
+    );
+    map.set(
+      item.id,
+      scaleFor(item, card, k, desiredWidth / (item.imgW * k), minSizePct),
+    );
   }
   return map;
 }
@@ -676,14 +614,14 @@ interface Placed {
 }
 
 /**
- * SPACE CHECK (space-aware support floor — see the hero-montage policy
- * block): placed AABB-union coverage of the USABLE area, i.e. the card
- * inside the safe margin and BELOW the (2%-padded) greeting-text strip —
- * the region the solver can actually paint. Sampled on a fixed COVERAGE_GRID
- * grid (pure + deterministic; placement x/y ARE the centroids). Used to
- * decide (a) whether the 0.5×hero support floor may soft-resolve in
- * candidatesFor and (b) whether the relaxation loop may shrink desired
- * scales or must first retry the placement order (solveLayout).
+ * SPACE CHECK (v3 — see the hero-montage policy block): placed AABB-union
+ * coverage of the USABLE area, i.e. the card inside the safe margin and
+ * BELOW the (2%-padded) greeting-text strip — the region the solver can
+ * actually paint. Sampled on a fixed COVERAGE_GRID grid (pure +
+ * deterministic; placement x/y ARE the centroids). Used by the relaxation
+ * ladder to decide (a) whether the placement ORDER is retried (reversed)
+ * before the hero shrinks and (b) whether the canvas is crowded; the
+ * solver's coverage budget uses usableAreaRect directly.
  */
 function usableAreaCoverage(
   placed: readonly Placed[],
@@ -692,15 +630,11 @@ function usableAreaCoverage(
   textZone: Rect | null,
 ): number {
   if (placed.length === 0) return 0;
-  const m = safeMargin(card);
-  const pad = TEXT_ZONE_PAD_FRAC * Math.min(card.w, card.h);
-  const ux1 = m.x;
-  const ux2 = card.w - m.x;
-  const uy1 = Math.max(
-    m.y,
-    textZone ? textZone.y + textZone.h + pad : 0,
-  );
-  const uy2 = card.h - m.y;
+  const ua = usableAreaRect(card, textZone);
+  const ux1 = ua.x;
+  const ux2 = ua.x + ua.w;
+  const uy1 = ua.y;
+  const uy2 = ua.y + ua.h;
   if (!(ux2 > ux1) || !(uy2 > uy1)) return 1; // degenerate usable area → crowded
   const N = COVERAGE_GRID;
   let covered = 0;
@@ -723,7 +657,9 @@ function usableAreaCoverage(
 /**
  * One solve attempt at a given minSize / text-rule policy. Items that cannot
  * satisfy the hard constraints are returned in `unplaced` (never placed
- * illegally).
+ * illegally). `desiredShrink` lowers supports' desired scales (clamped AT
+ * the 0.5×hero floor); `heroWidthTarget` is this attempt's hero width target
+ * (the v3 degradation ladder passes a shrunk value on later relaxations).
  */
 function attemptSolve(
   items: LayoutItem[],
@@ -732,6 +668,7 @@ function attemptSolve(
   dropTextBeyond: number | null,
   desiredShrink = 1,
   reverseNonHero = false,
+  heroWidthTarget: number = HERO_WIDTH_TARGET,
 ): { placed: Placed[]; unplaced: LayoutItem[]; textZoneUsed: boolean } {
   const card = opts.cardDims;
   const k = opts.k ?? baseFit(card);
@@ -805,27 +742,55 @@ function attemptSolve(
   const textRuleApplies = (item: LayoutItem): boolean =>
     dropTextBeyond === null || ordered.indexOf(item) < dropTextBeyond;
 
-  // Coverage-proportional desired scale per item (sizing policy — see the
-  // block comment above). Seeds the candidate scale jitter. Hint importance
-  // (when present) overrides visualWeight in the share split.
+  // v3 desired scales (sizing policy — see the block comment above). Seeds
+  // the candidate scale jitter. Hint importance (when present) overrides
+  // visualWeight in the support split. The coverage budget is measured on
+  // the USABLE canvas (card minus margins, below the padded text strip).
+  const ua = usableAreaRect(card, opts.textZone);
+  const usableArea = ua.w > 0 && ua.h > 0 ? ua.w * ua.h : card.w * card.h;
   const rawDesired = desiredScales(
     ordered,
     card,
     k,
     minSizePct,
+    usableArea,
+    heroWidthTarget,
     importanceOverride.size > 0 ? importanceOverride : undefined,
   );
-  // Relaxation shrink: supports' desired scales shrink toward the floor; the
-  // HERO keeps its full desired width (user rule: hero stays ~0.65).
-  // (heroId is already computed above from the same ordered list + hints.)
+  // Relaxation shrink: supports' desired scales shrink TOWARD the 0.5×hero
+  // floor, never below it (v3: the floor holds at every stage — the HERO is
+  // what yields, see solveLayout's ladder). The hero keeps its full desired
+  // width. (heroId is already computed above from the same ordered list +
+  // hints.)
+  const supportFloorWidth = SUPPORT_HERO_FLOOR * heroWidthTarget * card.w;
   const desired = new Map(
-    [...rawDesired].map(([id, s]) => [
-      id,
-      id === heroId ? s : s * desiredShrink,
-    ]),
+    [...rawDesired].map(([id, s]) => {
+      if (id === heroId) return [id, s] as const;
+      const it = ordered.find((o) => o.id === id);
+      const floorScale = it ? supportFloorWidth / (it.imgW * k) : 0;
+      return [id, Math.max(s * desiredShrink, floorScale)] as const;
+    }),
   );
 
   const itemsById = new Map(items.map((i) => [i.id, i] as const));
+
+  /**
+   * v3 support floor (SUPPORT_HERO_FLOOR × the hero's ACTUAL placed scale) as
+   * a SCALE for `item` — 0 when the hero is not (yet) placed or `item` IS the
+   * hero. Enforced hard everywhere: candidate generation, local search and
+   * the rebalance pass (see the hero-montage policy block — no soft
+   * resolution below the floor at any item count).
+   */
+  const heroFloorScaleFor = (item: LayoutItem, placedSet: Placed[]): number => {
+    if (item.id === heroId) return 0;
+    const heroEntry = placedSet.find((p) => p.item.id === heroId);
+    if (!heroEntry) return 0;
+    return (
+      (displayWidth(heroEntry.item, heroEntry.placement.scale, k) /
+        (heroEntry.item.imgW * k)) *
+      SUPPORT_HERO_FLOOR
+    );
+  };
 
   /** Normalize an angle to (−180, 180]. */
   const norm180 = (deg: number): number => {
@@ -904,17 +869,11 @@ function attemptSolve(
 
     // Hero-montage support floor: a non-hero candidate's scale is clamped UP
     // to SUPPORT_HERO_FLOOR × the hero's ACTUAL placed scale (hard clamp —
-    // see the policy doc). If even the floored scale cannot fit the hard
-    // constraints anywhere, the whole pass is retried WITHOUT the floor: the
-    // ladder then resolves below the floor rather than emitting nothing (the
-    // hard in-bounds/overlap/minSize constraints always win over the floor).
+    // see the policy doc; v3: no soft resolution below the floor at any item
+    // count — when no cell fits the floored scale the support stays
+    // unplaced and the relaxation ladder shrinks the HERO instead).
     const heroEntry = placed.find((p) => p.item.id === heroId);
-    const supportFloorScale =
-      item.id !== heroId && heroEntry
-        ? (displayWidth(heroEntry.item, heroEntry.placement.scale, k) /
-            (heroEntry.item.imgW * k)) *
-          SUPPORT_HERO_FLOOR
-        : 0;
+    const supportFloorScale = heroFloorScaleFor(item, placed);
 
     // Clamp a candidate's center so THIS item's rotated AABB (at the given
     // scale/rotation) stays inside the safe area — big items get their
@@ -1081,21 +1040,21 @@ function attemptSolve(
     // Per cell: try scale fallback steps largest→smallest inside the cell;
     // the first (largest) scale whose candidate passes the hard constraints
     // (bounds + size + text rule + pairwise overlap) wins that cell. The
-    // support floor (hero-montage) is applied as a hard clamp first; only
-    // when NO cell yields a floored candidate does the retry without the
-    // floor run (documented ladder resolution) — and, for few-item layouts,
-    // ONLY when the SPACE CHECK says the card is actually crowded (coverage
-    // ≥ SPACE_CHECK_COVERAGE) or the relaxation regime has already engaged
-    // (desiredShrink < 1): while empty space remains the floor stays hard
-    // (supports keep ≥ 0.5×hero; unplaceable-at-floor supports go to the
-    // solveLayout relaxation which retries the ORDER before shrinking).
-    // Large-n layouts (n > 5) keep the unconditional yield — there the floor
-    // is a pure safety net (see the policy block).
-    const runCells = (withFloor: boolean): Placement[] => {
+    // support floor (hero-montage) is applied as a HARD clamp — v3 has NO
+    // soft resolution below the floor at ANY item count (the former
+    // space-check-gated / n > 5 no-floor retry is retired): when no cell fits
+    // the floored scale, the support stays unplaced and the relaxation
+    // ladder shrinks the HERO instead — the floor follows the shrunk hero
+    // (it is measured against the hero's ACTUAL placed scale; see
+    // solveLayout). Only in the final desiredShrink stage — after the hero
+    // is already at its minimum — does the desired (and with it the
+    // ladder's start point) drop TOWARD the floor, and supports that still
+    // cannot fit at the floor go to the drop path (warned).
+    const runCells = (): Placement[] => {
       const out: Placement[] = [];
       // The ladder may fall all the way to the item's MIN-SIZE scale (not
       // just 0.7×desired): when the card is crowded (many supports around a
-      // 0.65 hero), a support's desired scale is unreachable and its ladder
+      // 0.60 hero), a support's desired scale is unreachable and its ladder
       // must bottom out at the (already relaxed) minimum legible size —
       // otherwise crowded supports get DROPPED instead of shrunk (measured:
       // 12/16 placed at n=16 before this).
@@ -1106,7 +1065,7 @@ function attemptSolve(
           const cand = makeCand(
             seed.x,
             seed.y,
-            withFloor ? Math.max(raw, supportFloorScale) : raw,
+            Math.max(raw, supportFloorScale),
             seed.rotLocked ? seed.rot : seed.rot * step,
           );
           if (ok(cand)) {
@@ -1117,16 +1076,7 @@ function attemptSolve(
       }
       return out;
     };
-    let cands = runCells(true);
-    if (cands.length === 0 && supportFloorScale > 0) {
-      const floorMayYield =
-        items.length > 5 ||
-        desiredShrink < 1 ||
-        usableAreaCoverage(placed, card, k, opts.textZone) >=
-          SPACE_CHECK_COVERAGE;
-      if (floorMayYield) cands = runCells(false);
-    }
-    return cands;
+    return runCells();
   };
 
   /**
@@ -1383,17 +1333,10 @@ function attemptSolve(
         ? Math.min(p.placement.scale, desiredScale)
         : 0;
     // Hero-montage: non-hero items also keep the 0.5×hero floor through the
-    // local search (measured against the hero's CURRENT scale).
+    // local search (measured against the hero's CURRENT scale) — hard at
+    // every item count (v3).
     if (item.id !== heroId) {
-      const heroEntry = placed.find((e) => e.item.id === heroId);
-      if (heroEntry) {
-        scaleFloor = Math.max(
-          scaleFloor,
-          (displayWidth(heroEntry.item, heroEntry.placement.scale, k) /
-            (heroEntry.item.imgW * k)) *
-            SUPPORT_HERO_FLOOR,
-        );
-      }
+      scaleFloor = Math.max(scaleFloor, heroFloorScaleFor(item, placed));
     }
     const moved: Placement = {
       ...p.placement,
@@ -1482,13 +1425,21 @@ function attemptSolve(
       const currentObj = objective(placed.map((p) => p.placement));
       let best: { wide: Placement; narrow: Placement; obj: number } | null = null;
       for (const f of REBALANCE_LADDER) {
-        const trialScale = scaleFor(
+        const trialScaleBase = scaleFor(
           wideEntry.item,
           card,
           k,
           wideEntry.placement.scale * f,
           minSizePct,
         );
+        // v3: a SUPPORT's trial scale must stay ≥ 0.5× the hero's ACTUAL
+        // placed scale (the floor is absolute — see the hero-montage policy
+        // block); the HERO itself may shrink through this ladder (that is
+        // exactly the "hero yields" mechanism).
+        const trialScale =
+          wideEntry.item.id === heroId
+            ? trialScaleBase
+            : Math.max(trialScaleBase, heroFloorScaleFor(wideEntry.item, placed));
         // Skip rungs that would GROW the wide item (the ladder only shrinks
         // or re-places at equal size); f = 1 stays — re-placing BOTH items at
         // full scale in fresh spots is the compound move that finds the
@@ -1595,27 +1546,27 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
   let minSizePct = MIN_ITEM_SIZE_PCT;
   const card = opts.cardDims;
   const k = opts.k ?? baseFit(card);
-  let result = attemptSolve(items, opts, minSizePct, null);
+  let result = attemptSolve(items, opts, minSizePct, null, 1, false, HERO_WIDTH_TARGET);
   let relaxations = 0;
-  // On retry, ALSO shrink supports' DESIRED scales (not just minSize):
-  // lowering minSize alone doesn't help when the greedy commits early
-  // supports at near-desired size and the card fills up — the stragglers
-  // then find no room at ANY scale ≥ min (measured: 12/16 placed at n=16
-  // before this). The hero keeps its full desired width (user rule).
-  //
-  // SPACE-AWARE FLOOR RESOLUTION (top-corner utilization pass): shrinking
-  // used to kick in on EVERY retry — supports went below 0.5×hero even when
-  // empty space remained. Now each relaxation step first runs a SPACE CHECK
-  // (usableAreaCoverage of the failed attempt's placed set): while coverage
-  // < SPACE_CHECK_COVERAGE the card is NOT crowded, so desired scales are
-  // NOT shrunk; instead the placement ORDER is retried (reverseNonHero —
-  // the smaller-weight late arrivals get FIRST pick of the empty space, the
-  // hero still first; a one-shot pass, tracked by `reversedTried`). Only
-  // when coverage ≥ SPACE_CHECK_COVERAGE (card actually crowded) OR the
-  // reversed retry still leaves items unplaced does desiredShrink engage as
-  // before (which also unlocks the floor's soft resolution in
-  // candidatesFor — every space-preserving option is exhausted at that
-  // point, so the hard constraints win as always).
+  // v3 DEGRADATION LADDER (in order — each stage only when the previous one
+  // failed to place everything):
+  //   1. SPACE CHECK (usableAreaCoverage of the failed attempt's placed set):
+  //      while coverage < SPACE_CHECK_COVERAGE the card is NOT crowded, so
+  //      nothing shrinks; instead the placement ORDER is retried once
+  //      (reverseNonHero — the smaller-weight late arrivals get FIRST pick of
+  //      the empty space, the hero still first; one-shot, tracked by
+  //      `reversedTried`).
+  //   2. HERO YIELDS: the hero's width target drops by HERO_SHRINK_STEP per
+  //      relaxation down to HERO_MIN_WIDTH_TARGET. The 0.5×hero support
+  //      floor holds RELATIVE to the shrunk hero (it is measured against the
+  //      hero's ACTUAL placed scale), so supports never go below half the
+  //      hero — the floor is what HOLDS, the hero is what gives.
+  //   3. DESIRED SHRINK (hero already at its minimum): supports' desired
+  //      scales shrink toward the floor (clamped AT the floor — never below
+  //      it; the candidate clamp keeps every support ≥ 0.5×hero) and minSize
+  //      keeps relaxing. Whatever still cannot fit at the floor goes to the
+  //      drop path below.
+  let heroTarget = HERO_WIDTH_TARGET;
   let desiredShrink = 1;
   let reversedTried = false;
   while (result.unplaced.length > 0 && relaxations < MAX_RELAXATIONS) {
@@ -1626,14 +1577,24 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
       // Space exists — do NOT shrink; give the starved late arrivals first
       // pick of it (hero still first).
       reversedTried = true;
-      result = attemptSolve(items, opts, minSizePct, null, desiredShrink, true);
+      result = attemptSolve(items, opts, minSizePct, null, desiredShrink, true, heroTarget);
+    } else if (heroTarget > HERO_MIN_WIDTH_TARGET + 1e-9) {
+      // The hero yields first (progressive shrink); the floor holds relative
+      // to the shrunk hero.
+      heroTarget = Math.max(HERO_MIN_WIDTH_TARGET, heroTarget - HERO_SHRINK_STEP);
+      result = attemptSolve(items, opts, minSizePct, null, desiredShrink, false, heroTarget);
     } else {
       desiredShrink = Math.max(0.35, desiredShrink - 0.15);
-      result = attemptSolve(items, opts, minSizePct, null, desiredShrink);
+      result = attemptSolve(items, opts, minSizePct, null, desiredShrink, false, heroTarget);
     }
   }
   if (relaxations > 0 && minSizePct < MIN_ITEM_SIZE_PCT) {
     warnings.push(`relaxed min item size to ${minSizePct}% of card width`);
+  }
+  if (heroTarget < HERO_WIDTH_TARGET - 1e-9) {
+    warnings.push(
+      `hero width target relaxed to ${(heroTarget * 100).toFixed(0)}% of card width`,
+    );
   }
 
   // Last resort: drop the text-overlap rule for items beyond the first 20.
@@ -1641,7 +1602,7 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
     warnings.push(
       `text-overlap rule dropped for items beyond the first ${TEXT_RULE_DROP_LIMIT}`,
     );
-    result = attemptSolve(items, opts, minSizePct, TEXT_RULE_DROP_LIMIT);
+    result = attemptSolve(items, opts, minSizePct, TEXT_RULE_DROP_LIMIT, desiredShrink, false, heroTarget);
   }
 
   // Items that STILL cannot fit are omitted (bounds + minSize are hard).
