@@ -260,10 +260,37 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
 
   const team = snapshot?.teams.find((t) => t.id === identity.teamId) ?? null;
   const build = snapshot?.phase === PHASE.BUILD;
+  // Post-build phases still show the FINISHED card (user report: the card
+  // vanished when the build timer expired — the game auto-advanced to
+  // SCORING and the placeholder replaced the whole canvas).
+  const locked =
+    !!snapshot &&
+    [PHASE.SCORING, PHASE.JUDGING, PHASE.RESULTS].includes(
+      snapshot.phase as (typeof PHASE)[keyof typeof PHASE],
+    );
   const myItems = snapshot && team ? selectMyItems(snapshot, identity.teamId, identity.playerId) : [];
   // NO-UNDO notice: only before the player's FIRST accepted submission
   // (ledger empty) — NoUndoNotice itself also checks the localStorage ack.
   const noUndoNeeded = build && Object.keys(snapshot?.myItems ?? {}).length === 0;
+
+  // Build-phase countdown (mm:ss) — a 1s tick while a timer is running.
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    if (!snapshot?.phaseEndsAt || !build) {
+      setNow(null);
+      return;
+    }
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [snapshot?.phaseEndsAt, build]);
+  const remainingMs =
+    now !== null && snapshot?.phaseEndsAt
+      ? Math.max(0, snapshot.phaseEndsAt - now)
+      : null;
+  const remainingLabel = remainingMs
+    ? `${Math.floor(remainingMs / 60000)}:${String(Math.floor((remainingMs % 60000) / 1000)).padStart(2, "0")}`
+    : null;
 
   // Socket submit + ack completion (PromptBar calls submitRef.current on
   // submit; the server ack flows back through deliverRef → PromptBar).
@@ -307,7 +334,7 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
   return (
     <main className="cc-main">
       <header className="cc-header">
-        <h1>{build ? "Build the card!" : "Waiting to craft…"}</h1>
+        <h1>{build ? "Build the card!" : locked ? "Card complete!" : "Waiting to craft…"}</h1>
         <ConnectionDot connected={connected} />
       </header>
       {error ? (
@@ -316,13 +343,13 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
         </p>
       ) : null}
 
-      {build && snapshot && team ? (
+      {(build || locked) && snapshot && team ? (
         <>
           <section className="cc-card" aria-label="your team">
             <h2>{team.name}</h2>
             <p className="cc-badge">
               {phaseLabel(snapshot.phase)} · round {snapshot.round}
-              {snapshot.phaseEndsAt ? " · timed" : ""}
+              {remainingLabel ? ` · ⏱ ${remainingLabel}` : snapshot.phaseEndsAt ? " · timed" : ""}
             </p>
             {snapshot.theme ? (
               <p>
@@ -331,16 +358,25 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
             ) : null}
           </section>
 
-          <PromptBar
-            disabled={!connected}
-            onSubmitted={() => {
-              /* owner-ledger registration already happened on the ack path */
-            }}
-            onSubmitStart={handleSubmitStart}
-            wiring={promptWiring}
-          />
+          {build ? (
+            <>
+              <PromptBar
+                disabled={!connected}
+                onSubmitted={() => {
+                  /* owner-ledger registration already happened on the ack path */
+                }}
+                onSubmitStart={handleSubmitStart}
+                wiring={promptWiring}
+              />
 
-          {noUndoNeeded ? <NoUndoNotice /> : null}
+              {noUndoNeeded ? <NoUndoNotice /> : null}
+            </>
+          ) : (
+            <section className="cc-card" aria-label="build ended" role="status">
+              <h3>Time's up — the host locked the cards</h3>
+              <p className="cc-hint">Your team's finished card is shown above.</p>
+            </section>
+          )}
 
           <CardCanvas
             items={team.items}
