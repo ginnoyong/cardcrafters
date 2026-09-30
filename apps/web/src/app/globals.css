@@ -936,10 +936,13 @@ no animations requiring sound. */
   font-variant-numeric: tabular-nums;
 }
 
-/* GM scoring console + judging table. */
+/* GM scoring console + judging table (extra top margin matches the
+   vertical card-stack / .cc-start spacing — keeps clear separation from
+   the sections above). */
 .cc-scoring-console,
 .cc-judging {
   gap: 0.75rem;
+  margin-top: 1.5rem;
 }
 
 .cc-scoring-console h3,

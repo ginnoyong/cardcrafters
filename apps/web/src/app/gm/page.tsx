@@ -37,6 +37,7 @@ import QRCode from "qrcode";
 import { LAYOUT_CRITIQUE_LOW_SCORE, MAX_TEAMS, PHASE } from "@cardcrafters/shared";
 
 import { PeoplesChoiceBanner, StandingsList, WinnerBanner, teamLabel } from "@/components/Standings";
+import { minutesToSeconds } from "@/lib/timers";
 import {
   createGameSocket,
   emitAck,
@@ -100,17 +101,6 @@ function PhaseBadge({ phase, round }: { phase: string | null; round: number | nu
       {phaseLabel(phase)} · round {round ?? "—"}
     </span>
   );
-}
-
-/**
- * Minutes (form string) → seconds; undefined = "use the server default".
- * "0" is a meaningful value (untimed) and passes through as 0.
- */
-function minutesToSeconds(minutes: string): number | undefined {
-  const trimmed = minutes.trim();
-  if (!/^\d+$/.test(trimmed)) return undefined;
-  const value = Number(trimmed);
-  return Number.isSafeInteger(value) ? value : undefined;
 }
 
 /** Human label for a configured phase timer: 600 → "10 min", 0 → "no limit". */
