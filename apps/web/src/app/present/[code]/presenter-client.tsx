@@ -9,9 +9,12 @@
  * Scoring/results phases (big-screen duty):
  *  - SCORING: an ANONYMOUS live scoreboard ("Card B · 7.5 avg · 3 votes") —
  *    the card↔team mapping never reaches this surface (server-side rule).
- *  - REVEAL: the large "The winner is… 🏆" display + a "Show results" button
- *    (reveal:ack — the server allows GM OR presenter; the hub also auto-
- *    expires REVEAL after 30 s, the button just moves things along).
+ *  - REVEAL: the 3D reveal moment (Three.js floating card, components/
+ *    Reveal3D.tsx) — the winning card materializes and floats; without WebGL
+ *    / with reduced motion it falls back to the same static "The winner is…
+ *    🏆" banner, plus a "Show results" button (reveal:ack — the server allows
+ *    GM OR presenter; the hub also auto-expires REVEAL after 30 s, the button
+ *    just moves things along).
  *  - RESULTS: winner banner + People's Choice banner + public standings
  *    (shared components/Standings.tsx, fed by the winnerAnnounced payload).
  */
@@ -43,6 +46,7 @@ import {
   WinnerBanner,
   teamLabel,
 } from "@/components/Standings";
+import { Reveal3D } from "@/components/Reveal3D";
 import { GameStoreProvider, normalizeSyncFull, phaseLabel, useGameStore, type SyncFullEvent } from "@/lib/store";
 
 function useCountdown(phaseEndsAt: number | null, serverNow: number): number | null {
@@ -344,13 +348,16 @@ function PresenterBoard({ code }: { code: string }) {
         </section>
       ) : null}
 
-      {/* REVEAL: the large winner display. winnerTeamId rides the phase
-          change; the name lands with the winnerAnnounced broadcast a moment
-          later — the banner reads "The winner is…" until then. The "Show
-          results" button (reveal:ack) skips the 30 s auto-expiry wait. */}
+      {/* REVEAL: the 3D reveal moment — the winning card materializes in a
+          small Three.js scene; any miss (reduced motion, no WebGL, texture
+          or Three.js load failure) falls back to the same static banner.
+          winnerTeamId rides the phase change; the name lands with the
+          winnerAnnounced broadcast a moment later — the heading reads "The
+          winner is…" until then. The "Show results" button (reveal:ack)
+          skips the 30 s auto-expiry wait. */}
       {snapshot?.phase === PHASE.REVEAL && snapshot.winnerTeamId ? (
         <section className="cc-reveal" aria-label="the reveal" data-testid="presenter-reveal">
-          <WinnerBanner label={winnerLabel || "…"} testId="presenter-winner-banner" />
+          <Reveal3D code={code} label={winnerLabel || "…"} testId="presenter-winner-banner" />
           <div className="cc-btn-row cc-reveal-actions">
             <button
               type="button"

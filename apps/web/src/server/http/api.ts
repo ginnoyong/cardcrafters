@@ -11,6 +11,12 @@
  *   GET  /api/games/:code    game summary → { phase, round, theme, teams[] }
  *                            (joinToken per team + per-team greeting only
  *                            with ?full=1 — GM/QR use)
+ *   GET  /api/games/:code/reveal-card  the WINNING team's finished card as a
+ *                            800×1120 PNG (presenter REVEAL 3D texture). Only
+ *                            served while phase is REVEAL/RESULTS — the
+ *                            winning card becomes public at REVEAL by
+ *                            definition; cache-control: no-store keeps the
+ *                            phase gate honest.
  *
  * NOTE: gmUrl embeds the game code (/gm?code=…). GM auth IS "knowing the
  * code" for this party game (documented in ws/auth.ts) — anyone with the URL
@@ -24,6 +30,7 @@ import { z } from "zod";
 import type { AiRouter } from "../ai/router";
 import { generateGreetingsForGame } from "../flows/greetings";
 import type { GameHub, RoomEmitter } from "../game/hub";
+import { renderCardPng, type RenderableItem } from "../render/card-render";
 import type { Repository } from "../repo/repository";
 import { gmRoom, teamRoom } from "../ws/rooms";
 
@@ -216,6 +223,66 @@ export async function handleApiRequest(
     } catch (err) {
       sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : "create failed" });
     }
+    return true;
+  }
+
+  // GET /api/games/:code/reveal-card — the winning team's finished card as a
+  // PNG (the presenter REVEAL 3D texture). The card is public from REVEAL on
+  // (the winner banner already names the team); before that the endpoint
+  // refuses (409) so unfinished/anonymous cards never leak.
+  const revealMatch = /^\/api\/games\/([A-Za-z0-9]+)\/reveal-card$/.exec(path);
+  if (req.method === "GET" && revealMatch) {
+    const code = revealMatch[1]!;
+    const game = await hub.gameByCode(code);
+    if (!game) {
+      sendJson(res, 404, { ok: false, error: "unknown_code", code });
+      return true;
+    }
+    const state = await hub.runtimeState(game.id);
+    if (state.phase !== "REVEAL" && state.phase !== "RESULTS") {
+      sendJson(res, 409, { ok: false, error: "not_revealing", phase: state.phase });
+      return true;
+    }
+    const winnerTeamId = state.winnerTeamId;
+    if (!winnerTeamId) {
+      sendJson(res, 409, { ok: false, error: "no_winner" });
+      return true;
+    }
+    const teams = await repo.listTeams(game.id);
+    const winner = teams.find((t) => t.id === winnerTeamId);
+    if (!winner) {
+      sendJson(res, 404, { ok: false, error: "winner_team_missing" });
+      return true;
+    }
+    // Same gather-and-render path as the layout critique (fail-open: stickers
+    // that cannot load are skipped by the renderer itself).
+    const layout = await repo.getLayoutState(winnerTeamId, game.round);
+    const items: RenderableItem[] = (await repo.listItems(winnerTeamId, game.round, ["READY"]))
+      .filter((r) => (r.width ?? 0) > 0 && (r.height ?? 0) > 0)
+      .map((r) => ({ itemId: r.id, imageUrl: r.imageUrl, width: r.width!, height: r.height! }));
+    const greeting = (await repo.listGreetings(game.id, game.round)).find(
+      (g) => g.teamId === winnerTeamId,
+    );
+    let png: Buffer;
+    try {
+      png = await renderCardPng(
+        items,
+        { placements: layout?.placements ?? [] },
+        greeting?.text ?? "",
+        {
+          cardRatioW: game.config.cardRatioW,
+          cardRatioH: game.config.cardRatioH,
+        },
+      );
+    } catch (err) {
+      sendJson(res, 500, {
+        ok: false,
+        error: err instanceof Error ? err.message : "card render failed",
+      });
+      return true;
+    }
+    res.writeHead(200, { "content-type": "image/png", "cache-control": "no-store" });
+    res.end(png);
     return true;
   }
 

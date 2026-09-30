@@ -211,3 +211,76 @@ describe("POST /api/games — phase timer config", () => {
 function greetingOf(team: Record<string, unknown>): { text: string; status: string } {
   return team.greeting as { text: string; status: string };
 }
+
+describe("GET /api/games/:code/reveal-card (winner card PNG for the REVEAL 3D moment)", () => {
+  /** Create a game and drive it LOBBY→…→REVEAL via hub events (no sockets). */
+  async function createGameInReveal(): Promise<{ code: string; gameId: string; winnerTeamId: string }> {
+    const res = await fetch(base("/api/games"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ teamCount: 2, theme: "Reveal Cards" }),
+    });
+    const body = (await res.json()) as { gameId: string; code: string; teams: Array<{ id: string }> };
+    const teams = await srv.repo.listTeams(body.gameId);
+    const now = Date.now();
+    await srv.hub.applyEvent(body.gameId, { type: "gm:approveGreetings", now });
+    await srv.hub.applyEvent(body.gameId, { type: "gm:stopBuild", now });
+    await srv.hub.applyEvent(body.gameId, { type: "gm:stopScoring", now });
+    await srv.hub.applyEvent(body.gameId, { type: "gm:pickWinner", teamId: teams[0]!.id, now });
+    return { code: body.code, gameId: body.gameId, winnerTeamId: teams[0]!.id };
+  }
+
+  it("unknown code → 404", async () => {
+    const res = await fetch(base("/api/games/ZZZZZZ/reveal-card"));
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe("unknown_code");
+  });
+
+  it("before REVEAL → 409 not_revealing (unfinished cards never leak)", async () => {
+    const res = await fetch(base("/api/games"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ teamCount: 2, theme: "Too Early" }),
+    });
+    const body = (await res.json()) as { code: string };
+    const early = await fetch(base(`/api/games/${body.code}/reveal-card`));
+    expect(early.status).toBe(409);
+    const err = (await early.json()) as { ok: boolean; error: string; phase: string };
+    expect(err.error).toBe("not_revealing");
+    expect(err.phase).toBe("GREETINGS");
+  });
+
+  it("REVEAL → 200 image/png (paper card render of the winning team)", async () => {
+    const { code } = await createGameInReveal();
+    const res = await fetch(base(`/api/games/${code}/reveal-card`));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    expect(res.headers.get("cache-control")).toContain("no-store");
+    const buf = Buffer.from(await res.arrayBuffer());
+    // PNG magic bytes (\x89PNG) — a real, decodable image came back.
+    expect(buf.length).toBeGreaterThan(100);
+    expect(buf[0]).toBe(0x89);
+    expect(buf.subarray(1, 4).toString("ascii")).toBe("PNG");
+  });
+
+  it("RESULTS (auto-advance/ack) still serves the winning card", async () => {
+    const { code, gameId } = await createGameInReveal();
+    await srv.hub.applyEvent(gameId, { type: "reveal:ack", now: Date.now() });
+    const res = await fetch(base(`/api/games/${code}/reveal-card`));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+  });
+
+  it("still 200 in RESULTS after a server-side state rehydration (winner pick persistence)", async () => {
+    const { code, gameId } = await createGameInReveal();
+    // Simulate the hub forgetting the runtime state (restart): hydration
+    // rebuilds winnerTeamId from the persisted GM_WINNER pick.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (srv.hub as unknown as { runtime: Map<string, unknown> }).runtime.delete(gameId);
+    const res = await fetch(base(`/api/games/${code}/reveal-card`));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+  });
+});
