@@ -758,6 +758,19 @@ no animations requiring sound. */
   gap: 0.75rem;
 }
 
+/* Finished-card preview from /scoring-card — fades in once loaded. */
+.cc-rating-image {
+  width: 100%;
+  max-height: 40vh;
+  object-fit: contain;
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+
+.cc-rating-image.is-loaded {
+  opacity: 1;
+}
+
 /* Head row: prev · card title · next. */
 .cc-rating-head {
   display: flex;

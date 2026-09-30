@@ -612,3 +612,45 @@ describe("selectMyItems merge precedence (stuck drawing chip)", () => {
     expect(mine[0]).toMatchObject({ id: "i3", status: "pending" });
   });
 });
+
+// ---------------------------------------------------------------------------
+// sync:full double-normalize regression (team items must survive)
+// ---------------------------------------------------------------------------
+
+describe("sync:full double-normalize regression (team items must survive)", () => {
+  it("normalize → storeReducer sync:full keeps team items with statuses intact", () => {
+    // Server wire shape: ItemRow statuses are UPPERCASE on the wire
+    // (PENDING/READY/…). The old presenter/GM flow normalized the payload,
+    // then dispatched it into a reducer that normalizes AGAIN — the second
+    // pass saw the lowercase client statuses and (before the mapItemStatus
+    // lowercase aliases + raw dispatch fix) dropped every team item.
+    const base = baseSnapshot();
+    const payload: SyncFullEvent = {
+      ...base,
+      teams: [
+        {
+          ...base.teams[0]!,
+          itemCount: 3,
+          items: [
+            { id: "item-1", promptRaw: "a red balloon dog", nickname: "Me", playerId: PLAYER_ME, status: "READY" },
+            { id: "item-2", promptRaw: "happiness", nickname: "Me", playerId: PLAYER_ME, status: "PENDING" },
+            { id: "item-3", promptRaw: "unsafe doodle", nickname: "Me", playerId: PLAYER_ME, status: "REJECTED" },
+          ] as unknown as SyncFullEvent["teams"][number]["items"],
+        },
+        base.teams[1]!,
+      ],
+    };
+
+    // Step 1 — normalize the raw payload (as a (now-removed) caller would).
+    const normalized = normalizeSyncFull(payload, {}, PLAYER_ME);
+    expect(normalized.teams[0]!.items.map((i) => i.status)).toEqual(["ready", "pending", "rejected"]);
+
+    // Step 2 — dispatch the ALREADY-NORMALIZED snapshot through the reducer
+    // (the old double-normalize path). Items must SURVIVE with statuses.
+    const s = storeReducer(normalized, { type: "sync:full", snapshot: normalized });
+    expect(s).not.toBeNull();
+    const items = s!.teams.find((t) => t.id === TEAM_A)!.items;
+    expect(items.map((i) => i.id)).toEqual(["item-1", "item-2", "item-3"]);
+    expect(items.map((i) => i.status)).toEqual(["ready", "pending", "rejected"]);
+  });
+});

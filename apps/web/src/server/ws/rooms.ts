@@ -23,6 +23,7 @@ export type WsIdentity =
   | {
       role: "player";
       gameId: string;
+      code: string;
       playerId: string;
       teamId: string;
       nickname: string;

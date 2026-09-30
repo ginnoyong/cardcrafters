@@ -54,7 +54,6 @@ const CardCanvas = dynamic(() => import("@/components/player/CardCanvas"), {
 });
 import {
   GameStoreProvider,
-  normalizeSyncFull,
   phaseLabel,
   useGameStore,
   type ClientCritique,
@@ -137,6 +136,7 @@ function TeamCard({
   members,
   critique,
   qrActive,
+  scoringLabel,
   onToggleQr,
   onKick,
   onEditGreeting,
@@ -148,6 +148,7 @@ function TeamCard({
   members: Array<{ id: string; nickname: string; connected: boolean }>;
   critique: ClientCritique | null;
   qrActive: boolean;
+  scoringLabel: string | null;
   onToggleQr: () => void;
   onKick: (playerId: string) => void;
   onEditGreeting: (teamId: string, text: string) => Promise<GreetingMutationResult>;
@@ -218,7 +219,7 @@ function TeamCard({
       <div className="cc-card cc-team-card">
         {/* Header — team name + label badge. */}
         <h3 className="cc-team-name">
-          {team.name} <span className="cc-muted">({team.label})</span>
+          {team.name} <span className="cc-muted">({scoringLabel ?? team.label})</span>
         </h3>
 
         {/* Greeting text (or the generating placeholder). */}
@@ -463,7 +464,7 @@ function Console({ game }: { game: CreatedGame }) {
 
     unsubscribers.push(
       onEvent<SyncFullEvent>(socket, "sync:full", (payload) => {
-        dispatch({ type: "sync:full", snapshot: normalizeSyncFull(payload) });
+        dispatch({ type: "sync:full", snapshot: payload });
       }),
       onEvent<Record<string, unknown>>(socket, "phaseChanged", (payload) =>
         dispatch({ type: "phaseChanged", payload }),
@@ -575,6 +576,12 @@ function Console({ game }: { game: CreatedGame }) {
         count: tally?.count ?? 0,
       };
     });
+  // Card→scoring-label map: the scoring card's label ("Card A", …) is the
+  // stable display label during scoring/judging — show it on the team card
+  // header instead of the (player-facing) join label once cards exist.
+  const scoringLabelByTeam = new Map(
+    scoringCards.filter((c) => typeof c.teamId === "string").map((c) => [c.teamId!, c.label]),
+  );
   // Readiness: ratedX is live-computed from the tallies (every score:submit
   // lands as scores:update); the sync snapshot's ratedX/ratedY is the
   // refresh/resync fallback. ratedY = active players × (teams − 1).
@@ -641,6 +648,7 @@ function Console({ game }: { game: CreatedGame }) {
               members={team.members}
               critique={team.critique}
               qrActive={qrActive}
+              scoringLabel={scoringLabelByTeam.get(team.id) ?? null}
               onToggleQr={() => setQrTeamId(qrActive ? null : team.id)}
               onKick={(playerId) => void gmAction("gm:kick", { playerId })}
               // Greeting mutations surface their ack errors INLINE on the card

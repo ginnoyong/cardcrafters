@@ -55,6 +55,8 @@ export function Reveal3D({
   testId?: string;
 }) {
   const [mode, setMode] = useState<Mode>("pending");
+  /** Why we fell back to the static banner (null until a fallback fires). */
+  const [fallback, setFallback] = useState<string | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
 
   // Capability probe — synchronous, run once on mount. While "pending" (the
@@ -65,11 +67,13 @@ export function Reveal3D({
         ? window.matchMedia("(prefers-reduced-motion: reduce)")
         : null;
     if (prefersReducedMotion(mq)) {
+      setFallback("reduced_motion");
       setMode("fallback");
       return;
     }
     const probe = document.createElement("canvas");
     if (!supportsWebgl(probe)) {
+      setFallback("webgl_unavailable");
       setMode("fallback");
       return;
     }
@@ -90,13 +94,19 @@ export function Reveal3D({
       try {
         THREE = await import("three");
       } catch {
-        if (!disposed) setMode("fallback");
+        if (!disposed) {
+          setFallback("import_failed");
+          setMode("fallback");
+        }
         return;
       }
       if (disposed) return;
       try {
-        teardown = await startRevealScene(THREE, host, code, () => {
-          if (!disposed) setMode("fallback");
+        teardown = await startRevealScene(THREE, host, code, (reason) => {
+          if (!disposed) {
+            setFallback(reason);
+            setMode("fallback");
+          }
         });
       } catch (err) {
         console.error("[reveal3d] scene failed — falling back to the static banner:", err);
@@ -110,13 +120,30 @@ export function Reveal3D({
     };
   }, [mode, code]);
 
+  // Diagnostics: log each fallback reason once (client-side debugging aid
+  // for the fallback ladder — reduced motion, WebGL, import, texture).
+  useEffect(() => {
+    if (fallback) console.info(`[reveal3d] static fallback: ${fallback}`);
+  }, [fallback]);
+
   if (mode !== "three") {
     // "pending" (first frame) + every fallback → the static banner.
-    return <WinnerBanner label={label} testId={testId} />;
+    return (
+      <div data-reveal-mode="static" data-reveal-reason={fallback ?? undefined}>
+        <WinnerBanner label={label} testId={testId} />
+      </div>
+    );
   }
 
   return (
-    <section className="cc-card cc-reveal3d" role="status" aria-label="the winner" data-testid={testId}>
+    <section
+      className="cc-card cc-reveal3d"
+      role="status"
+      aria-label="the winner"
+      data-testid={testId}
+      data-reveal-mode="3d"
+      data-reveal-reason={fallback ?? undefined}
+    >
       <p className="cc-winner-kicker">The winner is…</p>
       <p className="cc-winner-name">🏆 {label}</p>
       <div className="cc-reveal3d-stage" ref={stageRef} aria-hidden="true">
@@ -136,7 +163,7 @@ async function startRevealScene(
   THREE: typeof import("three"),
   host: HTMLElement,
   code: string,
-  onFail: () => void,
+  onFail: (reason: string) => void,
 ): Promise<() => void> {
   const width = () => host.clientWidth || 480;
   const height = () => host.clientHeight || 360;
@@ -246,7 +273,7 @@ async function startRevealScene(
     glow.geometry.dispose();
     renderer.dispose();
     renderer.domElement.remove();
-    onFail();
+    onFail("texture_failed");
     return () => undefined;
   }
   cardTex.colorSpace = THREE.SRGBColorSpace;

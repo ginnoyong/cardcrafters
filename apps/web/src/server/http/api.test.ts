@@ -284,3 +284,104 @@ describe("GET /api/games/:code/reveal-card (winner card PNG for the REVEAL 3D mo
     expect(res.headers.get("content-type")).toBe("image/png");
   });
 });
+
+describe("GET /api/games/:code/scoring-card/:cardId?token= (player rating card PNG)", () => {
+  /** Create a game, join a player on team A, and drive it to SCORING. */
+  async function createGameInScoring(nickname = "Rater"): Promise<{
+    code: string;
+    gameId: string;
+    sessionToken: string;
+    firstCardId: string;
+  }> {
+    const res = await fetch(base("/api/games"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ teamCount: 2, theme: "Scoring Cards" }),
+    });
+    const body = (await res.json()) as { gameId: string; code: string };
+    const joined = await srv.hub.joinPlayer({
+      joinToken: (await srv.repo.listTeams(body.gameId))[0]!.joinToken,
+      nickname,
+    });
+    const now = Date.now();
+    await srv.hub.applyEvent(body.gameId, { type: "gm:approveGreetings", now });
+    await srv.hub.applyEvent(body.gameId, { type: "gm:stopBuild", now });
+    const game = await srv.repo.getGame(body.gameId);
+    const order = game?.scoringOrder;
+    if (!order || order.round !== 1 || order.cards.length < 2) {
+      throw new Error(`no scoring order after gm:stopBuild: ${JSON.stringify(order)}`);
+    }
+    return { code: body.code, gameId: body.gameId, sessionToken: joined.player.sessionToken, firstCardId: order.cards[0]!.cardId };
+  }
+
+  it("unknown code → 404", async () => {
+    const res = await fetch(base("/api/games/ZZZZZZ/scoring-card/card-a?token=whatever"));
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe("unknown_code");
+  });
+
+  it("missing token → 403 invalid_token (the anonymous card stays unmapped)", async () => {
+    const { code, firstCardId } = await createGameInScoring();
+    const res = await fetch(base(`/api/games/${code}/scoring-card/${firstCardId}`));
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.error).toBe("invalid_token");
+  });
+
+  it("unknown token → 403; a token from ANOTHER game → 403 (never leaks cards)", async () => {
+    const { code, firstCardId } = await createGameInScoring();
+    const stranger = await createGameInScoring("Stranger");
+    const resUnknown = await fetch(base(`/api/games/${code}/scoring-card/${firstCardId}?token=no-such-token`));
+    expect(resUnknown.status).toBe(403);
+    expect(((await resUnknown.json()) as { error: string }).error).toBe("invalid_token");
+    const resForeign = await fetch(
+      base(`/api/games/${code}/scoring-card/${firstCardId}?token=${stranger.sessionToken}`),
+    );
+    expect(resForeign.status).toBe(403);
+    expect(((await resForeign.json()) as { error: string }).error).toBe("invalid_token");
+  });
+
+  it("outside SCORING/JUDGING → 409 not_scoring (no card previews before build ends)", async () => {
+    // A token valid for the game, but the game is still in GREETINGS.
+    const res = await fetch(base("/api/games"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ teamCount: 2, theme: "Too Early To Rate" }),
+    });
+    const body = (await res.json()) as { gameId: string; code: string };
+    const joined = await srv.hub.joinPlayer({
+      joinToken: (await srv.repo.listTeams(body.gameId))[0]!.joinToken,
+      nickname: "Early",
+    });
+    const resEarly = await fetch(
+      base(`/api/games/${body.code}/scoring-card/card-a?token=${joined.player.sessionToken}`),
+    );
+    expect(resEarly.status).toBe(409);
+    const err = (await resEarly.json()) as { ok: boolean; error: string; phase: string };
+    expect(err.error).toBe("not_scoring");
+    expect(err.phase).toBe("GREETINGS");
+  });
+
+  it("SCORING + unknown cardId → 404 unknown_card", async () => {
+    const { code, sessionToken } = await createGameInScoring();
+    const res = await fetch(base(`/api/games/${code}/scoring-card/card-zzz?token=${sessionToken}`));
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.error).toBe("unknown_card");
+  });
+
+  it("SCORING → 200 image/png (paper card render behind the anonymous cardId)", async () => {
+    const { code, sessionToken, firstCardId } = await createGameInScoring();
+    const res = await fetch(base(`/api/games/${code}/scoring-card/${firstCardId}?token=${sessionToken}`));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    expect(res.headers.get("cache-control")).toContain("no-store");
+    const buf = Buffer.from(await res.arrayBuffer());
+    // PNG magic bytes (\x89PNG) — a real, decodable image came back.
+    expect(buf.length).toBeGreaterThan(100);
+    expect(buf[0]).toBe(0x89);
+    expect(buf.subarray(1, 4).toString("ascii")).toBe("PNG");
+  });
+});

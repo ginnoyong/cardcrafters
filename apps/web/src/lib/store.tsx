@@ -275,12 +275,16 @@ function mapItemStatus(status: unknown): ClientItemStatus | null {
     case "PENDING":
     case "VALIDATING":
     case "GENERATING":
+    case "pending":
       return "pending";
     case "READY":
+    case "ready":
       return "ready";
     case "REJECTED":
+    case "rejected":
       return "rejected";
     case "FAILED":
+    case "failed":
       return "failed";
     default:
       return null;

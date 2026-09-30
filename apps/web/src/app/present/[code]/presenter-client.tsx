@@ -47,7 +47,7 @@ import {
   teamLabel,
 } from "@/components/Standings";
 import { Reveal3D } from "@/components/Reveal3D";
-import { GameStoreProvider, normalizeSyncFull, phaseLabel, useGameStore, type SyncFullEvent } from "@/lib/store";
+import { GameStoreProvider, phaseLabel, useGameStore, type SyncFullEvent } from "@/lib/store";
 
 function useCountdown(phaseEndsAt: number | null, serverNow: number): number | null {
   const [remaining, setRemaining] = useState<number | null>(null);
@@ -157,7 +157,7 @@ function PresenterBoard({ code }: { code: string }) {
 
     unsubscribers.push(
       onEvent<SyncFullEvent>(socket, "sync:full", (payload) => {
-        dispatch({ type: "sync:full", snapshot: normalizeSyncFull(payload) });
+        dispatch({ type: "sync:full", snapshot: payload });
       }),
       onEvent<Record<string, unknown>>(socket, "phaseChanged", (payload) =>
         dispatch({ type: "phaseChanged", payload }),
@@ -374,7 +374,9 @@ function PresenterBoard({ code }: { code: string }) {
           winnerAnnounced payload / the post-pick snapshot). */}
       {snapshot?.phase === PHASE.RESULTS && snapshot.winnerTeamId ? (
         <>
+        <div data-reveal-mode="results">
           <WinnerBanner label={winnerLabel || "…"} testId="presenter-winner-banner" />
+        </div>
           {peoplesChoiceLabel ? (
             <PeoplesChoiceBanner label={peoplesChoiceLabel} testId="presenter-peoples-choice" />
           ) : null}

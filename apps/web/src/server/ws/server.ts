@@ -536,6 +536,7 @@ export function registerSocketHandlers(
           const identity: WsIdentity = {
             role: "player",
             gameId: result.game.id,
+            code: result.game.code,
             playerId: result.player.id,
             teamId: result.team.id,
             nickname: result.player.nickname,

@@ -41,6 +41,10 @@ export interface RatingPanelProps {
   myScores: Record<string, number>;
   /** FINAL submit — the parent emits score:submit over the socket. */
   onSubmit: (cardId: string, value: number) => Promise<ScoreSubmitOutcome>;
+  /** Game code — for the scoring-card PNG preview URL. */
+  gameCode: string;
+  /** Player session token — auth for the scoring-card PNG preview. */
+  sessionToken: string;
   testId?: string;
 }
 
@@ -52,6 +56,8 @@ export default function RatingPanel({
   scores,
   myScores,
   onSubmit,
+  gameCode,
+  sessionToken,
   testId = "rating-panel",
 }: RatingPanelProps) {
   // Rateable cards: everything EXCEPT our own team's card (own-card guard —
@@ -84,6 +90,16 @@ export default function RatingPanel({
   const card = rateable[index] ?? null;
   const mine = card ? myScores[card.cardId] : undefined;
   const tally = card ? scores[card.cardId] : undefined;
+
+  // Card preview image state: opacity fades in once loaded; a failed fetch
+  // (403 expired session, 409 phase change, render failure) shows a hint
+  // instead of a broken-image glyph.
+  const [imgLoaded, setImgLoaded] = useState(false);
+  const [imgFailed, setImgFailed] = useState(false);
+  useEffect(() => {
+    setImgLoaded(false);
+    setImgFailed(false);
+  }, [card?.cardId]);
 
   // Done = every rateable card has a FINAL rating.
   const allRated = rateable.length > 0 && rateable.every((c) => myScores[c.cardId] !== undefined);
@@ -173,6 +189,21 @@ export default function RatingPanel({
           </button>
         ) : null}
       </div>
+
+      {/* Finished-card preview (server renders the team's actual card; the
+          anonymous cardId keeps the team mapping hidden). */}
+      {!imgFailed ? (
+        <img
+          src={`/api/games/${gameCode}/scoring-card/${card.cardId}?token=${sessionToken}`}
+          data-testid="rating-card-image"
+          alt={`The card you are rating: ${card.label}`}
+          className={`cc-rating-image${imgLoaded ? " is-loaded" : ""}`}
+          onLoad={() => setImgLoaded(true)}
+          onError={() => setImgFailed(true)}
+        />
+      ) : (
+        <p className="cc-hint">Card preview unavailable.</p>
+      )}
 
       {/* Live anonymous average + vote count (never whose card it is). */}
       <p className="cc-hint" aria-live="polite">

@@ -49,7 +49,6 @@ import {
 } from "@/lib/socket";
 import {
   GameStoreProvider,
-  normalizeSyncFull,
   phaseLabel,
   useGameStore,
   type SyncFullEvent,
@@ -100,6 +99,7 @@ function persistNickname(nickname: string): void {
 /** Subset of the server's join ack identity we keep client-side. */
 interface JoinIdentity {
   playerId: string;
+  code: string;
   teamId: string;
   nickname: string;
   sessionToken: string;
@@ -183,11 +183,12 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
 
     unsubscribers.push(
       onEvent<SyncFullEvent>(socket, "sync:full", (payload) => {
-        // Forward the owner ledger (resync) + pass the player id so rows
-        // attributed to me rebuild myItems on reconnect.
+        // Pass the RAW payload (it already is the normalized snapshot) plus
+        // the player id so rows attributed to me rebuild myItems on reconnect.
         dispatch({
           type: "sync:full",
-          snapshot: normalizeSyncFull(payload, snapshotRef.current?.myItems ?? {}, identity.playerId),
+          snapshot: payload,
+          myPlayerId: identity.playerId,
         });
       }),
       onEvent<Record<string, unknown>>(socket, "phaseChanged", (payload) =>
@@ -462,6 +463,8 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
               scores={snapshot.scores}
               myScores={snapshot.myScores}
               onSubmit={handleSubmitScore}
+              gameCode={identity.code}
+              sessionToken={identity.sessionToken}
               testId="player-rating-panel"
             />
           ) : judging ? (

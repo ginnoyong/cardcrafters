@@ -89,6 +89,7 @@ function playerIdentity(s: Setup): WsIdentity {
   return {
     role: "player",
     gameId: s.gameId,
+    code: s.gameCode,
     playerId: s.playerAId,
     teamId: s.teamId,
     nickname: "Alex",

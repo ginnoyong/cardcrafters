@@ -31,7 +31,7 @@ import type { AiRouter } from "../ai/router";
 import { generateGreetingsForGame } from "../flows/greetings";
 import type { GameHub, RoomEmitter } from "../game/hub";
 import { renderCardPng, type RenderableItem } from "../render/card-render";
-import type { Repository } from "../repo/repository";
+import type { Repository, GameRow } from "../repo/repository";
 import { gmRoom, teamRoom } from "../ws/rooms";
 
 /**
@@ -123,6 +123,36 @@ export function mergeCardConfig(partial: unknown): CardConfig {
       typeof p.scoringVisibleOnPresenter === "boolean" ? p.scoringVisibleOnPresenter : base.scoringVisibleOnPresenter,
     aiBudgetUsd: num(p.aiBudgetUsd) ?? base.aiBudgetUsd,
   };
+}
+
+/**
+ * Gather one team's finished card (layout + READY items + greeting) and render
+ * it as a PNG. Shared by the reveal-card route (presenter REVEAL texture) and
+ * the scoring-card route (player rating preview). The render itself is
+ * fail-open about missing stickers, but a hard failure propagates to the
+ * caller (routes turn it into a 500).
+ */
+async function renderTeamCardPng(
+  repo: Repository,
+  game: GameRow,
+  teamId: string,
+): Promise<Buffer> {
+  const layout = await repo.getLayoutState(teamId, game.round);
+  const items: RenderableItem[] = (await repo.listItems(teamId, game.round, ["READY"]))
+    .filter((r) => (r.width ?? 0) > 0 && (r.height ?? 0) > 0)
+    .map((r) => ({ itemId: r.id, imageUrl: r.imageUrl, width: r.width!, height: r.height! }));
+  const greeting = (await repo.listGreetings(game.id, game.round)).find(
+    (g) => g.teamId === teamId,
+  );
+  return renderCardPng(
+    items,
+    { placements: layout?.placements ?? [] },
+    greeting?.text ?? "",
+    {
+      cardRatioW: game.config.cardRatioW,
+      cardRatioH: game.config.cardRatioH,
+    },
+  );
 }
 
 /**
@@ -254,26 +284,59 @@ export async function handleApiRequest(
       sendJson(res, 404, { ok: false, error: "winner_team_missing" });
       return true;
     }
-    // Same gather-and-render path as the layout critique (fail-open: stickers
-    // that cannot load are skipped by the renderer itself).
-    const layout = await repo.getLayoutState(winnerTeamId, game.round);
-    const items: RenderableItem[] = (await repo.listItems(winnerTeamId, game.round, ["READY"]))
-      .filter((r) => (r.width ?? 0) > 0 && (r.height ?? 0) > 0)
-      .map((r) => ({ itemId: r.id, imageUrl: r.imageUrl, width: r.width!, height: r.height! }));
-    const greeting = (await repo.listGreetings(game.id, game.round)).find(
-      (g) => g.teamId === winnerTeamId,
-    );
+    // Shared gather-and-render path (fail-open: stickers that cannot load are
+    // skipped by the renderer itself).
     let png: Buffer;
     try {
-      png = await renderCardPng(
-        items,
-        { placements: layout?.placements ?? [] },
-        greeting?.text ?? "",
-        {
-          cardRatioW: game.config.cardRatioW,
-          cardRatioH: game.config.cardRatioH,
-        },
-      );
+      png = await renderTeamCardPng(repo, game, winnerTeamId);
+    } catch (err) {
+      sendJson(res, 500, {
+        ok: false,
+        error: err instanceof Error ? err.message : "card render failed",
+      });
+      return true;
+    }
+    res.writeHead(200, { "content-type": "image/png", "cache-control": "no-store" });
+    res.end(png);
+    return true;
+  }
+
+  // GET /api/games/:code/scoring-card/:cardId?token= — one anonymous scoring
+  // card's finished PNG for the player who is rating it. Auth = a valid
+  // player session token (the card→team mapping stays server-side, but the
+  // player needs the image to rate meaningfully). Only served during
+  // SCORING/JUDGING; cache-control: no-store keeps the phase gate honest.
+  const scoringCardMatch = /^\/api\/games\/([A-Za-z0-9]+)\/scoring-card\/([A-Za-z0-9-]+)$/.exec(
+    path,
+  );
+  if (req.method === "GET" && scoringCardMatch) {
+    const code = scoringCardMatch[1]!;
+    const cardId = scoringCardMatch[2]!;
+    const token = url.searchParams.get("token") ?? "";
+    const game = await hub.gameByCode(code);
+    if (!game) {
+      sendJson(res, 404, { ok: false, error: "unknown_code", code });
+      return true;
+    }
+    const player = await repo.getPlayerBySessionToken(token);
+    if (!player || player.gameId !== game.id || player.removedAt !== null) {
+      sendJson(res, 403, { ok: false, error: "invalid_token" });
+      return true;
+    }
+    const state = await hub.runtimeState(game.id);
+    if (state.phase !== "SCORING" && state.phase !== "JUDGING") {
+      sendJson(res, 409, { ok: false, error: "not_scoring", phase: state.phase });
+      return true;
+    }
+    const order = game.scoringOrder;
+    if (!order || order.round !== state.round || !order.cards.some((c) => c.cardId === cardId)) {
+      sendJson(res, 404, { ok: false, error: "unknown_card", cardId });
+      return true;
+    }
+    const card = order.cards.find((c) => c.cardId === cardId)!;
+    let png: Buffer;
+    try {
+      png = await renderTeamCardPng(repo, game, card.teamId);
     } catch (err) {
       sendJson(res, 500, {
         ok: false,
