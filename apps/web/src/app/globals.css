@@ -818,6 +818,7 @@ no animations requiring sound. */
 .cc-winner-banner {
   text-align: center;
   gap: 0.25rem;
+  margin-top: 1.5rem; /* same section gap as .cc-judging / .cc-scoring-console */
   padding: 1.5rem 1rem;
   border-color: var(--accent-strong);
   background: color-mix(in srgb, var(--accent-strong) 14%, var(--bg-card));
@@ -983,6 +984,7 @@ no animations requiring sound. */
 .cc-reveal {
   display: grid;
   gap: 0.75rem;
+  margin-top: 1.5rem;
 }
 
 .cc-reveal-actions {
