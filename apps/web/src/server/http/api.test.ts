@@ -170,6 +170,24 @@ describe("POST /api/games — phase timer config", () => {
     expect(config.scoringTimerSeconds).toBe(0);
   });
 
+  it("timers inside config above the 24h cap fall back to the default, not the raw value", async () => {
+    // setTimeout overflow guard: 6e6 s (> 2^31−1 ms) would otherwise be armed
+    // and clamped by Node to ~1 ms, ending the phase instantly.
+    const res = await fetch(base("/api/games"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        theme: "Over the cap",
+        config: { buildTimerSeconds: 6000000, scoringTimerSeconds: 6000000 },
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { code: string };
+    const config = await storedConfig(body.code);
+    expect(config.buildTimerSeconds).toBe(600);
+    expect(config.scoringTimerSeconds).toBe(300);
+  });
+
   it("negative or fractional timers → 400 with a friendly error", async () => {
     const res = await fetch(base("/api/games"), {
       method: "POST",

@@ -18,7 +18,7 @@
  */
 
 import type { CardConfig } from "@cardcrafters/shared";
-import { DEFAULT_CARD_CONFIG, MAX_TEAMS } from "@cardcrafters/shared";
+import { DEFAULT_CARD_CONFIG, MAX_TEAMS, MAX_TIMER_SECONDS } from "@cardcrafters/shared";
 import { z } from "zod";
 
 import type { AiRouter } from "../ai/router";
@@ -34,7 +34,6 @@ import { gmRoom, teamRoom } from "../ws/rooms";
  * may also arrive inside the free-form `config` object (merged over defaults
  * by mergeCardConfig); the top-level fields win when both are present.
  */
-const MAX_TIMER_SECONDS = 24 * 60 * 60;
 const createGameSchema = z.object({
   teamCount: z.number().int().min(1).max(MAX_TEAMS).optional(),
   theme: z.string().trim().min(1).max(120),
@@ -94,8 +93,12 @@ export function mergeCardConfig(partial: unknown): CardConfig {
     typeof v === "number" && Number.isFinite(v) ? v : undefined;
   // Phase timers: whole seconds ≥ 0 ONLY — 0 is meaningful (untimed), anything
   // else invalid falls back to the default rather than silently disarming.
+  // Above MAX_TIMER_SECONDS (24 h) also falls back: a setTimeout delay beyond
+  // 2^31−1 ms gets clamped by Node to ~1 ms, ending the phase instantly.
   const secs = (v: unknown): number | undefined =>
-    typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : undefined;
+    typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= MAX_TIMER_SECONDS
+      ? v
+      : undefined;
   const pl = (p.limits ?? {}) as Partial<CardConfig["limits"]>;
   return {
     cardRatioW: num(p.cardRatioW) ?? base.cardRatioW,

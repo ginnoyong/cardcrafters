@@ -43,6 +43,8 @@ export const BUILD_TIMER_SECONDS = 600;
 export const SCORING_TIMER_SECONDS = 300;
 /** REVEAL auto-advances to RESULTS after this many seconds (hub-armed timer). */
 export const REVEAL_AUTO_EXPIRE_SECONDS = 30;
+/** Hard cap on ANY phase timer (24 h) — guards setTimeout overflow (2^31−1 ms). */
+export const MAX_TIMER_SECONDS = 24 * 60 * 60;
 
 // ---------------------------------------------------------------------------
 // Card canvas & layout geometry

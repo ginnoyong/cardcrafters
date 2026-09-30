@@ -944,7 +944,7 @@ export default function GmPage() {
               />
             </label>
           </div>
-          <p className="cc-hint">0 = no time limit — you end the build manually.</p>
+          <p className="cc-hint">0 = no time limit — you end the phase manually. Max 1440 (24 h).</p>
           <button type="submit" className="cc-btn cc-btn-primary" disabled={creating}>
             {creating ? "Creating…" : "Create game"}
           </button>

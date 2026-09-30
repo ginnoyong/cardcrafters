@@ -43,8 +43,13 @@ describe("minutesToSeconds (minutes form string → seconds for game config)", (
     // Largest minutes value whose ×60 product is still a safe integer.
     const maxSafeMinutes = Math.floor(Number.MAX_SAFE_INTEGER / 60); // 150119987579016
     expect(maxSafeMinutes * 60).toBeLessThanOrEqual(Number.MAX_SAFE_INTEGER);
-    expect(minutesToSeconds(String(maxSafeMinutes))).toBe(maxSafeMinutes * 60);
     // One more minute and the product overflows the safe-integer range.
     expect(minutesToSeconds(String(maxSafeMinutes + 1))).toBeUndefined();
+  });
+
+  it("24h cap: 1440 min → 86400 s ok; anything longer → undefined (use server default)", () => {
+    expect(minutesToSeconds("1440")).toBe(86400);
+    expect(minutesToSeconds("1441")).toBeUndefined();
+    expect(minutesToSeconds("100000")).toBeUndefined();
   });
 });
