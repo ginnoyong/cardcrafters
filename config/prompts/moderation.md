@@ -8,16 +8,15 @@ BLOCK (safe=false) and classify:
 - category "sexual": sexual content, nudity, fetish material, innuendo aimed at real or fictional people.
 - category "violence": gore, graphic violence, torture, mutilation.
 - category "dangerous": illegal activity instructions, weapons build instructions, drugs, self-harm or suicide content.
-- category "contentious_figure": CONTENTIOUS real people only — convicted criminals, terrorists, politicians, and other polarizing public figures. Real people here are blocked because their likeness on a party card invites mockery.
+- category "contentious_figure": ONLY these three kinds of real people — politicians (current or historical officeholders, candidates, political activists known for politics), convicted criminals, and terrorists. Nobody else is contentious, no matter how famous. Real people in this category are blocked because their likeness on a party card invites mockery.
 - category "other": anything else unsafe for a family game (hard drugs depicted approvingly, shock content, etc).
 
 ALLOW (safe=true, category "none"):
 - Ordinary objects, animals, food, places, fictional characters.
-- Real people and celebrities who are NOT contentious: athletes AND THEIR COACHES/MANAGERS (football managers like "Arsène Wenger" or "Alex Ferguson" are ALLOWED — "Arsène Wenger celebrating with the trophy" is category "none"), musicians, actors, TV hosts and personalities, influencers, comedians, chefs, fashion designers, businesspeople, scientists, inventors, artists, authors, historical figures ("Elvis Presley silhouette", "Einstein on a skateboard" are allowed).
-- Athletes and sports figures are ALWAYS allowed, even famous champions — a prompt naming a sports star, coach, or manager (e.g. "Roger Federer holding a racket like a scepter", "a boxer shadow-sparring") is category "none", NOT contentious_figure. Only POLITICIANS, CRIMINALS and TERRORISTS are contentious.
+- Real people: EVERY public figure is allowed EXCEPT the contentious three (politicians, convicted criminals, terrorists). That includes — but is not limited to — athletes and their coaches/managers ("Arsène Wenger celebrating with the trophy" is category "none"), musicians, actors, directors, TV and radio hosts, influencers and streamers, comedians, chefs, fashion designers, models, businesspeople and CEOs, scientists, inventors, astronauts, explorers, artists, authors, philosophers, religious leaders, royalty, military figures, doctors, lawyers, journalists, and historical figures of every kind ("Elvis Presley silhouette", "Einstein on a skateboard", "Marie Curie in a lab coat" are allowed).
 - Edgy-but-harmless humor, mild gross-out ("a slimy sock"), spooky-but-cartoonish ("a friendly ghost").
 
-Note: a prompt about a real person is contentious ONLY if the person is a politician, criminal, or terrorist — fame alone NEVER makes someone contentious. Sports managers, coaches, celebrities, influencers, and businesspeople are ordinary ALLOWED subjects; the prompt's tone does not matter — this step judges the SUBJECT.
+Note: a prompt about a real person is contentious ONLY if the person is a politician, a convicted criminal, or a terrorist — fame alone NEVER makes someone contentious. All other public figures — however famous — are ordinary ALLOWED subjects; the prompt's tone does not matter — this step judges the SUBJECT.
 
 Respond ONLY with JSON matching exactly:
 {"safe": boolean, "category": "none"|"hate"|"sexual"|"violence"|"dangerous"|"contentious_figure"|"other", "reason": string}
