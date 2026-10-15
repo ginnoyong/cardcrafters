@@ -228,6 +228,19 @@ function PresenterBoard({ code }: { code: string }) {
     }
   }, []);
 
+  // Keep the reveal on screen for another 30 s (reveal:extend — same socket,
+  // same ack shape as reveal:ack; the server only honours it during REVEAL).
+  const extendReveal = useCallback(async (): Promise<void> => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    try {
+      const ack = await emitAck<AckResult>(socket, "reveal:extend", {});
+      if (!ack.ok) setError(ack.error ?? "Could not extend the reveal.");
+    } catch {
+      setError("Could not reach the game server — please try again.");
+    }
+  }, []);
+
   // The presenter snapshot has no join tokens — fetch them once (full=1 is
   // the GM/QR convenience route).
   useEffect(() => {
@@ -359,6 +372,14 @@ function PresenterBoard({ code }: { code: string }) {
         <section className="cc-reveal" aria-label="the reveal" data-testid="presenter-reveal">
           <Reveal3D code={code} label={winnerLabel || "…"} testId="presenter-winner-banner" />
           <div className="cc-btn-row cc-reveal-actions">
+            <button
+              type="button"
+              className="cc-btn"
+              data-testid="presenter-reveal-extend"
+              onClick={() => void extendReveal()}
+            >
+              Add 30 more seconds
+            </button>
             <button
               type="button"
               className="cc-btn cc-btn-primary cc-btn-start"

@@ -275,6 +275,52 @@ describe("reveal:auto-expired + reveal timer expiry (30s driver in the hub)", ()
   });
 });
 
+describe("reveal:extend — the clickable banner resets the 30s REVEAL timer", () => {
+  it("REVEAL + reveal:extend resets phaseEndsAt and re-arms the timer", () => {
+    const pickedAt = NOW;
+    const extendAt = NOW + 10_000;
+    const state = mkState({
+      phase: PHASE.REVEAL,
+      winnerTeamId: "team-a",
+      phaseEndsAt: pickedAt + 30_000,
+    });
+    const r = transition(state, { type: "reveal:extend", now: extendAt });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Phase label stays REVEAL; the auto-expiry restarts from the extend time.
+    expect(r.state.phase).toBe(PHASE.REVEAL);
+    expect(r.state.phaseEndsAt).toBe(extendAt + 30_000);
+    // clearTimer THEN startTimer — the hub ends up with exactly ONE armed
+    // REVEAL timer (the timer service replaces anyway, but the order makes
+    // the intent explicit).
+    expect(effectTypes(r.effects)).toEqual(["clearTimer", "emit", "startTimer"]);
+    expect(r.effects[2]).toEqual({
+      type: "startTimer",
+      phase: PHASE.REVEAL,
+      endsAt: extendAt + 30_000,
+    });
+    // The same-phase phaseChanged re-emit carries the new phaseEndsAt so the
+    // clients' countdowns resync (the reducer always adopts a payload
+    // phaseEndsAt — no round bump needed).
+    expect(emitOf(r.effects).payload).toMatchObject({
+      phase: PHASE.REVEAL,
+      round: 1,
+      phaseEndsAt: extendAt + 30_000,
+      serverNow: extendAt,
+    });
+  });
+
+  it("reveal:extend outside REVEAL is rejected", () => {
+    for (const phase of [PHASE.JUDGING, PHASE.RESULTS, PHASE.BUILD, PHASE.LOBBY]) {
+      const state = mkState({ phase });
+      const r = transition(state, { type: "reveal:extend", now: NOW });
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.reason).toContain("REVEAL");
+    }
+  });
+});
+
 describe("illegal transitions", () => {
   it("BUILD → gm:pickWinner rejected", () => {
     const r = transition(mkState({ phase: PHASE.BUILD }), {

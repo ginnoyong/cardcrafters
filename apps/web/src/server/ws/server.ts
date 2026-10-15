@@ -1047,6 +1047,35 @@ export function registerSocketHandlers(
     });
 
     // ---------------------------------------------------------------------
+    // reveal:extend — GM OR presenter keeps the reveal on screen for another
+    // 30 s (resets the hub's REVEAL auto-expiry timer + re-broadcasts the
+    // phase with a fresh phaseEndsAt so every client's countdown resyncs).
+    // Empty payload (same shape as reveal:ack — no options).
+    // ---------------------------------------------------------------------
+    socket.on("reveal:extend", async (raw: unknown, ack?: unknown) => {
+      const identity = data.identity;
+      if (!identity || identity.role === "player") {
+        ackFail(ack, "forbidden", "GM or presenter only");
+        return;
+      }
+      const parsed = revealAckSchema.safeParse(raw ?? {});
+      if (!parsed.success) {
+        ackFail(ack, "invalid_payload", "invalid reveal extend payload");
+        return;
+      }
+      try {
+        const result = await hub.applyEvent(identity.gameId, {
+          type: "reveal:extend",
+          now: Date.now(),
+        });
+        if (result.ok) ackOk(ack, { phase: result.state.phase, phaseEndsAt: result.state.phaseEndsAt ?? null });
+        else ackFailReason(ack, "rejected", result.reason, result.reason);
+      } catch (err) {
+        ackFail(ack, "reveal_extend_failed", err instanceof Error ? err.message : "reveal extend failed");
+      }
+    });
+
+    // ---------------------------------------------------------------------
     // disconnect — presence + player:left broadcast.
     // ---------------------------------------------------------------------
     socket.on("disconnect", () => {

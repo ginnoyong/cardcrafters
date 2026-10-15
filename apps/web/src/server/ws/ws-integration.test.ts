@@ -997,3 +997,79 @@ describe("scoring phase end-to-end", () => {
     gm.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// reveal:extend — GM/presenter keep the REVEAL on screen for another 30 s.
+// The ack carries { phase, phaseEndsAt } and the reset countdown is visible
+// to clients through the next sync:full (sync:resync). Outside REVEAL the
+// handler refuses (ok:false) — the state machine is the single gatekeeper.
+// ---------------------------------------------------------------------------
+
+describe("reveal:extend (keep the reveal on screen)", () => {
+  /** Drive the game LOBBY→…→REVEAL via hub events (pickWinner arms the real
+   *  30 s auto-expiry timer — afterEach's srv.close() shuts the hub down). */
+  async function createGameInReveal(): Promise<{ id: string; code: string }> {
+    const setup = await hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 2 });
+    const teams = await repo.listTeams(setup.game.id);
+    const now = Date.now();
+    for (const event of [
+      { type: "gm:setTheme", theme: "Extend reveal", now },
+      { type: "gm:approveGreetings", now },
+      { type: "gm:stopBuild", now },
+      { type: "gm:stopScoring", now },
+      { type: "gm:pickWinner", teamId: teams[0]!.id, now },
+    ] as const) {
+      const r = await hub.applyEvent(setup.game.id, event);
+      if (!r.ok) throw new Error(`${event.type} failed: ${r.reason}`);
+    }
+    return { id: setup.game.id, code: setup.game.code };
+  }
+
+  it("REVEAL: acks ok with phaseEndsAt > before, and resync shows the reset", { timeout: 10_000 }, async () => {
+    const { id, code } = await createGameInReveal();
+    const before = (await hub.runtimeState(id)).phaseEndsAt ?? 0;
+
+    const gm = connect({ role: "gm", gameCode: code });
+    await emitAck(gm, "join", { role: "gm", joinToken: code });
+
+    const extend = await emitAck<{ ok: boolean; phase?: string; phaseEndsAt?: number }>(
+      gm,
+      "reveal:extend",
+      {},
+    );
+    expect(extend.ok).toBe(true);
+    expect(extend.phase).toBe("REVEAL");
+    expect(typeof extend.phaseEndsAt).toBe("number");
+    // The countdown restarts from the extend time (now + 30 s > old deadline).
+    expect(extend.phaseEndsAt!).toBeGreaterThan(before);
+
+    // A client resync sees the SAME reset deadline (the reducer adopts the
+    // re-emitted phaseEndsAt; the persisted state carries it too).
+    const resynced = new Promise<Record<string, unknown>>((resolve) => gm.once("sync:full", resolve));
+    await emitAck(gm, "sync:resync", {});
+    const raw = await resynced;
+    expect(raw.phase).toBe("REVEAL");
+    expect(raw.phaseEndsAt).toBe(extend.phaseEndsAt);
+
+    gm.close();
+  });
+
+  it("RESULTS: acks ok:false (extend is REVEAL-only)", { timeout: 10_000 }, async () => {
+    const { id, code } = await createGameInReveal();
+    const acked = await hub.applyEvent(id, { type: "reveal:ack", now: Date.now() });
+    if (!acked.ok) throw new Error(`reveal:ack failed: ${acked.reason}`);
+    expect(acked.state.phase).toBe("RESULTS");
+
+    const gm = connect({ role: "gm", gameCode: code });
+    await emitAck(gm, "join", { role: "gm", joinToken: code });
+
+    const extend = await emitAck<{ ok: boolean; error?: string; reason?: string }>(
+      gm,
+      "reveal:extend",
+      {},
+    );
+    expect(extend.ok).toBe(false);
+
+    gm.close();
+  });
+});

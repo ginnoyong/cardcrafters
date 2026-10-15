@@ -256,10 +256,14 @@ export async function handleApiRequest(
     return true;
   }
 
-  // GET /api/games/:code/reveal-card — the winning team's finished card as a
-  // PNG (the presenter REVEAL 3D texture). The card is public from REVEAL on
-  // (the winner banner already names the team); before that the endpoint
-  // refuses (409) so unfinished/anonymous cards never leak.
+  // GET /api/games/:code/reveal-card?teamId= — a finished card as a PNG (the
+  // presenter REVEAL 3D texture, and the GM console's 3D modal per team).
+  // The card is public from REVEAL on (the winner banner already names the
+  // team); before that the endpoint refuses (409) so unfinished/anonymous
+  // cards never leak. With ?teamId=<uuid> that team's card is served (the GM
+  // modal flips through every card) — the team must belong to the game (404
+  // team_not_found otherwise). Without teamId the WINNER's card is served
+  // (the original presenter behaviour, unchanged).
   const revealMatch = /^\/api\/games\/([A-Za-z0-9]+)\/reveal-card$/.exec(path);
   if (req.method === "GET" && revealMatch) {
     const code = revealMatch[1]!;
@@ -273,22 +277,34 @@ export async function handleApiRequest(
       sendJson(res, 409, { ok: false, error: "not_revealing", phase: state.phase });
       return true;
     }
-    const winnerTeamId = state.winnerTeamId;
-    if (!winnerTeamId) {
-      sendJson(res, 409, { ok: false, error: "no_winner" });
-      return true;
-    }
+    const requestedTeamId = url.searchParams.get("teamId");
     const teams = await repo.listTeams(game.id);
-    const winner = teams.find((t) => t.id === winnerTeamId);
-    if (!winner) {
-      sendJson(res, 404, { ok: false, error: "winner_team_missing" });
-      return true;
+    let targetTeamId: string;
+    if (requestedTeamId) {
+      // Explicit team request (GM 3D modal) — must be a team of THIS game.
+      if (!teams.some((t) => t.id === requestedTeamId)) {
+        sendJson(res, 404, { ok: false, error: "team_not_found" });
+        return true;
+      }
+      targetTeamId = requestedTeamId;
+    } else {
+      const winnerTeamId = state.winnerTeamId;
+      if (!winnerTeamId) {
+        sendJson(res, 409, { ok: false, error: "no_winner" });
+        return true;
+      }
+      const winner = teams.find((t) => t.id === winnerTeamId);
+      if (!winner) {
+        sendJson(res, 404, { ok: false, error: "winner_team_missing" });
+        return true;
+      }
+      targetTeamId = winnerTeamId;
     }
     // Shared gather-and-render path (fail-open: stickers that cannot load are
     // skipped by the renderer itself).
     let png: Buffer;
     try {
-      png = await renderTeamCardPng(repo, game, winnerTeamId);
+      png = await renderTeamCardPng(repo, game, targetTeamId);
     } catch (err) {
       sendJson(res, 500, {
         ok: false,
@@ -300,7 +316,6 @@ export async function handleApiRequest(
     res.end(png);
     return true;
   }
-
   // GET /api/games/:code/scoring-card/:cardId?token= — one anonymous scoring
   // card's finished PNG for the player who is rating it. Auth = a valid
   // player session token (the card→team mapping stays server-side, but the

@@ -63,6 +63,7 @@ export type GameEvent =
   | { type: "timer:expired"; phase: Phase; now: number }
   | { type: "gm:pickWinner"; teamId: string; peoplesChoiceTeamId?: string; now: number }
   | { type: "reveal:ack"; now: number }
+  | { type: "reveal:extend"; now: number }
   | { type: "reveal:auto-expired"; now: number }
   | { type: "gm:newRound"; now: number }
   | { type: "player:submitPrompt"; playerId: string; text: string; now: number }

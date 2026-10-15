@@ -283,6 +283,53 @@ describe("GET /api/games/:code/reveal-card (winner card PNG for the REVEAL 3D mo
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("image/png");
   });
+
+  it("?teamId=<valid team> → 200 image/png for that team's card in RESULTS", async () => {
+    const { code, winnerTeamId } = await createGameInReveal();
+    const res = await fetch(base(`/api/games/${code}/reveal-card?teamId=${winnerTeamId}`));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    expect(res.headers.get("cache-control")).toContain("no-store");
+    const buf = Buffer.from(await res.arrayBuffer());
+    expect(buf.length).toBeGreaterThan(100);
+    expect(buf[0]).toBe(0x89);
+    expect(buf.subarray(1, 4).toString("ascii")).toBe("PNG");
+  });
+
+  it("?teamId=<foreign id> → 404 team_not_found (no cross-game card leak)", async () => {
+    const { code } = await createGameInReveal();
+    const res = await fetch(
+      base(`/api/games/${code}/reveal-card?teamId=00000000-0000-4000-8000-000000000000`),
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe("team_not_found");
+  });
+
+  it("?teamId before REVEAL (JUDGING) → 409 not_revealing even for a valid team", async () => {
+    const res = await fetch(base("/api/games"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ teamCount: 2, theme: "Too Early For TeamId" }),
+    });
+    const body = (await res.json()) as {
+      code: string;
+      gameId: string;
+      teams: Array<{ id: string }>;
+    };
+    const now = Date.now();
+    await srv.hub.applyEvent(body.gameId, { type: "gm:approveGreetings", now });
+    await srv.hub.applyEvent(body.gameId, { type: "gm:stopBuild", now });
+    await srv.hub.applyEvent(body.gameId, { type: "gm:stopScoring", now });
+    const res2 = await fetch(
+      base(`/api/games/${body.code}/reveal-card?teamId=${body.teams[0]!.id}`),
+    );
+    expect(res2.status).toBe(409);
+    const err = (await res2.json()) as { ok: boolean; error: string; phase: string };
+    expect(err.error).toBe("not_revealing");
+    expect(err.phase).toBe("JUDGING");
+  });
 });
 
 describe("GET /api/games/:code/scoring-card/:cardId?token= (player rating card PNG)", () => {

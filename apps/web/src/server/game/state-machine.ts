@@ -255,6 +255,40 @@ export function transition(
     }
 
     // ---------------------------------------------------------------------
+    // reveal:extend — keep the reveal on screen for another 30 s. ONLY valid
+    // in REVEAL: the phase label stays REVEAL, phaseEndsAt resets to
+    // now + REVEAL_AUTO_EXPIRE_SECONDS (persisted so hydrateTimers recovers
+    // it), and the countdown resyncs via the same-phase phaseChanged re-emit
+    // (the client reducer always adopts a payload phaseEndsAt). Effects:
+    // clearTimer THEN startTimer — the timer service re-arms cleanly, leaving
+    // exactly one armed REVEAL timer.
+    // ---------------------------------------------------------------------
+    case "reveal:extend": {
+      if (state.phase !== PHASE.REVEAL) {
+        return { ok: false, reason: `reveal:extend is only valid in REVEAL (current: ${state.phase})` };
+      }
+      const phaseEndsAt = timerEndsAt(REVEAL_AUTO_EXPIRE_SECONDS, event.now);
+      const next = nextState(state, { phaseEndsAt });
+      const effects: Effect[] = [
+        { type: "clearTimer" },
+        phaseChangedEmit(state.gameId, {
+          phase: PHASE.REVEAL,
+          round: state.round,
+          phaseEndsAt,
+          serverNow: event.now,
+        }),
+      ];
+      if (phaseEndsAt !== undefined) {
+        effects.push({ type: "startTimer", phase: PHASE.REVEAL, endsAt: phaseEndsAt });
+      }
+      return {
+        ok: true,
+        state: next,
+        effects,
+      };
+    }
+
+    // ---------------------------------------------------------------------
     // REVEAL → RESULTS (presenter ack, the hub's 30s auto-expiry timer, or
     // a recovered timer:expired after a restart — all share one branch).
     // ---------------------------------------------------------------------

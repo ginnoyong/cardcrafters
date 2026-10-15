@@ -24,7 +24,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { clamp01, easeOutCubic, prefersReducedMotion, REVEAL_ENTRY_MS, supportsWebgl } from "./reveal3d-support";
+import { clamp01, easeOutCubic, glossLightParams, prefersReducedMotion, REVEAL_ENTRY_MS, supportsWebgl } from "./reveal3d-support";
 import { WinnerBanner } from "./Standings";
 
 type Mode = "pending" | "three" | "fallback";
@@ -46,6 +46,8 @@ export function Reveal3D({
   code,
   label,
   testId = "winner-banner",
+  gloss = false,
+  textureUrl,
 }: {
   /** Game code — resolves the reveal-card texture endpoint. */
   code: string;
@@ -53,6 +55,10 @@ export function Reveal3D({
   label: string;
   /** Falls back to the WinnerBanner under this test id (same as static). */
   testId?: string;
+  /** Winner gloss: brighter lighting rig + a slow specular sheen sweep. */
+  gloss?: boolean;
+  /** Card texture URL (defaults to the game's reveal-card endpoint). */
+  textureUrl?: string;
 }) {
   const [mode, setMode] = useState<Mode>("pending");
   /** Why we fell back to the static banner (null until a fallback fires). */
@@ -102,7 +108,7 @@ export function Reveal3D({
       }
       if (disposed) return;
       try {
-        teardown = await startRevealScene(THREE, host, code, (reason) => {
+        teardown = await startRevealScene(THREE, host, code, gloss, textureUrl, (reason) => {
           if (!disposed) {
             setFallback(reason);
             setMode("fallback");
@@ -118,7 +124,7 @@ export function Reveal3D({
       disposed = true;
       teardown();
     };
-  }, [mode, code]);
+  }, [mode, code, gloss, textureUrl]);
 
   // Diagnostics: log each fallback reason once (client-side debugging aid
   // for the fallback ladder — reduced motion, WebGL, import, texture).
@@ -163,8 +169,13 @@ async function startRevealScene(
   THREE: typeof import("three"),
   host: HTMLElement,
   code: string,
+  gloss: boolean,
+  textureUrl: string | undefined,
   onFail: (reason: string) => void,
 ): Promise<() => void> {
+  const cardUrl =
+    textureUrl ?? `/api/games/${encodeURIComponent(code)}/reveal-card`;
+  const lightParams = glossLightParams(gloss);
   const width = () => host.clientWidth || 480;
   const height = () => host.clientHeight || 360;
 
@@ -179,11 +190,12 @@ async function startRevealScene(
   camera.position.set(0, 0, 3.4);
 
   // Soft three-point-ish lighting: ambient base + warm key + cool rim.
-  scene.add(new THREE.AmbientLight(0xffffff, 1.05));
-  const key = new THREE.DirectionalLight(0xfff3e0, 1.5);
+  // Intensities come from glossLightParams — gloss (winner card) is brighter.
+  scene.add(new THREE.AmbientLight(0xffffff, lightParams.ambientIntensity));
+  const key = new THREE.DirectionalLight(0xfff3e0, lightParams.keyIntensity);
   key.position.set(2, 3, 4);
   scene.add(key);
-  const rim = new THREE.DirectionalLight(0x8be9fd, 0.45);
+  const rim = new THREE.DirectionalLight(0x8be9fd, lightParams.rimIntensity);
   rim.position.set(-3, -1, 2);
   scene.add(rim);
 
@@ -258,7 +270,7 @@ async function startRevealScene(
     cardTex = await new Promise<import("three").Texture>((resolve, reject) => {
       const loader = new THREE.TextureLoader();
       loader.load(
-        `/api/games/${encodeURIComponent(code)}/reveal-card`,
+        cardUrl,
         (tex) => resolve(tex),
         undefined,
         () => reject(new Error("reveal-card texture failed to load")),
@@ -280,6 +292,38 @@ async function startRevealScene(
   cardTex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
   cardMat.map = cardTex;
   cardMat.needsUpdate = true;
+
+  // Winner gloss sheen sweep: a narrow soft specular band sliding across the
+  // card face every sheenPeriod seconds. Skipped entirely when disabled —
+  // no extra object, no per-frame cost, no particles/sound.
+  let sheen: import("three").Mesh | null = null;
+  let sheenMat: import("three").MeshBasicMaterial | null = null;
+  if (lightParams.sheenEnabled && lightParams.sheenPeriod) {
+    const sheenCanvas = document.createElement("canvas");
+    sheenCanvas.width = 128;
+    sheenCanvas.height = 32;
+    const s2d = sheenCanvas.getContext("2d")!;
+    const sheenGrad = s2d.createLinearGradient(0, 0, 128, 0);
+    sheenGrad.addColorStop(0, "rgba(255,255,255,0)");
+    sheenGrad.addColorStop(0.5, "rgba(255,255,255,0.9)");
+    sheenGrad.addColorStop(1, "rgba(255,255,255,0)");
+    s2d.fillStyle = sheenGrad;
+    s2d.fillRect(0, 0, 128, 32);
+    const sheenTex = new THREE.CanvasTexture(sheenCanvas);
+    sheenTex.colorSpace = THREE.SRGBColorSpace;
+    sheenMat = new THREE.MeshBasicMaterial({
+      map: sheenTex,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    sheen = new THREE.Mesh(new THREE.PlaneGeometry(0.55, CARD_H * 1.02), sheenMat);
+    sheen.position.z = 0.02;
+    sheen.visible = false;
+    group.add(sheen);
+  }
+  const sheenSweepX = CARD_W / 2 + 0.5;
 
   // Keep the drawing buffer in sync with the stage (presenter windows resize).
   const ro = new ResizeObserver(() => {
@@ -312,6 +356,18 @@ async function startRevealScene(
     camera.position.y = Math.cos(t * 0.17) * CAM_DRIFT_Y;
     camera.lookAt(0, 0, 0);
 
+    // Winner gloss sheen: one sinusoidal specular band sliding across the
+    // card every sheenPeriod seconds (fades in only after the entry settles,
+    // and fades out at the sweep edges so the loop is seamless).
+    if (sheen && sheenMat && lightParams.sheenPeriod) {
+      const phase = (t % lightParams.sheenPeriod) / lightParams.sheenPeriod; // 0..1
+      const sweep = Math.sin(phase * Math.PI * 2); // -1..1 across the card
+      sheen.position.x = sweep * sheenSweepX;
+      const edgeFade = Math.cos(phase * Math.PI * 2) ** 2;
+      sheenMat.opacity = 0.22 * entry * edgeFade;
+      sheen.visible = sheenMat.opacity > 0.001;
+    }
+
     renderer.render(scene, camera);
   };
   raf = requestAnimationFrame(tick);
@@ -322,6 +378,11 @@ async function startRevealScene(
     cardGeo.dispose();
     cardMat.dispose();
     cardTex?.dispose();
+    if (sheen) {
+      sheen.geometry.dispose();
+      sheenMat?.map?.dispose();
+      sheenMat?.dispose();
+    }
     glow.geometry.dispose();
     glowMat.dispose();
     glowTex.dispose();

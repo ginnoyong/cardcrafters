@@ -58,3 +58,44 @@ export function easeOutCubic(t: number): number {
   const u = 1 - clamp01(t);
   return 1 - u * u * u;
 }
+
+/** Lighting rig + sheen-sweep parameters for the reveal scene. */
+export interface GlossLightParams {
+  /** Warm key light intensity. */
+  keyIntensity: number;
+  /** Cool rim light intensity. */
+  rimIntensity: number;
+  /** Ambient base intensity. */
+  ambientIntensity: number;
+  /** Sheen sweep period in seconds (undefined ⇒ no sweep). */
+  sheenPeriod?: number;
+  /** Whether the specular sheen sweep runs at all. */
+  sheenEnabled: boolean;
+}
+
+/** Default (calm) lighting — the presenter REVEAL look, unchanged. */
+const DEFAULT_LIGHT_PARAMS: GlossLightParams = {
+  keyIntensity: 1.5,
+  rimIntensity: 0.45,
+  ambientIntensity: 1.05,
+  sheenPeriod: undefined,
+  sheenEnabled: false,
+};
+
+/** Winner-gloss lighting — brighter rig + a slow specular sheen sweep. */
+const GLOSS_LIGHT_PARAMS: GlossLightParams = {
+  keyIntensity: 2.1,
+  rimIntensity: 0.75,
+  ambientIntensity: 1.3,
+  sheenPeriod: 6,
+  sheenEnabled: true,
+};
+
+/**
+ * Pure lighting rig for the reveal scene. gloss=false (default) returns the
+ * original presenter intensities with the sheen disabled; gloss=true returns
+ * a brighter rig (winner card) plus a ~6s sinusoidal sheen sweep.
+ */
+export function glossLightParams(gloss: boolean): GlossLightParams {
+  return gloss ? { ...GLOSS_LIGHT_PARAMS } : { ...DEFAULT_LIGHT_PARAMS };
+}

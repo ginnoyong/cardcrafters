@@ -52,6 +52,13 @@ const CardCanvas = dynamic(() => import("@/components/player/CardCanvas"), {
   ssr: false,
   loading: () => <div className="cc-canvas-wrap">Loading canvas…</div>,
 });
+// Client-only: the Three.js reveal scene (three is imported lazily INSIDE the
+// component's effect) — only ever mounted inside the GM's 3D modal, so it
+// never lands in the console's initial bundle or an SSR pass.
+const Reveal3D = dynamic(() => import("@/components/Reveal3D").then((m) => m.Reveal3D), {
+  ssr: false,
+  loading: () => <div className="cc-hint">Loading 3D reveal…</div>,
+});
 import {
   GameStoreProvider,
   phaseLabel,
@@ -384,12 +391,41 @@ function TeamCard({
 
 // ---------------------------------------------------------------------------
 // Live card mini: one read-only CardCanvas per team (GM console preview).
+// After the winner pick (REVEAL/RESULTS + winnerTeamId), the whole thumbnail
+// becomes a button-like control opening the 3D reveal modal for THAT team.
 // ---------------------------------------------------------------------------
 
-function TeamMiniCanvas({ team }: { team: ClientTeam }) {
+function TeamMiniCanvas({
+  team,
+  interactive,
+  onOpen3d,
+}: {
+  team: ClientTeam;
+  interactive: boolean;
+  onOpen3d: () => void;
+}) {
   const readyCount = team.items.filter((i) => i.status === "ready").length;
   return (
-    <div className="cc-mini" aria-label={`live preview of ${team.name}'s card`}>
+    <div
+      className={`cc-mini${interactive ? " is-clickable" : ""}`}
+      aria-label={
+        interactive ? `Show ${team.name} card in 3D` : `live preview of ${team.name}'s card`
+      }
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      data-testid={interactive ? `gm-thumb-3d-${team.id}` : undefined}
+      onClick={interactive ? onOpen3d : undefined}
+      onKeyDown={
+        interactive
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onOpen3d();
+              }
+            }
+          : undefined
+      }
+    >
       <h3>
         {team.name} <span className="cc-muted">({team.label})</span>
       </h3>
@@ -407,6 +443,79 @@ function TeamMiniCanvas({ team }: { team: ClientTeam }) {
 }
 
 // ---------------------------------------------------------------------------
+// 3D reveal modal: one team's finished card as the Reveal3D scene. The winner
+// gets the gloss rig (brighter lights + sheen sweep); every other team gets
+// the default look. ✕ (autofocused on open), Escape and a backdrop click all
+// close; the backdrop check compares e.target against e.currentTarget so a
+// click anywhere inside the stage never closes the modal.
+// ---------------------------------------------------------------------------
+
+function RevealModal({
+  code,
+  teamId,
+  teamName,
+  gloss,
+  onClose,
+}: {
+  code: string;
+  teamId: string;
+  teamName: string;
+  gloss: boolean;
+  onClose: () => void;
+}) {
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+
+  // Keyboard focus lands on the ✕ button the moment the modal opens.
+  useEffect(() => {
+    closeRef.current?.focus();
+  }, []);
+
+  // Escape closes the modal from anywhere (a real keydown on window, so it
+  // works even if focus is on the canvas).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="cc-modal"
+      data-testid="gm-3d-modal"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        className="cc-modal-stage"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${teamName} card in 3D`}
+      >
+        <button
+          ref={closeRef}
+          type="button"
+          className="cc-modal-close"
+          aria-label="close 3D reveal"
+          onClick={onClose}
+        >
+          ✕
+        </button>
+        <Reveal3D
+          code={code}
+          label={teamName}
+          testId="gm-3d-reveal"
+          gloss={gloss}
+          textureUrl={`/api/games/${encodeURIComponent(code)}/reveal-card?teamId=${encodeURIComponent(teamId)}`}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Console (post-creation view) — socket + store wiring
 // ---------------------------------------------------------------------------
 
@@ -416,6 +525,8 @@ function Console({ game }: { game: CreatedGame }) {
   const [connected, setConnected] = useState(false);
   // Single-QR accordion: the one team whose QR area is open (null = all closed).
   const [qrTeamId, setQrTeamId] = useState<string | null>(null);
+  // 3D reveal modal: the team whose finished card is on screen (null = closed).
+  const [modalTeamId, setModalTeamId] = useState<string | null>(null);
   const socketRef = useRef<ReturnType<typeof createGameSocket> | null>(null);
 
   /** Core ack emitter — returns the result without touching the banner. */
@@ -777,10 +888,37 @@ function Console({ game }: { game: CreatedGame }) {
         </section>
       ) : null}
 
-      {/* REVEAL/RESULTS: the winner banner + People's Choice + standings. */}
+      {/* REVEAL/RESULTS: the winner banner + People's Choice + standings.
+          At REVEAL the banner itself is a button-like control that keeps the
+          reveal on the big screen for another 30 s (reveal:extend); at
+          RESULTS the same banner renders inert (the reveal is over). */}
       {resultsStage && snapshot?.winnerTeamId ? (
         <>
-          <WinnerBanner label={winnerLabel || "…"} testId="gm-winner-banner" />
+          {phase === PHASE.REVEAL ? (
+            <div className="cc-reveal-extend-wrap">
+              <div
+                role="button"
+                tabIndex={0}
+                className="cc-reveal-extend"
+                aria-label="Keep the reveal on screen for another 30 seconds"
+                data-testid="gm-reveal-extend"
+                onClick={() => void gmAction("reveal:extend", {})}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    void gmAction("reveal:extend", {});
+                  }
+                }}
+              >
+                <WinnerBanner label={winnerLabel || "…"} testId="gm-winner-banner" />
+              </div>
+              <p className="cc-hint">
+                Click the banner to keep the reveal on the big screen for another 30 seconds.
+              </p>
+            </div>
+          ) : (
+            <WinnerBanner label={winnerLabel || "…"} testId="gm-winner-banner" />
+          )}
           {peoplesChoiceLabel ? (
             <PeoplesChoiceBanner label={peoplesChoiceLabel} testId="gm-peoples-choice" />
           ) : null}
@@ -794,13 +932,34 @@ function Console({ game }: { game: CreatedGame }) {
       ) : null}
 
       {/* Live previews: one read-only mini canvas per team. GREETINGS: the
-          greeting + an empty canvas; BUILD: live items + layout. */}
+          greeting + an empty canvas; BUILD: live items + layout. After the
+          winner pick (REVEAL/RESULTS + winnerTeamId) each thumbnail opens the
+          3D reveal modal for that team (winner = gloss rig). */}
       {snapshot && snapshot.teams.length > 0 ? (
         <section aria-label="live card previews" className="cc-mini-grid">
           {snapshot.teams.map((team) => (
-            <TeamMiniCanvas key={team.id} team={team} />
+            <TeamMiniCanvas
+              key={team.id}
+              team={team}
+              interactive={resultsStage && snapshot.winnerTeamId !== null}
+              onOpen3d={() => setModalTeamId(team.id)}
+            />
           ))}
         </section>
+      ) : null}
+
+      {/* 3D reveal modal (REVEAL/RESULTS): flip through every team's finished
+          card; the winner's card gets the gloss treatment. */}
+      {modalTeamId && snapshot ? (
+        <RevealModal
+          code={game.code}
+          teamId={modalTeamId}
+          teamName={
+            snapshot.teams.find((t) => t.id === modalTeamId)?.name ?? "Team"
+          }
+          gloss={modalTeamId === snapshot.winnerTeamId}
+          onClose={() => setModalTeamId(null)}
+        />
       ) : null}
     </div>
   );

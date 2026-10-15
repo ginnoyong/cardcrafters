@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { clamp01, easeOutCubic, prefersReducedMotion, supportsWebgl } from "./reveal3d-support";
+import { clamp01, easeOutCubic, glossLightParams, prefersReducedMotion, supportsWebgl } from "./reveal3d-support";
 
 /** Fake canvas.getContext driven by a record of id → result (or throw). */
 function fakeCanvas(
@@ -110,5 +110,36 @@ describe("easeOutCubic / clamp01", () => {
     expect(clamp01(Number.NaN)).toBe(0);
     expect(clamp01(-0.5)).toBe(0);
     expect(clamp01(1.5)).toBe(1);
+  });
+});
+
+describe("glossLightParams", () => {
+  it("default (gloss=false): sheen disabled, no period, original intensities", () => {
+    const p = glossLightParams(false);
+    expect(p.sheenEnabled).toBe(false);
+    expect(p.sheenPeriod).toBeUndefined();
+    expect(p.keyIntensity).toBe(1.5);
+    expect(p.rimIntensity).toBe(0.45);
+    expect(p.ambientIntensity).toBe(1.05);
+  });
+
+  it("gloss=true: every light is brighter than the default rig", () => {
+    const d = glossLightParams(false);
+    const g = glossLightParams(true);
+    expect(g.keyIntensity).toBeGreaterThan(d.keyIntensity);
+    expect(g.rimIntensity).toBeGreaterThan(d.rimIntensity);
+    expect(g.ambientIntensity).toBeGreaterThan(d.ambientIntensity);
+  });
+
+  it("gloss=true: sheen enabled with a ~6s sweep period", () => {
+    const g = glossLightParams(true);
+    expect(g.sheenEnabled).toBe(true);
+    expect(g.sheenPeriod).toBe(6);
+  });
+
+  it("returns independent copies (mutating one result never leaks into the next)", () => {
+    const a = glossLightParams(true);
+    a.keyIntensity = 999;
+    expect(glossLightParams(true).keyIntensity).not.toBe(999);
   });
 });

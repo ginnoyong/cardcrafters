@@ -1044,6 +1044,87 @@ no animations requiring sound. */
   }
 }
 
+/* GM reveal-extend control (gm/page.tsx): the winner banner doubles as a
+   button-like control that re-arms the 30 s reveal timer (reveal:extend).
+   The wrapper keeps the hint line below; the control itself is focusable
+   and shows the shared focus ring for keyboard users. */
+.cc-reveal-extend-wrap {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.cc-reveal-extend {
+  cursor: pointer;
+  border-radius: var(--radius);
+}
+
+.cc-reveal-extend:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* GM 3D reveal modal (gm/page.tsx): full-viewport scrim + a centered stage
+   card hosting the Reveal3D scene, with a floating ✕ close button. */
+.cc-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  backdrop-filter: blur(3px);
+}
+
+.cc-modal-stage {
+  position: relative;
+  width: min(92vw, 720px);
+  max-height: 92vh;
+  overflow: auto;
+  background: var(--bg-card);
+  border: 1px solid color-mix(in srgb, var(--accent-strong) 45%, transparent);
+  border-radius: var(--radius);
+  box-shadow: 0 18px 60px rgb(0 0 0 / 0.55);
+}
+
+.cc-modal-stage .cc-reveal3d {
+  border: none;
+}
+
+.cc-modal-close {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  z-index: 2;
+  min-width: 2.4rem;
+  min-height: 2.4rem;
+  padding: 0 0.6rem;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid color-mix(in srgb, var(--text-muted) 40%, transparent);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.cc-modal-close:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+/* Clickable 3D thumbnails in the GM mini grid (REVEAL/RESULTS after the
+   winner pick) — pointer affordance + the shared keyboard focus ring. */
+.cc-mini.is-clickable {
+  cursor: pointer;
+  border-radius: var(--radius);
+}
+
+.cc-mini.is-clickable:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
 /* --- Print: one big QR card per team ------------------------------------ */
 
 @media print {
