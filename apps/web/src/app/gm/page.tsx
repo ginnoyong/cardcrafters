@@ -527,6 +527,9 @@ function Console({ game }: { game: CreatedGame }) {
   const [qrTeamId, setQrTeamId] = useState<string | null>(null);
   // 3D reveal modal: the team whose finished card is on screen (null = closed).
   const [modalTeamId, setModalTeamId] = useState<string | null>(null);
+  // Final polish window: set by the GM-only `montage:started` heads-up (emitted
+  // just before the preScoring hook runs) and cleared by `scoring:started`.
+  const [polishing, setPolishing] = useState(false);
   const socketRef = useRef<ReturnType<typeof createGameSocket> | null>(null);
 
   /** Core ack emitter — returns the result without touching the banner. */
@@ -630,9 +633,13 @@ function Console({ game }: { game: CreatedGame }) {
       // anonymous running averages; winnerAnnounced carries the pick +
       // public standings for the results banner.
       // -------------------------------------------------------------------
-      onEvent<Record<string, unknown>>(socket, "scoring:started", (payload) =>
-        dispatch({ type: "scoringStarted", payload }),
-      ),
+      // Final polish heads-up: the montage pass runs between this and
+      // scoring:started (the hub's preScoring window).
+      onEvent(socket, "montage:started", () => setPolishing(true)),
+      onEvent<Record<string, unknown>>(socket, "scoring:started", (payload) => {
+        setPolishing(false);
+        dispatch({ type: "scoringStarted", payload });
+      }),
       onEvent<Record<string, unknown>>(socket, "scores:update", (payload) =>
         dispatch({ type: "scoresUpdated", payload }),
       ),
@@ -808,6 +815,14 @@ function Console({ game }: { game: CreatedGame }) {
           <p className="cc-hint">
             Ends building now — each player rates the other teams' cards from 1 to 10.
           </p>
+        </section>
+      ) : null}
+
+      {/* Final polish window: montage:started → scoring:started. Not gated on
+          phase — the phase is already SCORING client-side when this fires. */}
+      {polishing ? (
+        <section className="cc-card" data-testid="gm-polishing" aria-live="polite">
+          <p className="cc-hint">Polishing cards…</p>
         </section>
       ) : null}
 

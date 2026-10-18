@@ -130,6 +130,15 @@ export interface SolveOptions {
    * inject a fixed value to pin the policy under measurement.
    */
   overlapCap?: number;
+  /**
+   * Final-montage relaxation multiplier for BOTH overlap caps (the pairwise
+   * cap above AND the hero tuck cap — see
+   * ConstraintCtx.overlapCapFactor): effective cap = cap × overlapCapFactor.
+   * Only the final montage pass sets it (MONTAGE_OVERLAP_RELAX_FACTOR = 1.8
+   * when the AI opts in via relaxOverlap); default (undefined) is factor 1 —
+   * byte-identical behavior to the strict build-phase caps.
+   */
+  overlapCapFactor?: number;
 }
 
 export interface SolveResult {
@@ -835,6 +844,8 @@ function attemptSolve(
     overlapCap,
     heroItemId: heroId ?? undefined,
     heroOverlapCap: HERO_TUCK_CAP,
+    // Final montage pass only (undefined → factor 1, unchanged caps).
+    overlapCapFactor: opts.overlapCapFactor,
   };
   const m = safeMargin(card);
   const ax1 = m.x;

@@ -511,6 +511,15 @@ export interface ConstraintCtx {
   heroItemId?: string;
   /** Pairwise-overlap cap for hero–support pairs (see heroItemId). */
   heroOverlapCap?: number;
+  /**
+   * Final-montage relaxation multiplier applied to BOTH overlap caps (the
+   * pairwise cap above AND the hero tuck cap): effective cap =
+   * cap × overlapCapFactor. Only the final montage pass sets it
+   * (MONTAGE_OVERLAP_RELAX_FACTOR = 1.8 when the AI opts in via
+   * relaxOverlap); default (undefined) is factor 1 — byte-identical to the
+   * strict build-phase caps.
+   */
+  overlapCapFactor?: number;
 }
 
 /** A placed item's footprint for the pairwise overlap check (true corners). */
@@ -554,7 +563,12 @@ export function checkItem(
   if ((ctx.checkTextOverlap ?? true) && !textOverlapOk(box, ctx.textZone, ctx.card)) {
     violations.push({ itemId: item.id, code: "text_overlap" });
   }
-  const cap = ctx.overlapCap ?? MAX_PAIRWISE_OVERLAP;
+  // Final-montage relaxation: ONE factor multiplies BOTH cap kinds — the
+  // pairwise cap here and the hero tuck cap in the pair-kind split below
+  // (see ConstraintCtx.overlapCapFactor). Default (undefined) is factor 1:
+  // unchanged caps.
+  const factor = ctx.overlapCapFactor ?? 1;
+  const cap = (ctx.overlapCap ?? MAX_PAIRWISE_OVERLAP) * factor;
   const corners = rotatedRectCorners(placement, item, ctx.k);
   for (const other of placedBoxes) {
     // Cheap AABB pre-filter: disjoint bounding boxes can never have true
@@ -575,7 +589,7 @@ export function checkItem(
       ctx.heroItemId !== undefined &&
       ctx.heroOverlapCap !== undefined &&
       (ctx.heroItemId === item.id || ctx.heroItemId === other.itemId)
-        ? ctx.heroOverlapCap
+        ? ctx.heroOverlapCap * factor
         : cap;
     if (!overlapCapOk(corners, otherCorners as Vec2[], pairCap)) {
       violations.push({

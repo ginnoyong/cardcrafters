@@ -45,6 +45,7 @@ import {
   type LayoutEmit,
 } from "../layout/engine";
 import { createCritiqueScheduler, type CritiqueEmit } from "../layout/critique";
+import { runMontagePass } from "../layout/montage";
 import {
   createPromptPipelineDeps,
   submitPrompt,
@@ -261,6 +262,12 @@ export async function buildSyncFull(
     const items = filterItemsForIdentity(allItems, identity);
     const layout = await repo.getLayoutState(team.id, round);
     const greeting = greetings.get(team.id);
+    // Critique persistence (D3): the persisted verdict rides with the layout
+    // so the GM judging view renders the definitive "Layout N/100" from
+    // storage (surviving reloads). The payload is per-audience — players and
+    // the presenter never receive the critique detail.
+    const layoutForIdentity =
+      layout && identity?.role !== "gm" ? { ...layout, critique: undefined } : layout;
     teamSnapshots.push({
       id: team.id,
       name: team.name,
@@ -269,7 +276,7 @@ export async function buildSyncFull(
       members: members.map((p) => ({ id: p.id, nickname: p.nickname, connected: p.connected })),
       itemCount: items.length,
       items,
-      layout,
+      layout: layoutForIdentity,
       greeting: { text: greeting?.text ?? "", status: greeting?.status ?? null },
     });
   }
@@ -471,6 +478,19 @@ export function registerSocketHandlers(
     // didn't land).
     if (computed) critique.schedule(ctx);
     return computed;
+  });
+
+  // Final montage pass (final-polish step): runs inside the hub's preScoring
+  // hook — after the GM-only `montage:started` heads-up, BEFORE scoring starts.
+  // The hook's `round` param is unused: runMontagePass reads the game's current
+  // round from the repo itself.
+  hub.setPreScoring(async (gameId) => {
+    await layoutDebouncer.flushAll();
+    await critique.settleAll(gameId);
+    await runMontagePass(
+      { repo, ai: ai ?? null, mockMode: ai ? ai.isMock() : true, emit: layoutEmit },
+      gameId,
+    );
   });
 
   // Queue-level emitter: item:ready → hub-stamped broadcast to the TEAM room;

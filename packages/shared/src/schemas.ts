@@ -14,7 +14,7 @@
 
 import { z } from "zod";
 
-import { CARD_COORD_SPACE, PHASE_VALUES } from "./constants";
+import { CARD_COORD_SPACE, MONTAGE_STRATEGIES, PHASE_VALUES } from "./constants";
 
 // ---------------------------------------------------------------------------
 // Shared fragments
@@ -173,6 +173,45 @@ export const layoutCritiqueSchema = z
   })
   .strict();
 export type LayoutCritique = z.infer<typeof layoutCritiqueSchema>;
+
+/**
+ * Step: final montage pass — color-grade adjustments the compositor applies
+ * to the rendered card (server/render): temperature shifts, saturation &
+ * contrast multipliers, vignette strength. All bounded so a wild model output
+ * can never wash out or black out the card.
+ */
+export const montageGradingSchema = z
+  .object({
+    /** Color temperature shift (−1 cool … +1 warm), applied as an overlay. */
+    temperature: z.number().min(-1).max(1),
+    /** Saturation multiplier (0.5 = muted … 1.5 = punchy). */
+    saturation: z.number().min(0.5).max(1.5),
+    /** Contrast multiplier (0.5 = flat … 1.5 = dramatic). */
+    contrast: z.number().min(0.5).max(1.5),
+    /** Vignette strength (0 = none … 1 = full edge darkening). */
+    vignette: z.number().min(0).max(1),
+  })
+  .strict();
+export type MontageGrading = z.infer<typeof montageGradingSchema>;
+
+/**
+ * Step: final montage pass — the SAME composition-hints contract as
+ * layoutCompositionSchema (focalPoint / groups / hints / textZone /
+ * suggestedGreetingStyle) so the solver consumes it identically, PLUS:
+ *  - strategy: which MONTAGE_STRATEGIES arrangement to build (movie-poster
+ *    rubric — hero center, supporting cast, scene cohesion).
+ *  - relaxOverlap: AI opt-in that lets the compositor exceed the strict
+ *    MAX_PAIRWISE_OVERLAP cap by MONTAGE_OVERLAP_RELAX_FACTOR for blended
+ *    sticker edges (final pass only — never during BUILD).
+ */
+export const layoutMontageSchema = layoutCompositionSchema
+  .extend({
+    strategy: z.enum(MONTAGE_STRATEGIES),
+    /** True only if soft overlaps would visibly improve blending. */
+    relaxOverlap: z.boolean().optional(),
+  })
+  .strict();
+export type LayoutMontage = z.infer<typeof layoutMontageSchema>;
 
 // ---------------------------------------------------------------------------
 // (b) WebSocket payloads — client → server (strict: reject unknown fields)

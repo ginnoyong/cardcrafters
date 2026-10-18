@@ -396,6 +396,51 @@ describe.skipIf(!DB_OK)("PrismaRepo (postgres)", () => {
     });
   });
 
+  it("layout state: critique round-trips + preservation (critique persistence D3, memory-repo parity)", async () => {
+    await withGame(async (gameId) => {
+      const team = await mkTeam(gameId, "T");
+      const placements = [{ itemId: "i1", x: 100, y: 200, scale: 1, rotation: 0, zIndex: 0 }];
+
+      // DEFAULT: no critique ever written → null (never undefined/garbage).
+      await repo.upsertLayoutState(team.id, 1, { version: 1, placements, source: "solver" });
+      expect((await repo.getLayoutState(team.id, 1))!.critique).toBeNull();
+
+      // ROUND-TRIP: a verdict persists and reads back intact (jsonb column).
+      const verdict = { score: 72, issues: ["hero slightly low"], focalOk: true };
+      await repo.upsertLayoutState(team.id, 1, {
+        version: 1,
+        placements,
+        critique: verdict,
+        source: "solver",
+      });
+      expect((await repo.getLayoutState(team.id, 1))!.critique).toEqual(verdict);
+
+      // PRESERVATION: a critique-less patch (the layout engine's normal write
+      // shape) keeps the persisted verdict while placements/source update.
+      const v2Placements = [{ itemId: "i2", x: 9, y: 9, scale: 1.5, rotation: 0, zIndex: 1 }];
+      const v2 = await repo.upsertLayoutState(team.id, 1, {
+        version: 2,
+        placements: v2Placements,
+        source: "manual",
+      });
+      expect(v2.critique).toEqual(verdict);
+      expect(v2.placements).toEqual(v2Placements);
+      expect(v2.source).toBe("manual");
+
+      // EQUAL-VERSION: accepted (the critique write path re-writes with the
+      // SAME version fire() read — no bump — to attach the verdict).
+      const same = await repo.upsertLayoutState(team.id, 1, {
+        version: 2,
+        placements: v2Placements,
+        critique: verdict,
+        source: "manual",
+      });
+      expect(same.version).toBe(2);
+      expect(same.critique).toEqual(verdict);
+      expect((await repo.getLayoutState(team.id, 1))!.critique).toEqual(verdict);
+    });
+  });
+
   it("ai calls: insert + per-task cost summary, no cross-game leakage", async () => {
     await withGame(async (gameId) => {
       await repo.insertAiCall({ gameId, task: "validate", model: "m1", status: "OK", latencyMs: 100, costUsd: 0.01 });

@@ -301,6 +301,144 @@ describe("createCritiqueScheduler", () => {
     errSpy.mockRestore();
   });
 
+  it("settleAll: pending timer cleared → critique fires IMMEDIATELY, no buffer wait", async () => {
+    const s = await setup();
+    const scheduler = createCritiqueScheduler({
+      repo: s.repo,
+      ai: null,
+      mockMode: true,
+      emitCritique: (event, payload, ctx) => s.verdicts.push({ event, payload, ctx }),
+    });
+
+    // A critique is pending inside the 5s buffer — settleAll must not wait it out.
+    scheduler.schedule(s.ctx);
+    expect(scheduler.pending()).toEqual([s.teamId]);
+    await scheduler.settleAll(s.gameId);
+    expect(s.verdicts).toHaveLength(1);
+    expect(s.verdicts[0]!.payload).toMatchObject({ teamId: s.teamId, score: MOCK_CRITIQUE_VERDICT.score });
+    expect(scheduler.pending()).toEqual([]); // timer consumed, nothing left
+
+    // And nothing further: the buffer-edge fire that WOULD have happened is gone.
+    await vi.advanceTimersByTimeAsync(BUFFER_MS + 1_000);
+    await tick();
+    expect(s.verdicts).toHaveLength(1);
+  });
+
+  it("settleAll bypasses the 45s rate limit — a team critiqued <45s ago still gets a verdict", async () => {
+    const s = await setup();
+    const scheduler = createCritiqueScheduler({
+      repo: s.repo,
+      ai: null,
+      mockMode: true,
+      emitCritique: (event, payload, ctx) => s.verdicts.push({ event, payload, ctx }),
+    });
+
+    // First critique through the normal path → lastCritiqueAt = t≈5s.
+    scheduler.schedule(s.ctx);
+    await vi.advanceTimersByTimeAsync(BUFFER_MS);
+    await tick();
+    expect(s.verdicts).toHaveLength(1);
+
+    // Re-arm well inside the 45s window: the buffered fire would be silently
+    // dropped by the rate limit… but settleAll forces past it.
+    scheduler.schedule(s.ctx);
+    await scheduler.settleAll(s.gameId);
+    expect(s.verdicts).toHaveLength(2);
+    expect(s.verdicts[1]!.payload).toMatchObject({ teamId: s.teamId });
+
+    // …and the forced fire still updates lastCritiqueAt: a subsequent
+    // rate-limited (non-forced) buffer fire inside the new 45s window is dropped.
+    scheduler.schedule(s.ctx);
+    await vi.advanceTimersByTimeAsync(BUFFER_MS);
+    await tick();
+    expect(s.verdicts).toHaveLength(2);
+  });
+
+  it("settleAll (mock mode) emits the fixed MOCK_CRITIQUE_VERDICT with no render / no AI", async () => {
+    const s = await setup();
+    const scheduler = createCritiqueScheduler({
+      repo: s.repo,
+      ai: fakeAi,
+      mockMode: true,
+      emitCritique: (event, payload, ctx) => s.verdicts.push({ event, payload, ctx }),
+      render: s.render, // would throw — proves the short-circuit never renders
+    });
+
+    scheduler.schedule(s.ctx);
+    await scheduler.settleAll(s.gameId);
+    expect(s.verdicts).toHaveLength(1);
+    expect(s.verdicts[0]!.event).toBe("layout:critique");
+    expect(s.verdicts[0]!.ctx).toEqual(s.ctx);
+    expect(s.verdicts[0]!.payload).toMatchObject({
+      teamId: s.teamId,
+      score: MOCK_CRITIQUE_VERDICT.score,
+      issues: MOCK_CRITIQUE_VERDICT.issues,
+      focalOk: MOCK_CRITIQUE_VERDICT.focalOk,
+    });
+    expect(s.render).not.toHaveBeenCalled();
+  });
+
+  it("settleAll never rejects — a failing AI/render for one team does not stop the others' fires", async () => {
+    const s = await setup();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // Second team in the same game (setup created exactly one) with FULL card
+    // state — item + layout — so its fire() reaches the AI call.
+    const team2 = await s.repo.createTeam({
+      gameId: s.gameId,
+      name: "Team B",
+      label: "B",
+      joinToken: "tok-B",
+    });
+    const item2 = await s.repo.createItem({
+      teamId: team2.id,
+      playerId: "player-2",
+      round: 1,
+      promptRaw: "blue balloon",
+      subject: "blue balloon",
+      status: "READY",
+    });
+    await s.repo.updateItem(item2.id, {
+      width: 200,
+      height: 200,
+      imageUrl: "/static/items/item-2.png",
+    });
+    await s.repo.upsertLayoutState(team2.id, 1, {
+      version: 1,
+      placements: [{ itemId: item2.id, x: 400, y: 400, scale: 1.5, rotation: 0, zIndex: 0 }],
+      source: "solver",
+    });
+
+    // Team 1's AI call explodes; team 2 succeeds. Identified robustly by the
+    // itemId inside layoutSummary (ai.run only receives gameId, not teamId —
+    // and with allSettled the two fires may interleave in any order).
+    const scheduler = createCritiqueScheduler({
+      repo: s.repo,
+      ai: {
+        run: async (_task, input) => {
+          if (String(input.layoutSummary).includes(s.itemId)) {
+            throw new Error("vision provider down");
+          }
+          return { data: { score: 90, issues: [], focalOk: true } };
+        },
+      },
+      mockMode: false,
+      emitCritique: (event, payload, ctx) => s.verdicts.push({ event, payload, ctx }),
+      render: s.render,
+    });
+
+    scheduler.schedule(s.ctx);
+    scheduler.schedule({ gameId: s.gameId, teamId: team2.id });
+    expect(scheduler.pending()).toHaveLength(2);
+
+    // settleAll resolves (never rejects) even though team 1's fire throws.
+    await expect(scheduler.settleAll(s.gameId)).resolves.toBeUndefined();
+    // The successful team still got its parsed verdict; the failed team got none.
+    expect(s.verdicts).toHaveLength(1);
+    expect(s.verdicts[0]!.ctx).toEqual({ gameId: s.gameId, teamId: team2.id });
+    expect(scheduler.pending()).toEqual([]);
+    errSpy.mockRestore();
+  });
+
   it("dispose() clears pending timers — nothing fires after the advance", async () => {
     const s = await setup();
     const scheduler = createCritiqueScheduler({
@@ -318,5 +456,113 @@ describe("createCritiqueScheduler", () => {
     await vi.advanceTimersByTimeAsync(BUFFER_MS + 1_000);
     await tick();
     expect(s.verdicts).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Critique persistence (D3) — the verdict rides with the LAYOUT STATE so the
+// GM judging view survives reloads (sync:full reads it from storage). The
+// write uses the SAME version fire() just read (no bump), re-sending the
+// placements/source it read so nothing else in the row changes, and it is
+// BEST-EFFORT: a persistence failure must never break the emit contract
+// (verdict + low-score flagged re-emit are already fulfilled by then).
+// ---------------------------------------------------------------------------
+
+describe("critique persistence (D3)", () => {
+  it("fire() persists the parsed verdict via upsertLayoutState at the SAME version (no bump)", async () => {
+    const s = await setup();
+    // Spy AFTER the fixture seeded layout v1 — only fire()'s write is recorded.
+    const upsert = vi.spyOn(s.repo, "upsertLayoutState");
+    // Non-mock AI whose verdict fields mirror MOCK_CRITIQUE_VERDICT (parsed
+    // through layoutCritiqueSchema before emit/persist).
+    const verdict = {
+      score: MOCK_CRITIQUE_VERDICT.score,
+      issues: ["hero slightly low"],
+      focalOk: MOCK_CRITIQUE_VERDICT.focalOk,
+    };
+    const scheduler = createCritiqueScheduler({
+      repo: s.repo,
+      ai: { run: async () => ({ data: verdict }) },
+      mockMode: false,
+      emitCritique: (event, payload, ctx) => s.verdicts.push({ event, payload, ctx }),
+      render: s.render,
+    });
+
+    scheduler.schedule(s.ctx);
+    await vi.advanceTimersByTimeAsync(BUFFER_MS);
+    await tick();
+
+    expect(s.verdicts).toHaveLength(1);
+    // Exactly ONE layout write after the spy was installed, carrying the
+    // parsed verdict — and the SAME version the fire path read (no bump).
+    expect(upsert).toHaveBeenCalledTimes(1);
+    const [teamId, round, patch] = upsert.mock.calls[0]!;
+    expect(teamId).toBe(s.teamId);
+    expect(round).toBe(1);
+    expect(patch.version).toBe(1);
+    expect(patch.critique).toEqual(verdict);
+    expect(patch.placements).toHaveLength(1);
+    expect(patch.source).toBe("solver");
+    // The persisted state agrees (GM judging view reads this on reload).
+    expect((await s.repo.getLayoutState(s.teamId, 1))!.critique).toEqual(verdict);
+  });
+
+  it("persist failure is swallowed — verdict + flagged re-emit still delivered, fire never throws", async () => {
+    const s = await setup();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(s.repo, "upsertLayoutState").mockRejectedValue(new Error("db down"));
+    // Low-score verdict → fire() re-emits the flagged layout BEFORE attempting
+    // the persist — the failure must not undo that emit contract.
+    const scheduler = createCritiqueScheduler({
+      repo: s.repo,
+      ai: { run: async () => ({ data: { score: 40, issues: ["no focal point"], focalOk: false } }) },
+      mockMode: false,
+      emitCritique: (event, payload, ctx) => s.verdicts.push({ event, payload, ctx }),
+      emitLayout: (event, payload, ctx) => s.layouts.push({ event, payload, ctx }),
+      render: s.render,
+    });
+
+    scheduler.schedule(s.ctx);
+    // Does not reject: the persist attempt is wrapped inside fire().
+    await vi.advanceTimersByTimeAsync(BUFFER_MS);
+    await tick();
+
+    // The verdict was still emitted…
+    expect(s.verdicts).toHaveLength(1);
+    expect(s.verdicts[0]!.payload).toMatchObject({ teamId: s.teamId, score: 40, focalOk: false });
+    // …the low-score re-emit behavior is unchanged…
+    expect(s.layouts).toHaveLength(1);
+    expect(s.layouts[0]!.event).toBe("layout:updated");
+    expect(s.layouts[0]!.payload).toMatchObject({
+      version: 1,
+      source: "critique:flagged",
+      critique: { score: 40, focalOk: false },
+    });
+    // …and the persistence failure was logged + swallowed (best-effort only).
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it("settleAll persists the verdict — one forced fire lands the critique in storage", async () => {
+    const s = await setup();
+    const scheduler = createCritiqueScheduler({
+      repo: s.repo,
+      ai: { run: async () => ({ data: { score: 88, issues: ["a bit crowded"], focalOk: true } }) },
+      mockMode: false,
+      emitCritique: (event, payload, ctx) => s.verdicts.push({ event, payload, ctx }),
+      render: s.render,
+    });
+
+    scheduler.schedule(s.ctx);
+    await scheduler.settleAll(s.gameId);
+    expect(s.verdicts).toHaveLength(1);
+
+    // The forced fire ends with the critique persisted (no version bump —
+    // the Phase-A settle must not corrupt the layout the engine committed).
+    const row = await s.repo.getLayoutState(s.teamId, 1);
+    expect(row!.version).toBe(1);
+    expect(row!.source).toBe("solver");
+    expect(row!.placements).toHaveLength(1);
+    expect(row!.critique).toEqual({ score: 88, issues: ["a bit crowded"], focalOk: true });
   });
 });

@@ -89,6 +89,12 @@ export interface CritiqueScheduler {
   /** Arm (or re-arm) the trailing critique for a team. Called by the ws layer
    *  AFTER each layout:updated emit. */
   schedule(ctx: { gameId: string; teamId: string }): void;
+  /** Force-settle EVERY pending critique for a game: clear the pending timers
+   *  and fire them all immediately with the rate-limit check bypassed
+   *  (phase-A transition — layouts must be critiqued before scoring, and
+   *  waiting out the 5s buffer/45s window is not an option). Resolves only
+   *  when all fires have settled; never rejects (fire failures are logged). */
+  settleAll(gameId: string): Promise<void>;
   /** Clear all pending timers (server shutdown). In-flight fires finish. */
   dispose(): void;
   /** Team ids with a pending timer (test introspection). */
@@ -123,13 +129,20 @@ export function createCritiqueScheduler(deps: CritiqueSchedulerDeps): CritiqueSc
     timers.set(ctx.teamId, { gameId: ctx.gameId, timer });
   }
 
-  async function fire(ctx: { gameId: string; teamId: string }): Promise<void> {
+  async function fire(
+    ctx: { gameId: string; teamId: string },
+    opts: { force?: boolean } = {},
+  ): Promise<void> {
     const now = Date.now();
-    const last = lastCritiqueAt.get(ctx.teamId);
-    if (last !== undefined && now - last < minIntervalMs) {
-      // Rate-limit safety net — the 5s buffer already gates bursts; this only
-      // stops back-to-back critiques when layouts keep landing ~5s apart.
-      return;
+    if (!opts.force) {
+      const last = lastCritiqueAt.get(ctx.teamId);
+      if (last !== undefined && now - last < minIntervalMs) {
+        // Rate-limit safety net — the 5s buffer already gates bursts; this only
+        // stops back-to-back critiques when layouts keep landing ~5s apart.
+        // FORCE (settleAll) skips this check: the caller explicitly wants the
+        // verdict NOW — but lastCritiqueAt is still updated below.
+        return;
+      }
     }
     lastCritiqueAt.set(ctx.teamId, now);
 
@@ -195,10 +208,54 @@ export function createCritiqueScheduler(deps: CritiqueSchedulerDeps): CritiqueSc
         ctx,
       );
     }
+
+    // -- persist the verdict (best-effort, best-effort only) ----------------
+    // The verdict must survive reloads (GM judging view reads it from storage
+    // via sync:full). We write it with the SAME version we just read — no
+    // bump — so a concurrent manual layout write isn't rejected by the
+    // version gate, and our own read isn't stale. A failure here is logged
+    // and swallowed: the emit contract above is already fulfilled.
+    try {
+      await deps.repo.upsertLayoutState(ctx.teamId, round, {
+        version: layout.version,
+        placements: layout.placements,
+        critique: verdict,
+        source: layout.source,
+      });
+    } catch (err) {
+      console.warn(
+        `[critique] failed to persist verdict for team ${ctx.teamId} (round ${round}):`,
+        err,
+      );
+    }
+  }
+
+  async function settleAll(gameId: string): Promise<void> {
+    // Collect + clear every pending timer for teams in THIS game (other
+    // games' pending critiques keep their timers).
+    const forced: { gameId: string; teamId: string }[] = [];
+    for (const [teamId, state] of [...timers]) {
+      if (state.gameId !== gameId) continue;
+      clearTimeout(state.timer);
+      timers.delete(teamId);
+      forced.push({ gameId, teamId });
+    }
+    // Force-fire all of them in parallel. Each fire is wrapped in its own
+    // catch (same swallow-and-log policy as schedule()'s timer callback), so
+    // Promise.allSettled can never reject and one team's failure never
+    // affects another's verdict.
+    await Promise.allSettled(
+      forced.map((ctx) =>
+        fire(ctx, { force: true }).catch((err) =>
+          console.error(`[critique] settleAll fire failed for team ${ctx.teamId}:`, err),
+        ),
+      ),
+    );
   }
 
   return {
     schedule,
+    settleAll,
     dispose() {
       for (const state of timers.values()) clearTimeout(state.timer);
       timers.clear();

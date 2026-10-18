@@ -20,6 +20,7 @@ import type {
   ContentBox,
   GreetingStyle,
   ItemStatus,
+  LayoutCritique,
   Phase,
   Placement,
   ScoringOrder,
@@ -102,6 +103,8 @@ export interface LayoutStateRow {
   version: number;
   placements: Placement[];
   greetingStyle: GreetingStyle | null;
+  /** Final vision critique verdict (persisted during Phase A settle). */
+  critique: LayoutCritique | null;
   source: string;
   updatedAt: number;
 }
@@ -214,6 +217,8 @@ export interface LayoutStatePatch {
   version: number;
   placements: Placement[];
   greetingStyle?: GreetingStyle | null;
+  /** Persist the critique verdict without touching placements. */
+  critique?: LayoutCritique | null;
   source: string;
 }
 

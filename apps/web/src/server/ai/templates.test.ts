@@ -93,6 +93,8 @@ function minimalVars(task: string): Record<string, unknown> {
       return { cardWidth: 1000, cardHeight: 1000, textHint: "top third", items: "[]" };
     case "layout_critique":
       return { layoutSummary: "{}" };
+    case "layout_montage":
+      return { cardWidth: 1000, cardHeight: 1000, textHint: "top third", items: "[]" };
     default:
       return {};
   }

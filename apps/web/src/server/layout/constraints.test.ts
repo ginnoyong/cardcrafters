@@ -14,6 +14,7 @@ import {
   MAX_ITEM_SIZE_PCT,
   MAX_PAIRWISE_OVERLAP,
   MIN_ITEM_SIZE_PCT,
+  type Placement,
 } from "@cardcrafters/shared";
 
 import {
@@ -21,9 +22,11 @@ import {
   boxArea,
   boxIntersection,
   cardBox,
+  HERO_TUCK_CAP,
   checkItem,
   checkLayout,
   displayWidth,
+  type ConstraintCtx,
   inBoundsOk,
   overlapCapFor,
   overlapRatio,
@@ -322,5 +325,99 @@ describe("rotated AABB", () => {
     expect(b0.y2 - b0.y1).toBeCloseTo(200, 6);
     const b45 = placedBox({ x: 0, y: 0, scale: 1, rotation: 45 }, item, 1);
     expect(b45.x2 - b45.x1).toBeCloseTo((100 + 200) / Math.SQRT2, 3);
+  });
+});
+
+describe("overlapCapFactor — final-montage relaxation", () => {
+  // Axis-aligned squares of display width w: center separation (1 − ratio) × w
+  // → intersection strip ratio (same construction as the corner-based cap
+  // test above). 0.12 sits BETWEEN the strict 0.10 cap and the relaxed
+  // 0.10 × 1.8 = 0.18 cap; 0.30 sits BETWEEN the strict 0.25 hero tuck cap
+  // and the relaxed 0.25 × 1.8 = 0.45 tuck cap.
+  const item = mkItem();
+  const other = { ...item, id: "b", orderIndex: 1 };
+  const { min } = scaleWindow(item, card, K);
+  const w = displayWidth(item, min, K); // display width in normalized units
+  const cy = card.h / 2;
+  const mk = (id: string, x: number): Placement => ({
+    itemId: id,
+    x,
+    y: cy,
+    scale: min,
+    rotation: 0,
+    zIndex: 0,
+  });
+  const pair = (ratio: number) => {
+    const sep = w * (1 - ratio);
+    const a = mk("a", card.w / 2 - sep / 2);
+    const b = mk("b", card.w / 2 + sep / 2);
+    return { a, b, fpA: placedFootprint(a, item, K) };
+  };
+  const ctx = (extra: Partial<ConstraintCtx> = {}) => ({
+    card,
+    k: K,
+    textZone: null,
+    ...extra,
+  });
+
+  it("default (absent) and factor 1 reproduce the strict caps exactly", () => {
+    const p30 = pair(0.30);
+    const p08 = pair(0.08);
+    for (const factor of [undefined, 1] as const) {
+      const c = ctx(factor === undefined ? {} : { overlapCapFactor: factor });
+      // 0.30 pair: rejected under the strict 0.10 support–support cap.
+      expect(
+        checkItem(p30.b, other, c, [p30.fpA]).map((v) => v.code),
+      ).toContain("overlap_cap");
+      // 0.08 pair: accepted either way.
+      expect(checkItem(p08.b, other, c, [p08.fpA])).toEqual([]);
+    }
+  });
+
+  it("factor 1.8 relaxes the support–support cap 0.10 → 0.18", () => {
+    const p12 = pair(0.12);
+    expect(
+      overlapRatio(p12.fpA.corners, placedFootprint(p12.b, other, K).corners),
+    ).toBeCloseTo(0.12, 6);
+    // Strict (no factor): the 0.12 pair violates the 0.10 cap.
+    expect(
+      checkItem(p12.b, other, ctx(), [p12.fpA]).map((v) => v.code),
+    ).toContain("overlap_cap");
+    // Relaxed (factor 1.8 → effective 0.18): the SAME geometry is legal.
+    expect(
+      checkItem(p12.b, other, ctx({ overlapCapFactor: 1.8 }), [p12.fpA]),
+    ).toEqual([]);
+    // …and the whole layout flips from illegal to legal, pairwise.
+    expect(checkLayout([p12.a, p12.b], [item, other], ctx()).ok).toBe(false);
+    expect(
+      checkLayout([p12.a, p12.b], [item, other], ctx({ overlapCapFactor: 1.8 })).ok,
+    ).toBe(true);
+  });
+
+  it("factor 1.8 relaxes the hero tuck cap 0.25 → 0.45", () => {
+    const heroCtx = (factor?: number) =>
+      ctx({
+        heroItemId: "a",
+        heroOverlapCap: HERO_TUCK_CAP,
+        ...(factor !== undefined ? { overlapCapFactor: factor } : {}),
+      });
+    const p30 = pair(0.30);
+    expect(
+      overlapRatio(p30.fpA.corners, placedFootprint(p30.b, other, K).corners),
+    ).toBeCloseTo(0.30, 6);
+    // Strict tuck cap 0.25: the 0.30 hero–support pair is rejected.
+    const strict = checkLayout([p30.a, p30.b], [item, other], heroCtx());
+    expect(strict.ok).toBe(false);
+    expect(
+      strict.violations.some(
+        (v) => v.code === "overlap_cap" && v.itemId === "b" && v.otherItemId === "a",
+      ),
+    ).toBe(true);
+    // Relaxed tuck cap 0.45 (0.25 × 1.8): the SAME geometry is legal.
+    expect(checkLayout([p30.a, p30.b], [item, other], heroCtx(1.8)).ok).toBe(true);
+    // The factor must NOT loosen the cap beyond its own band: a 0.55 pair
+    // still violates even the relaxed 0.45 tuck cap.
+    const p55 = pair(0.55);
+    expect(checkLayout([p55.a, p55.b], [item, other], heroCtx(1.8)).ok).toBe(false);
   });
 });

@@ -16,6 +16,7 @@ import type {
   ContentBox,
   GreetingStyle,
   ItemStatus,
+  LayoutCritique,
   Placement,
   ScoringOrder,
   StyleDerivation,
@@ -570,6 +571,7 @@ export class PrismaRepo implements Repository {
             version: patch.version,
             placements: patch.placements as unknown as Prisma.InputJsonValue,
             greetingStyle: (patch.greetingStyle ?? undefined) as Prisma.InputJsonValue | undefined,
+            critique: (patch.critique ?? undefined) as Prisma.InputJsonValue | undefined,
             source: patch.source,
           },
           update: {
@@ -577,6 +579,9 @@ export class PrismaRepo implements Repository {
             placements: patch.placements as unknown as Prisma.InputJsonValue,
             ...(patch.greetingStyle !== undefined
               ? { greetingStyle: patch.greetingStyle as Prisma.InputJsonValue }
+              : {}),
+            ...(patch.critique !== undefined
+              ? { critique: patch.critique as Prisma.InputJsonValue }
               : {}),
             source: patch.source,
           },
@@ -603,6 +608,7 @@ export class PrismaRepo implements Repository {
     version: number;
     placements: unknown;
     greetingStyle: unknown;
+    critique: unknown;
     source: string;
     updatedAt: Date;
   }): LayoutStateRow {
@@ -612,6 +618,7 @@ export class PrismaRepo implements Repository {
       version: l.version,
       placements: l.placements as Placement[],
       greetingStyle: (l.greetingStyle as GreetingStyle | null) ?? null,
+      critique: (l.critique as LayoutCritique | null) ?? null,
       source: l.source,
       updatedAt: l.updatedAt.getTime(),
     };

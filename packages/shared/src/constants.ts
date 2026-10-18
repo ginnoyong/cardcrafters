@@ -115,6 +115,50 @@ export const LAYOUT_DEBOUNCE_MS = 1500;
 export const LAYOUT_CRITIQUE_BUFFER_MS = 5000;
 export const LAYOUT_CRITIQUE_MIN_INTERVAL_MS = 45000;
 export const LAYOUT_CRITIQUE_LOW_SCORE = 55;
+
+// ---------------------------------------------------------------------------
+// Final montage pass — phase-3 "movie poster" compositor (server/layout/montage)
+// ---------------------------------------------------------------------------
+
+/**
+ * Soft-fade (feather) fraction of a sticker's DRAWN width — the band where
+ * the sticker alpha ramps 0→1 so overlapping stickers blend like a collage
+ * instead of hard-edge pasting. Documented band is 3–6% of drawn width; the
+ * default sits in the middle. Only applied when the AI opts in
+ * (relaxOverlap) or when the solver must resolve an otherwise-illegal pair.
+ */
+export const MONTAGE_FEATHER_FRACTION = 0.045;
+/**
+ * Multiplier applied to MAX_PAIRWISE_OVERLAP — ONLY when the AI opted in
+ * (relaxOverlap: true) during the FINAL montage pass. The 0.10 pair cap
+ * relaxes to 0.18 (0.10 × 1.8), letting supporting stickers lean into the
+ * hero sticker for a blended-poster look. Never applied outside the final
+ * pass, so in-build layouts keep the strict cap.
+ */
+export const MONTAGE_OVERLAP_RELAX_FACTOR = 1.8;
+/**
+ * Per-team cap on the whole montage pass (AI calls + solve + render), in ms.
+ * SCORING is a short phase; the montage must never block scoring entry for a
+ * team whose AI call hangs — past this the pass aborts and the card ships
+ * with its build-phase layout.
+ */
+export const MONTAGE_PASS_TIMEOUT_MS = 30_000;
+
+/**
+ * Strategies the layout_montage AI task may pick. Each maps to a distinct
+ * compositor arrangement:
+ *  - character_montage: dominant hero sticker center, supporting cast around
+ *    it at varying scales (the default movie-poster arrangement).
+ *  - narrative_composite: items composed as a left→right / layered scene that
+ *    reads as one story at a glance.
+ *  - floating_heads: items shrunk toward the top/bottom bands in a grid-like
+ *    credits arrangement, leaving a clear title zone in the middle.
+ */
+export const MONTAGE_STRATEGIES = [
+  "character_montage",
+  "narrative_composite",
+  "floating_heads",
+] as const;
 /** Tween duration when applying remote layout updates (ms). */
 export const LAYOUT_TWEEN_MS = 600;
 

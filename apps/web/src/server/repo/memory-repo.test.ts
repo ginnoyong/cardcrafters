@@ -314,6 +314,72 @@ describe("layout state", () => {
       repo.upsertLayoutState(teamA.id, 1, { version: 1, placements: [], source: "manual" }),
     ).rejects.toThrow(RepoError);
   });
+
+  it("critique round-trips: persist a verdict → getLayoutState returns it intact", async () => {
+    const { repo, teamA } = await mkGame();
+    const verdict = { score: 72, issues: ["hero slightly low"], focalOk: true };
+    await repo.upsertLayoutState(teamA.id, 1, {
+      version: 1,
+      placements: [{ itemId: "i1", x: 100, y: 200, scale: 1, rotation: 0, zIndex: 0 }],
+      critique: verdict,
+      source: "solver",
+    });
+    expect((await repo.getLayoutState(teamA.id, 1))!.critique).toEqual(verdict);
+  });
+
+  it("critique-less patch PRESERVES an existing critique (placements/source still update)", async () => {
+    const { repo, teamA } = await mkGame();
+    const verdict = { score: 55, issues: [], focalOk: false };
+    await repo.upsertLayoutState(teamA.id, 1, {
+      version: 1,
+      placements: [{ itemId: "i1", x: 1, y: 2, scale: 1, rotation: 0, zIndex: 0 }],
+      critique: verdict,
+      source: "solver",
+    });
+    // The layout engine's normal writes never carry a critique — they must
+    // not wipe the persisted verdict.
+    const v2 = await repo.upsertLayoutState(teamA.id, 1, {
+      version: 2,
+      placements: [{ itemId: "i2", x: 300, y: 400, scale: 1.5, rotation: 90, zIndex: 1 }],
+      greetingStyle: { align: "center" },
+      source: "manual",
+    });
+    expect(v2.version).toBe(2);
+    expect(v2.critique).toEqual(verdict);
+    expect(v2.placements).toEqual([
+      { itemId: "i2", x: 300, y: 400, scale: 1.5, rotation: 90, zIndex: 1 },
+    ]);
+    expect(v2.source).toBe("manual");
+    expect((await repo.getLayoutState(teamA.id, 1))!.critique).toEqual(verdict);
+  });
+
+  it("default critique is null when never written", async () => {
+    const { repo, teamA } = await mkGame();
+    await repo.upsertLayoutState(teamA.id, 1, {
+      version: 1,
+      placements: [],
+      source: "solver",
+    });
+    expect((await repo.getLayoutState(teamA.id, 1))!.critique).toBeNull();
+  });
+
+  it("equal-version upsert is ACCEPTED — the critique write path relies on it", async () => {
+    const { repo, teamA } = await mkGame();
+    const placements = [{ itemId: "i1", x: 100, y: 200, scale: 1, rotation: 0, zIndex: 0 }];
+    await repo.upsertLayoutState(teamA.id, 1, { version: 1, placements, source: "solver" });
+    // fire() re-writes with the SAME version it just read (no bump) to attach
+    // the verdict — this must not trip the stale-write gate.
+    const verdict = { score: 80, issues: [], focalOk: true };
+    const same = await repo.upsertLayoutState(teamA.id, 1, {
+      version: 1,
+      placements,
+      critique: verdict,
+      source: "solver",
+    });
+    expect(same.version).toBe(1);
+    expect(same.critique).toEqual(verdict);
+    expect((await repo.getLayoutState(teamA.id, 1))!.critique).toEqual(verdict);
+  });
 });
 
 describe("scores — upsert, lock, aggregation", () => {

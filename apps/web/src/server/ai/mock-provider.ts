@@ -21,6 +21,7 @@ import {
   countWords,
   greetingVariationsSchema,
   layoutCompositionSchema,
+  layoutMontageSchema,
   moderationSchema,
   promptValidationSchema,
   styleDerivationSchema,
@@ -147,6 +148,14 @@ export class MockProvider implements AiProvider {
         // heuristic, never a network call.
         data = { score: 80, issues: [], focalOk: true };
         break;
+      case "layout_montage":
+        // The montage module short-circuits mock mode BEFORE calling the
+        // router, so this branch is a deterministic safety net for direct
+        // calls (tests, or any future direct mock call): the regular layout
+        // composition, tagged with fixed montage options (strategy
+        // "character_montage", relaxOverlap false) — never a network call.
+        data = mockLayoutMontage(input);
+        break;
       case "item_image":
         // Handled in run() (binary output path); unreachable here.
         throw new AiTaskError({
@@ -171,6 +180,7 @@ export class MockProvider implements AiProvider {
       greeting_variations: greetingVariationsSchema,
       style_derivation: styleDerivationSchema,
       layout_composition: layoutCompositionSchema,
+      layout_montage: layoutMontageSchema,
     };
     const schema = schemaFor[task];
     if (schema) {
@@ -967,6 +977,21 @@ function mockLayoutComposition(input: Record<string, unknown>): unknown {
       align: "center",
       y: textZone.y + textZone.h / 2,
     },
+  });
+}
+
+/**
+ * Mock layout_montage: reuses the deterministic layout-composition builder
+ * (seeded from input) and tags it with FIXED montage options — strategy
+ * "character_montage", relaxOverlap false. Mock mode always resolves to this
+ * single, predictable poster arrangement.
+ */
+function mockLayoutMontage(input: Record<string, unknown>): unknown {
+  const base = mockLayoutComposition(input) as Record<string, unknown>;
+  return layoutMontageSchema.parse({
+    ...base,
+    strategy: "character_montage",
+    relaxOverlap: false,
   });
 }
 

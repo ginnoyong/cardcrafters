@@ -176,6 +176,7 @@ const TEMPLATE_TASKS = [
   "style_derivation",
   "layout_composition",
   "layout_critique",
+  "layout_montage",
 ];
 function textTemplates(): PromptTemplates {
   if (!tplDir) throw new Error("template dir not prepared");

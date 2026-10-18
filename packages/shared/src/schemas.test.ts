@@ -26,6 +26,8 @@ import {
   itemFailedSchema,
   itemRemovedSchema,
   layoutCritiqueSchema,
+  montageGradingSchema,
+  layoutMontageSchema,
 } from "./schemas";
 
 /** JSON round-trip helper: serialize, parse, re-parse through the schema. */
@@ -270,6 +272,91 @@ describe("layoutCritiqueSchema", () => {
 
   it("round-trips through JSON", () => {
     expect(roundTrip(layoutCritiqueSchema, valid)).toEqual(valid);
+  });
+});
+
+describe("montageGradingSchema", () => {
+  const valid = {
+    temperature: 0.2,
+    saturation: 1.1,
+    contrast: 0.9,
+    vignette: 0.3,
+  };
+
+  it("accepts a valid fixture", () => {
+    expect(montageGradingSchema.parse(valid)).toEqual(valid);
+  });
+
+  it("accepts the exact bounds", () => {
+    expect(montageGradingSchema.parse({ temperature: -1, saturation: 0.5, contrast: 0.5, vignette: 0 })).toEqual({ temperature: -1, saturation: 0.5, contrast: 0.5, vignette: 0 });
+    expect(montageGradingSchema.parse({ temperature: 1, saturation: 1.5, contrast: 1.5, vignette: 1 })).toEqual({ temperature: 1, saturation: 1.5, contrast: 1.5, vignette: 1 });
+  });
+
+  it("rejects every field outside its documented bounds", () => {
+    expect(() => montageGradingSchema.parse({ ...valid, temperature: 1.01 })).toThrow();
+    expect(() => montageGradingSchema.parse({ ...valid, temperature: -1.01 })).toThrow();
+    expect(() => montageGradingSchema.parse({ ...valid, saturation: 0.49 })).toThrow();
+    expect(() => montageGradingSchema.parse({ ...valid, saturation: 1.51 })).toThrow();
+    expect(() => montageGradingSchema.parse({ ...valid, contrast: 0.49 })).toThrow();
+    expect(() => montageGradingSchema.parse({ ...valid, contrast: 1.51 })).toThrow();
+    expect(() => montageGradingSchema.parse({ ...valid, vignette: -0.01 })).toThrow();
+    expect(() => montageGradingSchema.parse({ ...valid, vignette: 1.01 })).toThrow();
+  });
+
+  it("rejects missing and extra fields (strict)", () => {
+    const { vignette: _drop, ...rest } = valid;
+    expect(() => montageGradingSchema.parse(rest)).toThrow();
+    expect(() => montageGradingSchema.parse({ ...valid, sepia: 1 })).toThrow();
+  });
+
+  it("round-trips through JSON", () => {
+    expect(roundTrip(montageGradingSchema, valid)).toEqual(valid);
+  });
+});
+
+describe("layoutMontageSchema", () => {
+  const valid = {
+    focalPoint: { x: 500, y: 400 },
+    groups: [{ itemIds: ["i1", "i2"], cx: 300, cy: 300, spread: 120, subject: "hero party" }],
+    hints: [{ itemId: "i1", role: "focal", importance: 1 }],
+    textZone: { x: 100, y: 800, w: 800, h: 120 },
+    suggestedGreetingStyle: { align: "center", y: 850 },
+    strategy: "character_montage",
+    relaxOverlap: false,
+  };
+
+  it("accepts a valid montage (strategy + hints + relaxOverlap) and round-trips through JSON", () => {
+    expect(layoutMontageSchema.parse(valid)).toEqual(valid);
+    expect(roundTrip(layoutMontageSchema, valid)).toEqual(valid);
+  });
+
+  it("accepts every documented strategy", () => {
+    for (const strategy of ["character_montage", "narrative_composite", "floating_heads"] as const) {
+      expect(layoutMontageSchema.parse({ ...valid, strategy }).strategy).toBe(strategy);
+    }
+  });
+
+  it("relaxOverlap is optional (absent = false behaviour)", () => {
+    const { relaxOverlap: _drop, ...rest } = valid;
+    expect(layoutMontageSchema.parse(rest)).toEqual(rest);
+  });
+
+  it("rejects an unknown strategy", () => {
+    expect(() =>
+      layoutMontageSchema.parse({ ...valid, strategy: "movie_poster" }),
+    ).toThrow();
+  });
+
+  it("rejects non-boolean relaxOverlap", () => {
+    expect(() => layoutMontageSchema.parse({ ...valid, relaxOverlap: "yes" })).toThrow();
+  });
+
+  it("rejects extra fields (strict) while keeping the base layout contract", () => {
+    expect(() => layoutMontageSchema.parse({ ...valid, montageMode: "aggressive" })).toThrow();
+    expect(() =>
+      layoutMontageSchema.parse({ ...valid, focalPoint: { x: 1200, y: 400 } }),
+    ).toThrow();
+    expect(() => layoutMontageSchema.parse({ ...valid, strategy: undefined } as unknown as typeof valid)).toThrow();
   });
 });
 

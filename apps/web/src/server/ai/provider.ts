@@ -26,6 +26,7 @@ import {
   greetingVariationsSchema,
   layoutCompositionSchema,
   layoutCritiqueSchema,
+  layoutMontageSchema,
   moderationSchema,
   promptValidationSchema,
   styleDerivationSchema,
@@ -44,6 +45,7 @@ export const TASK_NAMES = [
   "item_image",
   "layout_composition",
   "layout_critique",
+  "layout_montage",
 ] as const;
 
 export type AiTaskName = (typeof TASK_NAMES)[number];
@@ -122,6 +124,7 @@ export const TASK_SCHEMAS: Record<string, z.ZodTypeAny> = {
   styleDerivationSchema,
   layoutCompositionSchema,
   layoutCritiqueSchema,
+  layoutMontageSchema,
 };
 
 /** Validate `data` against the schema named by cfg.structured (null = exempt). */

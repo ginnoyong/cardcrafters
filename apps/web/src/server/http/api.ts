@@ -30,7 +30,7 @@ import { z } from "zod";
 import type { AiRouter } from "../ai/router";
 import { generateGreetingsForGame } from "../flows/greetings";
 import type { GameHub, RoomEmitter } from "../game/hub";
-import { renderCardPng, type RenderableItem } from "../render/card-render";
+import { deriveGradingFromStyle, renderCardPng, type RenderableItem } from "../render/card-render";
 import type { Repository, GameRow } from "../repo/repository";
 import { gmRoom, teamRoom } from "../ws/rooms";
 
@@ -128,9 +128,11 @@ export function mergeCardConfig(partial: unknown): CardConfig {
 /**
  * Gather one team's finished card (layout + READY items + greeting) and render
  * it as a PNG. Shared by the reveal-card route (presenter REVEAL texture) and
- * the scoring-card route (player rating preview). The render itself is
- * fail-open about missing stickers, but a hard failure propagates to the
- * caller (routes turn it into a 500).
+ * the scoring-card route (player rating preview). Renders the FINAL polished
+ * montage card (feathered stickers + style-pack grading); both routes are
+ * phase-gated at SCORING or later, so the montage pass has already settled.
+ * The render itself is fail-open about missing stickers, but a hard failure
+ * propagates to the caller (routes turn it into a 500).
  */
 async function renderTeamCardPng(
   repo: Repository,
@@ -151,6 +153,8 @@ async function renderTeamCardPng(
     {
       cardRatioW: game.config.cardRatioW,
       cardRatioH: game.config.cardRatioH,
+      finalPass: true,
+      grading: deriveGradingFromStyle(game.style, teamId),
     },
   );
 }

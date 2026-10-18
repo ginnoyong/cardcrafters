@@ -143,6 +143,7 @@ model LayoutState {
   version      Int      @default(1)
   greetingStyle Json?
   placements   Json
+  critique     Json?
   source       String   @default("solver")
   updatedAt    DateTime @default(now())
 

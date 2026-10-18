@@ -172,3 +172,66 @@ describe("buildSyncFull — snapshot privacy integration", () => {
     expect(presenterSnapshot.teams[0]!.itemCount).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Critique persistence (D3): the persisted verdict rides with the layout in
+// the sync:full snapshot — GM ONLY. Players and the presenter never receive
+// the critique detail (audience-scoped like the private item rows above).
+// ---------------------------------------------------------------------------
+
+interface SnapshotLayout {
+  version: number;
+  source: string;
+  critique?: unknown;
+}
+
+describe("buildSyncFull — critique audience scoping (GM only)", () => {
+  it("GM snapshot's layout carries the persisted critique; player/presenter snapshots omit it", async () => {
+    const s = await setup();
+    const verdict = { score: 66, issues: ["dead space at the bottom"], focalOk: true };
+    // Seed exactly the way the critique scheduler persists (see
+    // layout/critique.ts fire()): same version, verdict attached.
+    await s.repo.upsertLayoutState(s.teamId, 1, {
+      version: 1,
+      placements: [{ itemId: "i1", x: 100, y: 200, scale: 1, rotation: 0, zIndex: 0 }],
+      critique: verdict,
+      source: "solver",
+    });
+
+    // GM: the definitive judging view — the verdict rides with the layout.
+    const gm = await buildSyncFull(s.hub, s.repo, s.gameId, gmIdentity(s));
+    expect(gm.teams[0]!.layout as SnapshotLayout | null).toMatchObject({
+      version: 1,
+      source: "solver",
+      critique: verdict,
+    });
+
+    // Player: layout present but the critique detail is stripped (undefined —
+    // not null, so the client reducer keeps a null-free "absent" semantics).
+    const player = await buildSyncFull(s.hub, s.repo, s.gameId, playerIdentity(s));
+    const playerLayout = player.teams[0]!.layout as SnapshotLayout | null;
+    expect(playerLayout).not.toBeNull();
+    expect(playerLayout!.version).toBe(1);
+    expect(playerLayout!.critique).toBeUndefined();
+
+    // Presenter: same fail-closed stripping as the player.
+    const presenter = await buildSyncFull(s.hub, s.repo, s.gameId, presenterIdentity(s));
+    const presenterLayout = presenter.teams[0]!.layout as SnapshotLayout | null;
+    expect(presenterLayout).not.toBeNull();
+    expect(presenterLayout!.critique).toBeUndefined();
+  });
+
+  it("a never-critiqued layout stays critique: null for the GM (default)", async () => {
+    const s = await setup();
+    await s.repo.upsertLayoutState(s.teamId, 1, {
+      version: 1,
+      placements: [],
+      source: "solver",
+    });
+    const gm = await buildSyncFull(s.hub, s.repo, s.gameId, gmIdentity(s));
+    expect(gm.teams[0]!.layout as SnapshotLayout | null).toMatchObject({
+      version: 1,
+      critique: null,
+    });
+  });
+});

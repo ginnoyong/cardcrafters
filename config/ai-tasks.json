@@ -77,6 +77,16 @@
       "timeoutMs": 20000,
       "structured": "layoutCritiqueSchema",
       "enabled": true
+    },
+    "layout_montage": {
+      "primary": "google/gemini-2.5-flash",
+      "fallbacks": ["openai/gpt-4.1-mini"],
+      "temperature": 0.3,
+      "maxTokens": 1200,
+      "retries": 1,
+      "timeoutMs": 20000,
+      "structured": "layoutMontageSchema",
+      "enabled": true
     }
   }
 }

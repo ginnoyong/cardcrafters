@@ -18,11 +18,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import sharp from "sharp";
 
-import { DEFAULT_CARD_CONFIG } from "@cardcrafters/shared";
+import { DEFAULT_CARD_CONFIG, type MontageGrading, type StyleDerivation } from "@cardcrafters/shared";
 
 import { drawMockSticker } from "../ai/mock-provider";
 import { BASE_COVERAGE, REF_SIZE, cardBoxNormalized, baseFit, greetingZonePx } from "../../lib/canvas-geometry";
-import { DEFAULT_CARD_WIDTH_PX, renderCardPng } from "./card-render";
+import { DEFAULT_CARD_WIDTH_PX, deriveGradingFromStyle, renderCardPng } from "./card-render";
 
 const RATIO_W = DEFAULT_CARD_CONFIG.cardRatioW;
 const RATIO_H = DEFAULT_CARD_CONFIG.cardRatioH;
@@ -184,5 +184,175 @@ describe("renderCardPng (real render, mock stickers)", () => {
     } finally {
       console.error = errSpy;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 5 (final montage pass): finalPass feathering + grading, and the
+// style-pack → grading derivation.
+// ---------------------------------------------------------------------------
+
+/** One centered hero sticker — the smallest layout every variant renders. */
+async function renderHero(
+  storageDir: string,
+  itemId: string,
+  opts: { finalPass?: boolean; grading?: MontageGrading | null } = {},
+): Promise<Buffer> {
+  const hero = await writeSticker(storageDir, itemId, "red balloon");
+  const card = cardBoxNormalized(RATIO_W, RATIO_H);
+  const k = baseFit(card);
+  const pxPerUnit = STAGE_W / card.w;
+  const heroScale = (0.65 * STAGE_W) / (REF_SIZE * k * pxPerUnit);
+  return renderCardPng(
+    [hero],
+    {
+      placements: [
+        { itemId: hero.itemId!, x: card.w / 2, y: 550, scale: heroScale, rotation: 0, zIndex: 0 },
+      ],
+    },
+    "Happy Birthday, Sam!",
+    { storageDir, ...opts },
+  );
+}
+
+function countDifferingPixels(a: Buffer, b: Buffer): number {
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 4) {
+    if (
+      a[i] !== b[i] || a[i + 1] !== b[i + 1] ||
+      a[i + 2] !== b[i + 2] || a[i + 3] !== b[i + 3]
+    ) diff++;
+  }
+  return diff;
+}
+
+describe("renderCardPng finalPass (feathering + montage grading)", () => {
+  it("(a) default (no finalPass) render output is unchanged: deterministic, pinned paper + sticker pixels", async () => {
+    const storageDir = await newStorageDir();
+    const a = await renderHero(storageDir, "pin-a");
+    const b = await renderHero(storageDir, "pin-a");
+    // Deterministic: identical inputs → byte-identical output (the crisp
+    // default must stay byte-stable for the build-phase critique renders).
+    expect(b.equals(a)).toBe(true);
+
+    const meta = await sharp(a).metadata();
+    expect(meta.width).toBe(800);
+    expect(meta.height).toBe(1120);
+    expect(meta.format).toBe("png");
+
+    // Pixel pins: pure paper at the corner, opaque, and a non-paper sticker
+    // signature at the hero's center (the pre-montage renderer's exact look).
+    const raw = await sharp(a).ensureAlpha().raw().toBuffer();
+    const bg = pixelAt(raw, 10, 10, STAGE_W);
+    expect(bg[3]).toBe(255);
+    expect(isPaper(bg)).toBe(true);
+    const heroInside = pixelAt(raw, Math.round(STAGE_W / 2), 550 * (STAGE_H / cardBoxNormalized(RATIO_W, RATIO_H).h), STAGE_W);
+    expect(isPaper(heroInside)).toBe(false);
+  });
+
+  it("(b) finalPass output differs from crisp for identical input (feather + grade)", async () => {
+    const storageDir = await newStorageDir();
+    const crisp = await renderHero(storageDir, "diff-item");
+    const graded = await renderHero(storageDir, "diff-item", {
+      finalPass: true,
+      grading: { temperature: 0.5, saturation: 1.1, contrast: 1.1, vignette: 0.25 },
+    });
+    // Byte-compare: the graded pass must not be byte-identical to crisp.
+    expect(graded.equals(crisp)).toBe(false);
+    // Not a metadata-only difference — a substantial share of pixels change
+    // (temperature tint + saturate/contrast redraw + vignette).
+    const crispRaw = await sharp(crisp).ensureAlpha().raw().toBuffer();
+    const gradedRaw = await sharp(graded).ensureAlpha().raw().toBuffer();
+    expect(crispRaw.length).toBe(gradedRaw.length);
+    expect(countDifferingPixels(crispRaw, gradedRaw)).toBeGreaterThan(1000);
+  });
+
+  it("(b2) finalPass with NO grading still differs (feathered edges alone)", async () => {
+    const storageDir = await newStorageDir();
+    const crisp = await renderHero(storageDir, "feather-item");
+    const feathered = await renderHero(storageDir, "feather-item", { finalPass: true, grading: null });
+    expect(feathered.equals(crisp)).toBe(false);
+  });
+
+  it("(c) finalPass output still decodes via sharp with sane dimensions", async () => {
+    const storageDir = await newStorageDir();
+    const png = await renderHero(storageDir, "decode-item", {
+      finalPass: true,
+      grading: { temperature: 0.3, saturation: 1.05, contrast: 1.05, vignette: 0.2 },
+    });
+    const meta = await sharp(png).metadata();
+    expect(meta.format).toBe("png");
+    expect(meta.width).toBe(800);
+    expect(meta.height).toBe(1120);
+    // Full raw decode succeeds at the exact expected byte count (RGBA).
+    const raw = await sharp(png).ensureAlpha().raw().toBuffer();
+    expect(raw.length).toBe(800 * 1120 * 4);
+  });
+
+  it("(d) grading extremes render without throwing and produce valid PNGs", async () => {
+    const storageDir = await newStorageDir();
+    const extremes: MontageGrading[] = [
+      { temperature: 1, saturation: 1, contrast: 1, vignette: 0 },
+      { temperature: -1, saturation: 1, contrast: 1, vignette: 0 },
+      { temperature: 0, saturation: 1.5, contrast: 1, vignette: 0 },
+      { temperature: 0, saturation: 0.5, contrast: 1, vignette: 0 },
+      { temperature: 0, saturation: 1, contrast: 1.5, vignette: 0 },
+      { temperature: 0, saturation: 1, contrast: 0.5, vignette: 0 },
+      { temperature: 0, saturation: 1, contrast: 1, vignette: 1 },
+      // All extremes at once — the worst case the schema allows.
+      { temperature: -1, saturation: 1.5, contrast: 1.5, vignette: 1 },
+    ];
+    for (const grading of extremes) {
+      const png = await renderHero(storageDir, "extreme-item", { finalPass: true, grading });
+      const meta = await sharp(png).metadata();
+      expect(meta.format).toBe("png");
+      expect(meta.width).toBe(800);
+      expect(meta.height).toBe(1120);
+    }
+  });
+});
+
+describe("deriveGradingFromStyle", () => {
+  const style: StyleDerivation = {
+    styleName: "Watercolor Storybook",
+    palette: ["#ff8fa3", "#7bdff2"],
+    lineWeight: "thin",
+    mood: "playful",
+    imagePromptSuffix: " soft watercolor storybook illustration",
+  };
+
+  it("is deterministic: same style + teamId → identical grading", () => {
+    const a = deriveGradingFromStyle(style, "team-42");
+    const b = deriveGradingFromStyle(style, "team-42");
+    expect(b).toEqual(a);
+  });
+
+  it("different teamIds may differ, but every field stays in-band over many teams", () => {
+    const gradings = Array.from({ length: 40 }, (_, i) =>
+      deriveGradingFromStyle(style, `team-${i}`),
+    );
+    for (const g of gradings) {
+      expect(g.temperature).toBeGreaterThanOrEqual(-1);
+      expect(g.temperature).toBeLessThanOrEqual(1);
+      expect(g.saturation).toBeGreaterThanOrEqual(0.85);
+      expect(g.saturation).toBeLessThanOrEqual(1.15);
+      expect(g.contrast).toBeGreaterThanOrEqual(0.85);
+      expect(g.contrast).toBeLessThanOrEqual(1.15);
+      expect(g.vignette).toBeGreaterThanOrEqual(0);
+      expect(g.vignette).toBeLessThanOrEqual(0.35);
+    }
+    // With 40 hashed teamIds, the bands must not all collapse to one value
+    // (proves teamId actually participates in the derivation).
+    const unique = new Set(gradings.map((g) => JSON.stringify(g)));
+    expect(unique.size).toBeGreaterThan(1);
+  });
+
+  it("null style → the neutral grading {0, 1, 1, 0.15}", () => {
+    expect(deriveGradingFromStyle(null, "any-team")).toEqual({
+      temperature: 0,
+      saturation: 1,
+      contrast: 1,
+      vignette: 0.15,
+    });
   });
 });

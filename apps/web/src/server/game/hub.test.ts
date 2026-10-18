@@ -370,3 +370,89 @@ describe("capacity + persistence", () => {
     hub.shutdown();
   });
 });
+
+// ---------------------------------------------------------------------------
+// preScoring hook (final montage window) — montage:started heads-up + fail-open
+// ---------------------------------------------------------------------------
+
+describe("preScoring hook", () => {
+  it("runs after the GM montage:started heads-up and BEFORE scoring:started; scoringOrder is not yet persisted inside the hook", async () => {
+    const repo = new MemoryRepo();
+    const { io, sent } = fakeIo();
+    let markerRan = false;
+    // Marker: capture (do NOT expect) the scoringOrder the hook observes — the
+    // hub try/catches around the hook, so an in-hook assert would be swallowed.
+    let scoringOrderInHook: unknown = "not-run";
+    const hub = new GameHub(repo, io, {
+      now: () => NOW,
+      preScoring: async (gameId) => {
+        markerRan = true;
+        scoringOrderInHook = (await repo.getGame(gameId))?.scoringOrder ?? null;
+      },
+    });
+    const { game, teams } = await hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 2 });
+    const gm = `game:${game.id}:gm`;
+
+    await hub.applyEvent(game.id, { type: "gm:setTheme", theme: "Space zoo", now: NOW });
+    await hub.applyEvent(game.id, { type: "gm:approveGreetings", now: NOW });
+    await hub.applyEvent(game.id, { type: "gm:stopBuild", now: NOW });
+    hub.shutdown(); // clear the armed SCORING timer
+
+    // The hook ran and observed NO scoringOrder yet (it precedes persistence).
+    expect(markerRan).toBe(true);
+    expect(scoringOrderInHook).toBeNull();
+
+    // GM-room ordering: montage:started strictly before scoring:started.
+    const gmEvents = sent.filter((s) => s.room === gm).map((s) => s.event);
+    const montageAt = gmEvents.indexOf("montage:started");
+    const scoringAt = gmEvents.indexOf("scoring:started");
+    expect(montageAt).toBeGreaterThanOrEqual(0);
+    expect(scoringAt).toBeGreaterThan(montageAt);
+
+    // Scoring still began: the order persisted with one card per team.
+    const order = (await repo.getGame(game.id))?.scoringOrder;
+    expect(order).not.toBeNull();
+    expect(order!.round).toBe(1);
+    expect(order!.cards).toHaveLength(2);
+    expect(order!.cards.map((c) => c.teamId).sort()).toEqual(teams.map((t) => t.id).sort());
+  });
+
+  it("a THROWING hook is fail-open: gm:stopBuild still succeeds and scoring starts", async () => {
+    const repo = new MemoryRepo();
+    const { io, sent } = fakeIo();
+    const hub = new GameHub(repo, io, {
+      now: () => NOW,
+      preScoring: async () => {
+        throw new Error("polish exploded");
+      },
+    });
+    const { game, teams } = await hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 2 });
+    const gm = `game:${game.id}:gm`;
+
+    await hub.applyEvent(game.id, { type: "gm:setTheme", theme: "Space zoo", now: NOW });
+    await hub.applyEvent(game.id, { type: "gm:approveGreetings", now: NOW });
+    const stopped = await hub.applyEvent(game.id, { type: "gm:stopBuild", now: NOW });
+    hub.shutdown(); // clear the armed SCORING timer
+
+    expect(stopped.ok).toBe(true);
+    expect((await repo.getGame(game.id))?.scoringOrder?.cards).toHaveLength(2);
+    expect(sent.filter((s) => s.room === gm).map((s) => s.event)).toContain("scoring:started");
+    expect(teams).toHaveLength(2);
+  });
+
+  it("no hook (default) — beginScoring behavior is unchanged by the new wiring", async () => {
+    const { repo, hub, sent } = makeHub();
+    const { game, teams } = await hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 2 });
+    const gm = `game:${game.id}:gm`;
+
+    await hub.applyEvent(game.id, { type: "gm:setTheme", theme: "Space zoo", now: NOW });
+    await hub.applyEvent(game.id, { type: "gm:approveGreetings", now: NOW });
+    await hub.applyEvent(game.id, { type: "gm:stopBuild", now: NOW });
+    hub.shutdown(); // clear the armed SCORING timer
+
+    const order = (await repo.getGame(game.id))?.scoringOrder;
+    expect(order?.cards).toHaveLength(2);
+    expect(sent.filter((s) => s.room === gm).map((s) => s.event)).toContain("scoring:started");
+    expect(teams).toHaveLength(2);
+  });
+});

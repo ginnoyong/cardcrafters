@@ -16,6 +16,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAiRouter, type AiRouter } from "../ai/router";
 import { createServer, type CardCraftersServer } from "../../../server";
 import { waitForGreetings } from "../flows/greetings";
+import { deriveGradingFromStyle, renderCardPng } from "../render/card-render";
+import type { GameRow } from "../repo/repository";
 import { MemoryRepo } from "../repo/memory-repo";
 
 let srv: CardCraftersServer;
@@ -212,6 +214,36 @@ function greetingOf(team: Record<string, unknown>): { text: string; status: stri
   return team.greeting as { text: string; status: string };
 }
 
+/**
+ * Mirror renderTeamCardPng's gather (http/api.ts) and re-render the SAME
+ * gather TWICE locally: once with the endpoint's exact finalPass options
+ * (feathered stickers + style-pack grading), once crisp (the build-phase
+ * look, no finalPass/grading). Returns [finalPassPng, crispPng] for
+ * byte-comparison against the PNG the endpoint serves.
+ */
+async function localFinalPassAndCrispRender(
+  game: GameRow,
+  teamId: string,
+): Promise<[Buffer, Buffer]> {
+  const layout = await srv.repo.getLayoutState(teamId, game.round);
+  const items = (await srv.repo.listItems(teamId, game.round, ["READY"]))
+    .filter((r) => (r.width ?? 0) > 0 && (r.height ?? 0) > 0)
+    .map((r) => ({ itemId: r.id, imageUrl: r.imageUrl, width: r.width!, height: r.height! }));
+  const greeting = (await srv.repo.listGreetings(game.id, game.round)).find(
+    (g) => g.teamId === teamId,
+  );
+  const baseOpts = { cardRatioW: game.config.cardRatioW, cardRatioH: game.config.cardRatioH };
+  const placements = { placements: layout?.placements ?? [] };
+  const text = greeting?.text ?? "";
+  const finalPassRender = await renderCardPng(items, placements, text, {
+    ...baseOpts,
+    finalPass: true,
+    grading: deriveGradingFromStyle(game.style, teamId),
+  });
+  const crispRender = await renderCardPng(items, placements, text, baseOpts);
+  return [finalPassRender, crispRender];
+}
+
 describe("GET /api/games/:code/reveal-card (winner card PNG for the REVEAL 3D moment)", () => {
   /** Create a game and drive it LOBBY→…→REVEAL via hub events (no sockets). */
   async function createGameInReveal(): Promise<{ code: string; gameId: string; winnerTeamId: string }> {
@@ -222,6 +254,10 @@ describe("GET /api/games/:code/reveal-card (winner card PNG for the REVEAL 3D mo
     });
     const body = (await res.json()) as { gameId: string; code: string; teams: Array<{ id: string }> };
     const teams = await srv.repo.listTeams(body.gameId);
+    // Await the fire-and-forget greeting generation FIRST (mock resolves
+    // ~instantly) so the persisted greeting text is stable before the phases
+    // are driven and the served card is rendered (byte-comparison tests).
+    await waitForGreetings(srv.repo, srv.hub, body.gameId, teams.length);
     const now = Date.now();
     await srv.hub.applyEvent(body.gameId, { type: "gm:approveGreetings", now });
     await srv.hub.applyEvent(body.gameId, { type: "gm:stopBuild", now });
@@ -330,6 +366,23 @@ describe("GET /api/games/:code/reveal-card (winner card PNG for the REVEAL 3D mo
     expect(err.error).toBe("not_revealing");
     expect(err.phase).toBe("JUDGING");
   });
+
+  it("REVEAL → serves the byte-identical finalPass render (montage polish, NOT the crisp build render)", async () => {
+    const { code, gameId, winnerTeamId } = await createGameInReveal();
+    const res = await fetch(base(`/api/games/${code}/reveal-card`));
+    expect(res.status).toBe(200);
+    const fetched = Buffer.from(await res.arrayBuffer());
+    const game = (await srv.repo.getGame(gameId))!;
+    const [finalPassRender, crispRender] = await localFinalPassAndCrispRender(game, winnerTeamId);
+    // Byte-identical to the endpoint's own gather+render (renderCardPng is
+    // deterministic — card-render.test.ts pins byte-determinism, and the PNG
+    // embeds no timestamps).
+    expect(Buffer.compare(fetched, finalPassRender)).toBe(0);
+    // …and distinct from the crisp build-phase render: the finalPass grading
+    // (style-pack derived, or the neutral vignette) applies even for a
+    // zero-item card.
+    expect(Buffer.compare(fetched, crispRender)).not.toBe(0);
+  });
 });
 
 describe("GET /api/games/:code/scoring-card/:cardId?token= (player rating card PNG)", () => {
@@ -346,6 +399,10 @@ describe("GET /api/games/:code/scoring-card/:cardId?token= (player rating card P
       body: JSON.stringify({ teamCount: 2, theme: "Scoring Cards" }),
     });
     const body = (await res.json()) as { gameId: string; code: string };
+    // Await the fire-and-forget greeting generation FIRST (mock resolves
+    // ~instantly) so the persisted greeting text is stable before the served
+    // card is rendered (byte-comparison tests).
+    await waitForGreetings(srv.repo, srv.hub, body.gameId, 2);
     const joined = await srv.hub.joinPlayer({
       joinToken: (await srv.repo.listTeams(body.gameId))[0]!.joinToken,
       nickname,
@@ -430,5 +487,23 @@ describe("GET /api/games/:code/scoring-card/:cardId?token= (player rating card P
     expect(buf.length).toBeGreaterThan(100);
     expect(buf[0]).toBe(0x89);
     expect(buf.subarray(1, 4).toString("ascii")).toBe("PNG");
+  });
+
+  it("SCORING → serves the byte-identical finalPass render (and NOT the crisp build render)", async () => {
+    const { code, gameId, sessionToken, firstCardId } = await createGameInScoring();
+    const res = await fetch(
+      base(`/api/games/${code}/scoring-card/${firstCardId}?token=${sessionToken}`),
+    );
+    expect(res.status).toBe(200);
+    const fetched = Buffer.from(await res.arrayBuffer());
+    const game = (await srv.repo.getGame(gameId))!;
+    const card = game.scoringOrder!.cards.find((c) => c.cardId === firstCardId)!;
+    const [finalPassRender, crispRender] = await localFinalPassAndCrispRender(game, card.teamId);
+    // Byte-identical to the endpoint's own gather+render (deterministic
+    // renderer — see card-render.test.ts's byte-determinism pins).
+    expect(Buffer.compare(fetched, finalPassRender)).toBe(0);
+    // …and distinct from the crisp build-phase render (finalPass grading,
+    // neutral vignette included, applies even for a zero-item card).
+    expect(Buffer.compare(fetched, crispRender)).not.toBe(0);
   });
 });

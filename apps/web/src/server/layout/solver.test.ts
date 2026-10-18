@@ -1288,3 +1288,54 @@ describe("solveLayout — hero tuck-cap bounds (constructed geometry)", () => {
     ).toBe(true);
   });
 });
+
+describe("SolveOptions.overlapCapFactor — final-montage relaxation threading", () => {
+  // The factor must reach the pair-cap enforcement INSIDE the solver's
+  // candidate search (ConstraintCtx.overlapCapFactor — see constraints.ts).
+  // Probe: overlapCap 0 forbids ANY overlap, so with the factor silently
+  // ignored the solve would be byte-identical to the no-factor run; with the
+  // factor observed (0 × 1.8 = 0.18 effective) the solver accepts different
+  // candidates and the placements differ.
+  const probeItems = (n: number): LayoutItem[] =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `i${i}`,
+      imgW: 300 + (i % 5) * 60,
+      imgH: 300 + ((i * 3) % 5) * 60,
+      visualWeight: 0.9 - i * 0.02,
+      orderIndex: i,
+    }));
+  const sig = (r: ReturnType<typeof solveLayout>): string =>
+    r.placements
+      .map((p) => `${p.itemId}:${Math.round(p.x)}:${Math.round(p.y)}:${p.scale.toFixed(6)}`)
+      .join("|");
+  const base = { cardDims: card, textZone: TEXT_ZONE, iterations: 60 };
+
+  it("absent and 1 are byte-identical to the strict run (default pin)", () => {
+    const its = probeItems(20);
+    const strict = solveLayout(its, { ...base, overlapCap: 0 });
+    const absent = solveLayout(its, { ...base, overlapCap: 0 });
+    const one = solveLayout(its, { ...base, overlapCap: 0, overlapCapFactor: 1 });
+    expect(sig(absent)).toBe(sig(strict));
+    expect(sig(one)).toBe(sig(strict));
+  });
+
+  it("factor 1.8 is observed by the solver's pair-cap enforcement", () => {
+    const its = probeItems(20);
+    const strict = solveLayout(its, { ...base, overlapCap: 0 });
+    const relaxed = solveLayout(its, { ...base, overlapCap: 0, overlapCapFactor: 1.8 });
+    expect(sig(relaxed)).not.toBe(sig(strict));
+    // Strict run (factor silently ignored → effective 0): zero overlap on
+    // support–support pairs; hero pairs may still tuck up to 0.25.
+    const strictMax = maxSatByPairKind(strict, its);
+    expect(strictMax.otherPairs).toBe(0);
+    expect(strictMax.heroPairs).toBeLessThanOrEqual(0.25 + 1e-9);
+    // Relaxed run: support–support cap 0 × 1.8 = 0 (unchanged) but the hero
+    // tuck cap becomes 0.25 × 1.8 = 0.45 — still in-band. The sig inequality
+    // above is the proof the factor reached the cap enforcement: an ignored
+    // factor would leave the feasible set (and hence the deterministic solve)
+    // byte-identical to the strict run.
+    const relaxedMax = maxSatByPairKind(relaxed, its);
+    expect(relaxedMax.otherPairs).toBeLessThanOrEqual(0 + 1e-9);
+    expect(relaxedMax.heroPairs).toBeLessThanOrEqual(0.45 + 1e-9);
+  });
+});

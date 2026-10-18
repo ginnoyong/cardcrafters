@@ -395,6 +395,7 @@ export class MemoryRepo implements Repository {
       version: patch.version,
       placements: patch.placements,
       greetingStyle: patch.greetingStyle ?? existing?.greetingStyle ?? null,
+      critique: patch.critique !== undefined ? patch.critique : (existing?.critique ?? null),
       source: patch.source,
       updatedAt: this.now(),
     };

@@ -111,8 +111,9 @@ export interface ClientTeam {
   layout: ClientLayout | null;
   /** Recent team activity (newest first, max ACTIVITY_FEED_MAX entries). */
   activity: ClientActivityEntry[];
-  /** Latest vision layout critique (GM-only intel from `layout:critique`;
-   *  event-only — sync:full never carries it, so it resets on snapshot). */
+  /** Latest vision layout critique. Prefer the persisted verdict from
+   *  sync:full (survives reloads); the live `layout:critique` event updates
+   *  it in between snapshots. */
   critique: ClientCritique | null;
 }
 
@@ -121,6 +122,27 @@ export interface ClientCritique {
   score: number;
   issues: string[];
   focalOk: boolean;
+}
+
+/** Safe-unwrap a raw critique blob (from sync:full's persisted layout or a
+ *  live event payload) into a typed ClientCritique, or null when the shape
+ *  doesn't match. */
+export function parseCritique(raw: unknown): ClientCritique | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (
+    typeof r.score !== "number" ||
+    !Number.isFinite(r.score) ||
+    !Array.isArray(r.issues) ||
+    typeof r.focalOk !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    score: r.score,
+    issues: r.issues.filter((i): i is string => typeof i === "string"),
+    focalOk: r.focalOk,
+  };
 }
 
 /** One ANONYMOUS card in the round's scoring order ("Card A"…).
@@ -1029,6 +1051,7 @@ function normalizeSnapshot(
             placements?: unknown;
             greetingStyle?: unknown;
             source?: unknown;
+            critique?: unknown;
           }
         | null
         | undefined;
@@ -1076,8 +1099,10 @@ function normalizeSnapshot(
         // sync:full is authoritative but activity is event-only → start empty;
         // the live feed rebuilds as events arrive.
         activity: [],
-        // Critiques are event-only GM intel — a fresh snapshot starts clean.
-        critique: null,
+        // Critique persistence (D3): the persisted verdict from the snapshot
+        // wins when present; otherwise the field stays null until the next
+        // live `layout:critique` event arrives.
+        critique: parseCritique(layoutRaw?.critique),
       };
     }),
   };

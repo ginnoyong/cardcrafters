@@ -101,6 +101,7 @@ describe("AiRouter — mock mode", () => {
       item_image: { prompt: "red balloon" },
       layout_composition: { items: [{ id: "a" }, { id: "b" }] },
       layout_critique: {},
+      layout_montage: { items: [{ id: "a" }, { id: "b" }] },
     };
     for (const task of TASK_NAMES) {
       const res = await router.run(task, inputs[task], { gameId });
@@ -406,6 +407,8 @@ describe("createAiRouter", () => {
     expect(router.taskConfig("item_image")?.timeoutMs).toBe(60000);
     expect(router.taskConfig("prompt_validation")?.structured).toBe("promptValidationSchema");
     expect(router.taskConfig("layout_critique")?.enabled).toBe(true);
+    expect(router.taskConfig("layout_montage")?.enabled).toBe(true);
+    expect(router.taskConfig("layout_montage")?.structured).toBe("layoutMontageSchema");
     // under the $25 budget a mock call succeeds (mock costs 0, unknown game ok)
     await expect(router.run("moderation", { prompt: "x" }, { gameId: "fresh-game" })).resolves.toBeTruthy();
   });

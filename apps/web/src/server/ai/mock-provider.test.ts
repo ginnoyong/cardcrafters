@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   greetingVariationsSchema,
   layoutCompositionSchema,
+  layoutMontageSchema,
   moderationSchema,
   promptValidationSchema,
   styleDerivationSchema,
@@ -334,6 +335,50 @@ describe("MockProvider — layout_composition", () => {
     expect(parsed.hints![0]!.tiltToward).toBe("group_center");
     expect(parsed.hints![0]!.role).toBe("focal");
     expect(parsed.hints![0]!.importance).toBe(1);
+  });
+});
+
+describe("MockProvider — layout_montage", () => {
+  it("returns a schema-valid montage with fixed strategy + relaxOverlap (safety net for direct calls)", async () => {
+    const items = [
+      { id: "a", width: 200, height: 200, weight: 0.8, order: 1, subject: "hero crane" },
+      { id: "b", width: 150, height: 150, weight: 0.5, order: 2, subject: "blossom" },
+      { id: "c", width: 180, height: 180, weight: 0.6, order: 3, subject: "sun" },
+    ];
+    const res = await mkProvider().run(
+      "layout_montage",
+      { items, cardWidth: 714, cardHeight: 1000 },
+      cfg("layout_montage"),
+    );
+    expect(res.model).toBe("mock/layout_montage");
+    const parsed = layoutMontageSchema.parse(res.data);
+    // Fixed canned montage options (never randomized).
+    expect(parsed.strategy).toBe("character_montage");
+    expect(parsed.relaxOverlap).toBe(false);
+    // The composition hints are REUSED from the layout_composition builder —
+    // the solver consumes this identically. The builder's documented odd-item
+    // behavior folds a trailing item into the previous pair, so n = 3 → ONE
+    // group covering all three ids (same as the layout_composition mock).
+    expect(parsed.focalPoint.x).toBeGreaterThan(0);
+    expect(parsed.focalPoint.x).toBeLessThan(714);
+    expect(parsed.textZone).toBeTruthy();
+    expect(parsed.groups).toHaveLength(1);
+    expect(parsed.groups.flatMap((g) => g.itemIds).sort()).toEqual(["a", "b", "c"]);
+  });
+
+  it("is deterministic per input (same input → same montage)", async () => {
+    const input = {
+      items: [
+        { id: "a", width: 200, height: 200, weight: 0.8, order: 1 },
+        { id: "b", width: 150, height: 150, weight: 0.5, order: 2 },
+      ],
+      cardWidth: 714,
+      cardHeight: 1000,
+    };
+    const res1 = await mkProvider().run("layout_montage", input, cfg("layout_montage"));
+    const res2 = await mkProvider().run("layout_montage", input, cfg("layout_montage"));
+    expect(res2.data).toEqual(res1.data);
+    expect(layoutMontageSchema.parse(res1.data).strategy).toBe("character_montage");
   });
 });
 

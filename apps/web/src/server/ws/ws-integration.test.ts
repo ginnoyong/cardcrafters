@@ -861,6 +861,24 @@ describe("scoring phase end-to-end", () => {
     const samStarted = waitFor<{ cards: Array<Record<string, unknown>>; yourTeamCardId?: string | null }>(sam, "scoring:started");
     const gmStarted = waitFor<{ cards: Array<{ cardId: string; label: string; teamId: string }> }>(gm, "scoring:started");
 
+    // Event-order collectors on the gm socket (registered BEFORE gm:stopBuild):
+    // montage:started (GM-only heads-up) must precede scoring:started, and —
+    // because the mock provider short-circuits the montage pass — there must be
+    // NO montage-sourced layout:updated re-emit. (No cheap non-mock fixture
+    // exists for this route; montage adoption is unit-covered in montage.test.ts.)
+    const gmEventLog: Array<{ event: string; source?: string }> = [];
+    const collect = (event: string): void => {
+      gm.on(event, (payload: Record<string, unknown>) => {
+        gmEventLog.push({
+          event,
+          source: typeof payload?.source === "string" ? payload.source : undefined,
+        });
+      });
+    };
+    collect("montage:started");
+    collect("scoring:started");
+    collect("layout:updated");
+
     const stop = await emitAck<{ ok: boolean; phase?: string }>(gm, "gm:stopBuild", {});
     expect(stop.ok).toBe(true);
     expect(stop.phase).toBe("SCORING");
@@ -888,6 +906,17 @@ describe("scoring phase end-to-end", () => {
     expect(new Set(gmCopy.cards.map((c) => c.teamId))).toEqual(
       new Set((await repo.listTeams(gameId)).map((t) => t.id)),
     );
+
+    // Ordering + montage short-circuit: the montage:started heads-up landed
+    // strictly before scoring:started, and no montage-sourced layout:updated
+    // was emitted (mock short-circuit — see collector comment above).
+    const montageIdx = gmEventLog.findIndex((e) => e.event === "montage:started");
+    const scoringIdx = gmEventLog.findIndex((e) => e.event === "scoring:started");
+    expect(montageIdx).toBeGreaterThanOrEqual(0);
+    expect(scoringIdx).toBeGreaterThan(montageIdx);
+    expect(
+      gmEventLog.filter((e) => e.event === "layout:updated" && e.source === "montage"),
+    ).toHaveLength(0);
 
     const ownCardA = gmCopy.cards.find((c) => c.teamId === teamAId)!.cardId;
     const cardB = gmCopy.cards.find((c) => c.teamId === teamBId)!.cardId;

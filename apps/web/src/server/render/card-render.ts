@@ -21,8 +21,20 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createCanvas, loadImage, type Image } from "@napi-rs/canvas";
+import {
+  createCanvas,
+  loadImage,
+  type Canvas,
+  type Image,
+  type SKRSContext2D,
+} from "@napi-rs/canvas";
 import sharp from "sharp";
+
+import {
+  MONTAGE_FEATHER_FRACTION,
+  type MontageGrading,
+  type StyleDerivation,
+} from "@cardcrafters/shared";
 
 import { greetingZonePx, mapPlacement } from "../../lib/canvas-geometry";
 
@@ -41,6 +53,23 @@ const DEFAULT_RATIO_H = 7;
 const PAPER_COLOR = "#faf5ec";
 /** Greeting font size as a fraction of the render width (~4.5% → 36px @800). */
 const GREETING_FONT_FRACTION = 0.045;
+/** Warm-tint alpha at |temperature| = 1 (the montage grading overlay scale). */
+const TEMPERATURE_TINT_MAX_ALPHA = 0.18;
+/** Warm/cool tint colors for the temperature overlay (temperature > 0 / < 0). */
+const WARM_TINT = "#ff9a3c";
+const COOL_TINT = "#3c9aff";
+/** Radial-gradient start radius (fraction of the half-diagonal): inside this
+ *  radius the vignette overlay is fully transparent, then ramps to black at
+ *  the corners. */
+const VIGNETTE_INNER_FRACTION = 0.55;
+/** Neutral grading when no style pack exists (identity-ish: untouched color,
+ *  the same faint edge darkening every montage card gets). */
+const NEUTRAL_GRADING: MontageGrading = {
+  temperature: 0,
+  saturation: 1,
+  contrast: 1,
+  vignette: 0.15,
+};
 
 /** Minimal item slice the renderer needs (repo rows / event payloads fit). */
 export interface RenderableItem {
@@ -71,6 +100,59 @@ export interface RenderCardOptions {
   cardRatioH?: number;
   /** Sticker storage dir for "/static/items/…" URLs. Default DEFAULT_ITEMS_DIR. */
   storageDir?: string;
+  /**
+   * Final montage pass: feather each sticker's edges (alpha fade of
+   * MONTAGE_FEATHER_FRACTION × drawn width per edge) and apply the montage
+   * grading after the stickers. Default false — crisp die-cut edges and NO
+   * grading, byte-identical to the pre-montage renderer for existing callers
+   * (build-phase critique renders).
+   */
+  finalPass?: boolean;
+  /** Montage grading (style-pack derived — see deriveGradingFromStyle);
+   *  applied ONLY when finalPass is true. Default null (no grading). */
+  grading?: MontageGrading | null;
+}
+
+/**
+ * Deterministic style-pack → montage-grading derivation (final pass).
+ *
+ * Bands (all derived from one FNV-1a hash, re-hashed per band so the four
+ * fields decorrelate; uniform over each band):
+ *   - temperature ∈ [−1, 1]  — warm/cool cast of the whole card
+ *   - saturation  ∈ [0.85, 1.15] — subtle (schema bound is [0.5, 1.5])
+ *   - contrast    ∈ [0.85, 1.15] — subtle (schema bound is [0.5, 1.5])
+ *   - vignette    ∈ [0, 0.35]  — gentle edge darkening only
+ *
+ * Inputs: the style pack's styleName + mood + the teamId (so two teams with
+ * the same style still grade differently). Null/missing style → the neutral
+ * default (temperature 0, saturation 1, contrast 1, vignette 0.15).
+ */
+export function deriveGradingFromStyle(
+  style: StyleDerivation | null,
+  teamId: string,
+): MontageGrading {
+  if (!style) return { ...NEUTRAL_GRADING };
+  const band = (i: number): number => hashString(`${i}:${style.styleName}\u0000${style.mood}\u0000${teamId}`);
+  const unit = (i: number): number => band(i) / 0x100000000; // [0, 1)
+  const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+  // round(…, 4) keeps the derived numbers stable through JSON round-trips.
+  const r4 = (v: number): number => Math.round(v * 10000) / 10000;
+  return {
+    temperature: r4(clamp(unit(0) * 2 - 1, -1, 1)),
+    saturation: r4(clamp(0.85 + unit(1) * 0.3, 0.5, 1.5)),
+    contrast: r4(clamp(0.85 + unit(2) * 0.3, 0.5, 1.5)),
+    vignette: r4(clamp(unit(3) * 0.35, 0, 1)),
+  };
+}
+
+/** FNV-1a 32-bit (same construction as layout/solver's hashString). */
+function hashString(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
 }
 
 /**
@@ -89,8 +171,10 @@ export async function renderCardPng(
   const ratioH = opts.cardRatioH ?? DEFAULT_RATIO_H;
   const height = Math.round((width * ratioH) / ratioW);
   const storageDir = opts.storageDir ?? DEFAULT_ITEMS_DIR;
+  const finalPass = opts.finalPass ?? false;
+  const grading = opts.grading ?? null;
 
-  const canvas = createCanvas(width, height);
+  const canvas: Canvas = createCanvas(width, height);
   const ctx = canvas.getContext("2d");
 
   // -- paper background ------------------------------------------------------
@@ -138,11 +222,114 @@ export async function renderCardPng(
     ctx.save();
     ctx.translate(m.x, m.y);
     ctx.rotate((m.rotation * Math.PI) / 180);
-    ctx.drawImage(img, -m.width / 2, -m.height / 2, m.width, m.height);
+    if (finalPass) {
+      // Feathered blending: draw the sticker into a scratch canvas of its
+      // mapped size, fade the alpha out over MONTAGE_FEATHER_FRACTION ×
+      // drawn width per edge (destination-in with linear gradients), then
+      // composite — overlapping stickers blend like a collage instead of
+      // hard-edge pasting. Crisp die-cut edges stay the DEFAULT (no
+      // finalPass) so build-phase renders are byte-identical.
+      const feathered = featherSticker(img, m.width, m.height);
+      ctx.drawImage(feathered, -m.width / 2, -m.height / 2, m.width, m.height);
+    } else {
+      ctx.drawImage(img, -m.width / 2, -m.height / 2, m.width, m.height);
+    }
     ctx.restore();
   }
 
+  // -- final-montage grading (finalPass only; see RenderCardOptions) --------
+  if (finalPass) applyGrading(canvas, ctx, grading ?? null);
+
   return canvas.encode("png");
+}
+
+/**
+ * Draw `img` at the given mapped size into a scratch canvas and fade its
+ * alpha to 0 over MONTAGE_FEATHER_FRACTION × drawn width per edge via
+ * destination-in linear gradients (color is irrelevant — only the gradient's
+ * alpha reaches the destination-in mask). Edge bands are ≥ 1px so
+ * sub-pixel stickers still blend. Returns the scratch canvas to composite.
+ */
+function featherSticker(
+  img: Image,
+  width: number,
+  height: number,
+): Canvas {
+  const scratch: Canvas = createCanvas(Math.max(1, Math.round(width)), Math.max(1, Math.round(height)));
+  const sctx = scratch.getContext("2d");
+  sctx.drawImage(img, 0, 0, scratch.width, scratch.height);
+  sctx.globalCompositeOperation = "destination-in";
+  const w = scratch.width;
+  const h = scratch.height;
+  const fx = Math.max(1, Math.round(w * MONTAGE_FEATHER_FRACTION));
+  const fy = Math.max(1, Math.round(h * MONTAGE_FEATHER_FRACTION));
+  const edge = (
+    gx0: number, gy0: number, gx1: number, gy1: number,
+    a0: number, a1: number,
+    rx: number, ry: number, rw: number, rh: number,
+  ): void => {
+    const g = sctx.createLinearGradient(gx0, gy0, gx1, gy1);
+    g.addColorStop(0, `rgba(0, 0, 0, ${a0})`);
+    g.addColorStop(1, `rgba(0, 0, 0, ${a1})`);
+    sctx.fillStyle = g;
+    sctx.fillRect(rx, ry, rw, rh);
+  };
+  edge(0, 0, fx, 0, 0, 1, 0, 0, fx, h); // left: transparent → opaque
+  edge(w - fx, 0, w, 0, 1, 0, w - fx, 0, fx, h); // right: opaque → transparent
+  edge(0, 0, 0, fy, 0, 1, 0, 0, w, fy); // top: transparent → opaque
+  edge(0, h - fy, 0, h, 1, 0, 0, h - fy, w, h); // bottom: opaque → transparent
+  return scratch;
+}
+
+/**
+ * Final-montage color grading, in order: temperature tint overlay (warm /
+ * cool), saturation + contrast, radial vignette. Saturation/contrast use
+ * `ctx.filter` — CHOICE DOCUMENTED: @napi-rs/canvas implements ctx.filter
+ * (CanvasFilters in its typings; runtime-verified that saturate/contrast
+ * reach drawn pixels), so no sharp post-processing pass is needed — the
+ * whole grade stays inside the single canvas encode.
+ */
+function applyGrading(
+  canvas: Canvas,
+  ctx: SKRSContext2D,
+  grading: MontageGrading | null,
+): void {
+  if (!grading) return;
+  const { width, height } = canvas;
+  // (1) Temperature tint: translucent warm/cool wash over the whole card.
+  if (grading.temperature !== 0) {
+    ctx.save();
+    ctx.globalAlpha = TEMPERATURE_TINT_MAX_ALPHA * Math.abs(grading.temperature);
+    ctx.fillStyle = grading.temperature > 0 ? WARM_TINT : COOL_TINT;
+    ctx.fillRect(0, 0, width, height);
+    ctx.restore();
+  }
+  // (2) Saturation + contrast via ctx.filter: redraw a snapshot of the card
+  // onto itself through the filter (an opaque full-cover draw replaces the
+  // pixels 1:1). Skipped entirely at the identity values.
+  if (grading.saturation !== 1 || grading.contrast !== 1) {
+    const snap: Canvas = createCanvas(width, height);
+    snap.getContext("2d").drawImage(canvas, 0, 0);
+    ctx.filter = `saturate(${grading.saturation}) contrast(${grading.contrast})`;
+    ctx.drawImage(snap, 0, 0);
+    ctx.filter = "none";
+  }
+  // (3) Vignette: radial gradient (transparent inside, black at the
+  // corners) with globalAlpha = vignette strength.
+  if (grading.vignette > 0) {
+    const r = Math.hypot(width, height) / 2;
+    const g = ctx.createRadialGradient(
+      width / 2, height / 2, r * VIGNETTE_INNER_FRACTION,
+      width / 2, height / 2, r,
+    );
+    g.addColorStop(0, "rgba(0, 0, 0, 0)");
+    g.addColorStop(1, "rgba(0, 0, 0, 1)");
+    ctx.save();
+    ctx.globalAlpha = grading.vignette;
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, width, height);
+    ctx.restore();
+  }
 }
 
 // ---------------------------------------------------------------------------

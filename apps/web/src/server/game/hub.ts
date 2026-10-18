@@ -205,6 +205,9 @@ export interface GameHubOptions {
   now?: () => number;
   /** Timer service override (tests); defaults to one wired back into this hub. */
   timers?: TimerService;
+  /** Optional async hook invoked (fail-open) just before scoring begins, after
+   *  the GM-only `montage:started` heads-up. Used by the final montage pass. */
+  preScoring?: (gameId: string, round: number) => Promise<void>;
 }
 
 export class GameHub {
@@ -223,12 +226,15 @@ export class GameHub {
 
   private readonly now: () => number;
 
+  private preScoring: GameHubOptions["preScoring"];
+
   constructor(
     private repo: Repository,
     private io: RoomEmitter,
     opts: GameHubOptions = {},
   ) {
     this.now = opts.now ?? Date.now;
+    this.preScoring = opts.preScoring;
     this.timers =
       opts.timers ??
       new TimerService((gameId, phase) => {
@@ -236,6 +242,12 @@ export class GameHub {
           (err) => console.error(`[hub] timer:expired failed for ${gameId}:`, err),
         );
       }, { now: this.now });
+  }
+
+  /** Late-wire the preScoring hook (the hub is constructed in apps/web/server.ts
+   *  BEFORE ws/server.ts wiring exists, so the montage pass sets it here). */
+  setPreScoring(fn: NonNullable<GameHubOptions["preScoring"]>): void {
+    this.preScoring = fn;
   }
 
   // -- Game creation / hydration ---------------------------------------------
@@ -465,6 +477,11 @@ export class GameHub {
         // score submission and the standings), then announce scoring per
         // audience — players see ANONYMOUS cards + their own card id, the GM
         // sees the team mapping, the presenter sees anonymous cards only.
+        // (a) GM-only heads-up: the final polish window begins.
+        this.emitToRooms(gameId, state.round, "montage:started", {}, [gmRoom(gameId)]);
+        // (b) Fail-open hook: scoring MUST still start even if the polish pass fails.
+        try { await this.preScoring?.(gameId, state.round); }
+        catch (err) { console.warn(`[hub] preScoring failed for ${gameId} — starting scoring anyway:`, err); }
         const teams = await this.repo.listTeams(gameId);
         const order = buildScoringOrder(gameId, state.round, teams);
         await this.repo.updateGame(gameId, { scoringOrder: order });
