@@ -272,6 +272,19 @@ describe("renderCardPng finalPass (feathering + montage grading)", () => {
     const crisp = await renderHero(storageDir, "feather-item");
     const feathered = await renderHero(storageDir, "feather-item", { finalPass: true, grading: null });
     expect(feathered.equals(crisp)).toBe(false);
+    // Erase-bug regression pin: feathering must FADE edges, not erase the
+    // whole sticker. The hero's placement bbox center must contain plenty of
+    // non-paper pixels (the old 4×destination-in bug wiped them entirely).
+    const raw = await sharp(feathered).ensureAlpha().raw().toBuffer();
+    const heroY = Math.round(550 * (STAGE_H / cardBoxNormalized(RATIO_W, RATIO_H).h));
+    let nonPaper = 0;
+    for (let y = heroY - 100; y < heroY + 100; y++) {
+      for (let x = Math.round(STAGE_W / 2) - 100; x < Math.round(STAGE_W / 2) + 100; x++) {
+        const p = pixelAt(raw, x, y, STAGE_W);
+        if (p[3] > 0 && !isPaper(p)) nonPaper++;
+      }
+    }
+    expect(nonPaper).toBeGreaterThan(20_000);
   });
 
   it("(c) finalPass output still decodes via sharp with sane dimensions", async () => {

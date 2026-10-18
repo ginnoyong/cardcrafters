@@ -45,6 +45,10 @@ export interface RatingPanelProps {
   gameCode: string;
   /** Player session token — auth for the scoring-card PNG preview. */
   sessionToken: string;
+  /** Cache-bust version for the scoring-card PNG URL (bumped by the store
+   *  on layout/scoring changes — the montage pass re-renders the card at
+   *  BUILD→SCORING). */
+  cardVersion?: number;
   testId?: string;
 }
 
@@ -58,6 +62,7 @@ export default function RatingPanel({
   onSubmit,
   gameCode,
   sessionToken,
+  cardVersion,
   testId = "rating-panel",
 }: RatingPanelProps) {
   // Rateable cards: everything EXCEPT our own team's card (own-card guard —
@@ -99,7 +104,7 @@ export default function RatingPanel({
   useEffect(() => {
     setImgLoaded(false);
     setImgFailed(false);
-  }, [card?.cardId]);
+  }, [card?.cardId, cardVersion]); // cardVersion bump → fresh render, re-fade
 
   // Done = every rateable card has a FINAL rating.
   const allRated = rateable.length > 0 && rateable.every((c) => myScores[c.cardId] !== undefined);
@@ -194,7 +199,8 @@ export default function RatingPanel({
           anonymous cardId keeps the team mapping hidden). */}
       {!imgFailed ? (
         <img
-          src={`/api/games/${gameCode}/scoring-card/${card.cardId}?token=${sessionToken}`}
+          src={`/api/games/${gameCode}/scoring-card/${card.cardId}?token=${sessionToken}&v=${cardVersion ?? 0}`}
+          key={`${card.cardId}:${cardVersion ?? 0}`}
           data-testid="rating-card-image"
           alt={`The card you are rating: ${card.label}`}
           className={`cc-rating-image${imgLoaded ? " is-loaded" : ""}`}

@@ -156,11 +156,29 @@ export interface SolveOptions {
    * Final-montage relaxation multiplier for BOTH overlap caps (the pairwise
    * cap above AND the hero tuck cap — see
    * ConstraintCtx.overlapCapFactor): effective cap = cap × overlapCapFactor.
-   * Only the final montage pass sets it (MONTAGE_OVERLAP_RELAX_FACTOR = 1.8
-   * when the AI opts in via relaxOverlap); default (undefined) is factor 1 —
-   * byte-identical behavior to the strict build-phase caps.
+   * Only the final montage pass sets it (MONTAGE_OVERLAP_RELAX_FACTOR = 1.8,
+   * ALWAYS — the pass no longer gates on the AI's relaxOverlap); default
+   * (undefined) is factor 1 — byte-identical behavior to the strict
+   * build-phase caps.
    */
   overlapCapFactor?: number;
+  /**
+   * Union-coverage target override (fraction of the usable canvas, 0–1).
+   * Replaces the build-phase constants (CANVAS_COVERAGE_TARGET budget base /
+   * COVERAGE_TARGET_MIN floor / COVERAGE_BAND_MAX ceiling) at every
+   * comparison site. ONLY the final montage pass sets it
+   * (MONTAGE_COVERAGE_TARGET = 0.9); default (undefined) is byte-identical
+   * to the build-phase targets.
+   */
+  coverageTarget?: number;
+  /**
+   * Spacing-term comfort scale threaded into ScoreContext (score.ts
+   * `spacingTerm`: comfort = 1.1 × scale × sqrt(mean pair area)). Values
+   * below 1 pack tighter. ONLY the final montage pass sets it
+   * (MONTAGE_SPACE_COMFORT_SCALE = 0.7); default (undefined) is
+   * byte-identical to the build-phase comfort distance.
+   */
+  spaceComfortScale?: number;
 }
 
 export interface SolveResult {
@@ -1077,7 +1095,8 @@ function attemptSolve(
   // the escalation ladder's budget-raise steps (see solveLayout).
   const ua = usableAreaRect(card, opts.textZone);
   const usableArea = ua.w > 0 && ua.h > 0 ? ua.w * ua.h : card.w * card.h;
-  const coverageTarget = CANVAS_COVERAGE_TARGET + budgetBoost * COVERAGE_BUDGET_BOOST_STEP;
+  const coverageTarget =
+    (opts.coverageTarget ?? CANVAS_COVERAGE_TARGET) + budgetBoost * COVERAGE_BUDGET_BOOST_STEP;
   // Floor-rescue hero ceiling (see solveLayout): HERO_MAX_WIDTH + steps,
   // never beyond the hard MAX_ITEM_SIZE_PCT size constraint.
   const heroMaxWidth = Math.min(
@@ -1582,7 +1601,13 @@ function attemptSolve(
     const placements = [cand, ...placed.map((p) => p.placement)];
     const ids = new Set(placements.map((p) => p.itemId));
     const subset = items.filter((i) => ids.has(i.id));
-    const sctx: ScoreContext = { card, k, focalPoint, clustered };
+    const sctx: ScoreContext = {
+      card,
+      k,
+      focalPoint,
+      clustered,
+      spaceComfortScale: opts.spaceComfortScale,
+    };
     return (
       scoreLayout(placements, subset, sctx) +
       SCALE_FIDELITY_WEIGHT * fidelity(placements) +
@@ -1604,7 +1629,13 @@ function attemptSolve(
   const objective = (placements: Placement[]): number => {
     const ids = new Set(placements.map((p) => p.itemId));
     const subset = items.filter((i) => ids.has(i.id));
-    const sctx: ScoreContext = { card, k, focalPoint, clustered };
+    const sctx: ScoreContext = {
+      card,
+      k,
+      focalPoint,
+      clustered,
+      spaceComfortScale: opts.spaceComfortScale,
+    };
     return (
       scoreLayout(placements, subset, sctx) +
       SCALE_FIDELITY_WEIGHT * fidelity(placements) +
@@ -1949,6 +1980,11 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
   let minSizePct = MIN_ITEM_SIZE_PCT;
   const card = opts.cardDims;
   const k = opts.k ?? baseFit(card);
+  // Coverage-target override (final montage pass): replaces the build-phase
+  // floor/ceiling at every escalation comparison below (undefined → the
+  // build-phase constants, byte-identical).
+  const coverageTargetMin = opts.coverageTarget ?? COVERAGE_TARGET_MIN;
+  const coverageBandMax = opts.coverageTarget ?? COVERAGE_BAND_MAX;
   // v5 ladder state (escalation ORDER — see the header doc and the policy
   // blocks): ratio-adjust → reversed-order retry → hero-shrink steps →
   // desiredShrink → coverage escalation (hero regrowth → coverage-budget
@@ -2098,12 +2134,12 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
       heroPlaced && heroItem
         ? displayWidth(heroItem, heroPlaced.placement.scale, k) / card.w
         : 0;
-    if (coverage > COVERAGE_BAND_MAX + 1e-9 && !ratioLowered) {
+    if (coverage > coverageBandMax + 1e-9 && !ratioLowered) {
       // Overfull canvas: lower the support ratio toward 0.5 (one retry).
       ratioLowered = true;
       ratioMode = "min";
       lastLever = "none";
-    } else if (coverage < COVERAGE_TARGET_MIN - 1e-9 && !ratioRaised) {
+    } else if (coverage < coverageTargetMin - 1e-9 && !ratioRaised) {
       // Underfull canvas: raise the support ratio toward 0.6.
       ratioRaised = true;
       ratioMode = "max";
@@ -2128,7 +2164,7 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
     } else if (unplaced && desiredShrink > 0.35 + 1e-9) {
       desiredShrink = Math.max(0.35, desiredShrink - 0.15);
       lastLever = "none";
-    } else if (!unplaced && coverage < COVERAGE_TARGET_MIN - 1e-9) {
+    } else if (!unplaced && coverage < coverageTargetMin - 1e-9) {
       // COVERAGE ESCALATION (all placed, union < 0.80) — see the ladder doc
       // above. Guard bookkeeping first: a lever whose last step did not pay
       // is retired for this solve.
@@ -2215,7 +2251,7 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
       // discarded over a marginal gain; e.g. the step pushed the union past
       // COVERAGE_TARGET_MIN without paying COVERAGE_ESCALATION_MIN_GAIN).
       if (
-        coverage < COVERAGE_TARGET_MIN - 1e-9 &&
+        coverage < coverageTargetMin - 1e-9 &&
         !overlapFailed &&
         lastLever === "overlap" &&
         coverage <= overlapPrevCov + COVERAGE_ESCALATION_MIN_GAIN &&
@@ -2317,7 +2353,7 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
   }
   if (budgetBoost > 0) {
     warnings.push(
-      `coverage escalation: sizing budget raised to ${((CANVAS_COVERAGE_TARGET + budgetBoost * COVERAGE_BUDGET_BOOST_STEP) * 100).toFixed(0)}% of usable canvas`,
+      `coverage escalation: sizing budget raised to ${(((opts.coverageTarget ?? CANVAS_COVERAGE_TARGET) + budgetBoost * COVERAGE_BUDGET_BOOST_STEP) * 100).toFixed(0)}% of usable canvas`,
     );
   }
   if (overlapEscSteps > 0) {
@@ -2347,6 +2383,7 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
     k,
     focalPoint: opts.hints?.focalPoint ?? null,
     clustered: opts.hints ? opts.hints.groups.length > 1 : false,
+    spaceComfortScale: opts.spaceComfortScale,
   };
   return {
     placements,

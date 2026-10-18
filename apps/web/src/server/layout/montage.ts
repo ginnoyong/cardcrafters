@@ -8,8 +8,10 @@
  *      renderer later when the final card is produced).
  *   2. Ask the `layout_montage` VISION task for poster composition hints
  *      (the layout_composition contract + strategy + relaxOverlap).
- *   3. Re-solve with those hints; when the AI opted into `relaxOverlap`, the
- *      solver's overlap caps are inflated by MONTAGE_OVERLAP_RELAX_FACTOR.
+ *   3. Re-solve with those hints; the solver's overlap caps are inflated by
+ *      MONTAGE_OVERLAP_RELAX_FACTOR — ALWAYS (not gated on the AI's
+ *      relaxOverlap), and the pass targets MONTAGE_COVERAGE_TARGET with
+ *      MONTAGE_SPACE_COMFORT_SCALE spacing so the poster reads compact.
  *   4. ADOPT ALWAYS (user decision): the montage solve is persisted whenever
  *      it succeeded — there is deliberately NO score comparison against the
  *      settled layout (the montage pass IS the final polish).
@@ -32,8 +34,10 @@
 
 import {
   layoutMontageSchema,
+  MONTAGE_COVERAGE_TARGET,
   MONTAGE_OVERLAP_RELAX_FACTOR,
   MONTAGE_PASS_TIMEOUT_MS,
+  MONTAGE_SPACE_COMFORT_SCALE,
   type ContentBox,
 } from "@cardcrafters/shared";
 
@@ -243,9 +247,12 @@ async function runForTeam(
     textZone,
     hints,
     rng: mulberry32(hashString(`${teamId}:${round}:montage`)),
-    ...(hints.relaxOverlap
-      ? { overlapCapFactor: MONTAGE_OVERLAP_RELAX_FACTOR }
-      : {}),
+    // ALWAYS relaxed for the final poster pass (not gated on the AI's
+    // relaxOverlap): looser overlap caps, a higher union-coverage target and
+    // tighter spacing comfort — the montage pass IS the final polish.
+    overlapCapFactor: MONTAGE_OVERLAP_RELAX_FACTOR,
+    coverageTarget: MONTAGE_COVERAGE_TARGET,
+    spaceComfortScale: MONTAGE_SPACE_COMFORT_SCALE,
   };
   let solved: SolveResult;
   try {

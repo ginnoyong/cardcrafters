@@ -124,18 +124,35 @@ export const LAYOUT_CRITIQUE_LOW_SCORE = 55;
  * Soft-fade (feather) fraction of a sticker's DRAWN width — the band where
  * the sticker alpha ramps 0→1 so overlapping stickers blend like a collage
  * instead of hard-edge pasting. Documented band is 3–6% of drawn width; the
- * default sits in the middle. Only applied when the AI opts in
- * (relaxOverlap) or when the solver must resolve an otherwise-illegal pair.
+ * default sits in the middle. Applied only on the final-card render
+ * (finalPass: true) — never on build-phase renders (byte-identical).
  */
 export const MONTAGE_FEATHER_FRACTION = 0.045;
 /**
- * Multiplier applied to MAX_PAIRWISE_OVERLAP — ONLY when the AI opted in
- * (relaxOverlap: true) during the FINAL montage pass. The 0.10 pair cap
- * relaxes to 0.18 (0.10 × 1.8), letting supporting stickers lean into the
- * hero sticker for a blended-poster look. Never applied outside the final
- * pass, so in-build layouts keep the strict cap.
+ * Multiplier applied to MAX_PAIRWISE_OVERLAP during the FINAL montage pass —
+ * ALWAYS (the pass no longer waits for the AI to opt in via relaxOverlap).
+ * The 0.10 pair cap relaxes to 0.18 (0.10 × 1.8), letting supporting stickers
+ * lean into the hero sticker for a blended-poster look. Never applied outside
+ * the final pass, so in-build layouts keep the strict cap.
  */
 export const MONTAGE_OVERLAP_RELAX_FACTOR = 1.8;
+/**
+ * Spacing-term comfort scale for the montage solver pass. Values BELOW 1 let
+ * the solver pack stickers tighter than the in-build layout (which targets
+ * comfortable spacing) — 0.7 trades some breathing room for a denser,
+ * more poster-like final card. ALWAYS passed by the final montage pass;
+ * default build-phase solves never set it, so their spacing term is
+ * unchanged.
+ */
+export const MONTAGE_SPACE_COMFORT_SCALE = 0.7;
+/**
+ * Union-coverage target for the montage solver pass (fraction of the card
+ * area covered by drawn sticker bounds, 0–1). The in-build solver targets
+ * ~0.8 (COVERAGE_TARGET); the final montage aims slightly higher (0.9) so
+ * the poster card reads full rather than sparse. The solver escalates its
+ * packing up to this target before giving up with its best effort.
+ */
+export const MONTAGE_COVERAGE_TARGET = 0.9;
 /**
  * Per-team cap on the whole montage pass (AI calls + solve + render), in ms.
  * SCORING is a short phase; the montage must never block scoring entry for a

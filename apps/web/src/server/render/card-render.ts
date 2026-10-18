@@ -202,9 +202,15 @@ export async function renderCardPng(
   // -- stickers (zIndex order; center-anchored, scaled, rotated) -------------
   const byId = new Map(items.map((i) => [i.itemId ?? i.imageUrl ?? "", i] as const));
   const placements = [...layout.placements].sort((a, b) => a.zIndex - b.zIndex);
+  // Step-2 diagnosability: silent "no item row for placement" skips used to
+  // be indistinguishable from an empty layout (the blank scoring-card bug).
+  // Count both skip classes and log a summary after the loop.
+  let skippedNoItem = 0;
+  let skippedLoadFailed = 0;
   for (const pl of placements) {
     const item = byId.get(pl.itemId);
     if (!item) {
+      skippedNoItem++;
       console.error(`[card-render] no item row for placement ${pl.itemId} — skipped`);
       continue;
     }
@@ -212,6 +218,7 @@ export async function renderCardPng(
     try {
       img = await loadStickerImage(item, storageDir);
     } catch (err) {
+      skippedLoadFailed++;
       console.error(
         `[card-render] failed to load image for item ${pl.itemId} — skipped:`,
         err instanceof Error ? err.message : err,
@@ -237,6 +244,18 @@ export async function renderCardPng(
     ctx.restore();
   }
 
+  // Step-2 diagnosability: summarize the silent skips so a blank/partial card
+  // render is immediately attributable to missing item rows vs. unloadable
+  // sticker images (and never mistaken for an intentionally empty layout).
+  if (skippedNoItem > 0 || skippedLoadFailed > 0) {
+    console.warn(
+      `[card-render] placement summary: ${placements.length} requested, ` +
+        `${placements.length - skippedNoItem - skippedLoadFailed} drawn, ` +
+        `${skippedNoItem} skipped (no item row), ${skippedLoadFailed} skipped (load failed) ` +
+        `— items supplied: ${items.length}`,
+    );
+  }
+
   // -- final-montage grading (finalPass only; see RenderCardOptions) --------
   if (finalPass) applyGrading(canvas, ctx, grading ?? null);
 
@@ -258,26 +277,55 @@ function featherSticker(
   const scratch: Canvas = createCanvas(Math.max(1, Math.round(width)), Math.max(1, Math.round(height)));
   const sctx = scratch.getContext("2d");
   sctx.drawImage(img, 0, 0, scratch.width, scratch.height);
-  sctx.globalCompositeOperation = "destination-in";
   const w = scratch.width;
   const h = scratch.height;
   const fx = Math.max(1, Math.round(w * MONTAGE_FEATHER_FRACTION));
   const fy = Math.max(1, Math.round(h * MONTAGE_FEATHER_FRACTION));
+
+  // BUG-FIX (2026 step): the previous implementation applied
+  // `destination-in` FOUR times — once per edge band. Each pass ERASED
+  // everything outside its own band, so after four passes the entire
+  // scratch canvas was fully transparent (every feathered finalPass
+  // sticker rendered zero pixels). Fix: build a single feather MASK
+  // (opaque center rect + semi-transparent edge gradients painted
+  // source-over onto transparency), then apply destination-in ONCE.
+
+  // Guards: no feathering requested, or the feather bands already cover
+  // the whole canvas (sub-2×feather tiny stickers) → return as-is.
+  if (MONTAGE_FEATHER_FRACTION <= 0) return scratch;
+  if (fx * 2 >= w || fy * 2 >= h) return scratch;
+
+  const mask: Canvas = createCanvas(w, h);
+  const mctx = mask.getContext("2d");
+
+  // Center region: fully opaque white (color irrelevant — only alpha
+  // feeds destination-in). Must NOT be filled across the whole mask:
+  // the semi-transparent edge gradients are painted source-over onto
+  // transparency below, so a full opaque base would make every edge
+  // opaque too and kill the feather.
+  mctx.fillStyle = "#ffffff";
+  mctx.fillRect(fx, fy, w - 2 * fx, h - 2 * fy);
+
   const edge = (
     gx0: number, gy0: number, gx1: number, gy1: number,
     a0: number, a1: number,
     rx: number, ry: number, rw: number, rh: number,
   ): void => {
-    const g = sctx.createLinearGradient(gx0, gy0, gx1, gy1);
-    g.addColorStop(0, `rgba(0, 0, 0, ${a0})`);
-    g.addColorStop(1, `rgba(0, 0, 0, ${a1})`);
-    sctx.fillStyle = g;
-    sctx.fillRect(rx, ry, rw, rh);
+    const g = mctx.createLinearGradient(gx0, gy0, gx1, gy1);
+    g.addColorStop(0, `rgba(255, 255, 255, ${a0})`);
+    g.addColorStop(1, `rgba(255, 255, 255, ${a1})`);
+    mctx.fillStyle = g;
+    mctx.fillRect(rx, ry, rw, rh);
   };
   edge(0, 0, fx, 0, 0, 1, 0, 0, fx, h); // left: transparent → opaque
   edge(w - fx, 0, w, 0, 1, 0, w - fx, 0, fx, h); // right: opaque → transparent
   edge(0, 0, 0, fy, 0, 1, 0, 0, w, fy); // top: transparent → opaque
   edge(0, h - fy, 0, h, 1, 0, 0, h - fy, w, h); // bottom: opaque → transparent
+
+  // Single destination-in pass with the composed feather mask.
+  sctx.globalCompositeOperation = "destination-in";
+  sctx.drawImage(mask, 0, 0);
+  sctx.globalCompositeOperation = "source-over";
   return scratch;
 }
 

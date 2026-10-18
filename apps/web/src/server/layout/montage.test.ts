@@ -21,6 +21,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_CARD_CONFIG,
+  MONTAGE_COVERAGE_TARGET,
+  MONTAGE_OVERLAP_RELAX_FACTOR,
+  MONTAGE_SPACE_COMFORT_SCALE,
   type CardConfig,
   type Placement,
 } from "@cardcrafters/shared";
@@ -30,7 +33,10 @@ import { MemoryRepo } from "../repo/memory-repo";
 import {
   cardBox,
   baseFit,
+  boxCenter,
+  placedBox,
   COORD_DIMS,
+  type LayoutItem,
 } from "./constraints";
 import { solveLayout, mulberry32, hashString } from "./solver";
 import { runMontagePass, type MontageAi, type MontageDeps } from "./montage";
@@ -164,6 +170,55 @@ function makeDeps(s: Setup, extra: Partial<MontageDeps> = {}): MontageDeps {
   } as MontageDeps;
 }
 
+/** Grid-sampled drawn-bounds union coverage over the card (64×64 samples). */
+function unionCoverage(
+  items: LayoutItem[],
+  placements: Placement[],
+  k: number,
+  card: { w: number; h: number },
+): number {
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const N = 64;
+  let covered = 0;
+  for (let gy = 0; gy < N; gy++) {
+    for (let gx = 0; gx < N; gx++) {
+      const x = ((gx + 0.5) * card.w) / N;
+      const y = ((gy + 0.5) * card.h) / N;
+      for (const p of placements) {
+        const item = byId.get(p.itemId);
+        if (!item) continue;
+        const b = placedBox(p, item, k);
+        if (x >= b.x1 && x <= b.x2 && y >= b.y1 && y <= b.y2) {
+          covered++;
+          break;
+        }
+      }
+    }
+  }
+  return covered / (N * N);
+}
+
+/** Mean pairwise distance between drawn-box centers (0 when < 2 boxes). */
+function meanPairCenterDistance(
+  items: LayoutItem[],
+  placements: Placement[],
+  k: number,
+): number {
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const centers = placements
+    .filter((p) => byId.has(p.itemId))
+    .map((p) => boxCenter(placedBox(p, byId.get(p.itemId)!, k)));
+  let sum = 0;
+  let pairs = 0;
+  for (let i = 0; i < centers.length; i++) {
+    for (let j = i + 1; j < centers.length; j++) {
+      sum += Math.hypot(centers[i]!.x - centers[j]!.x, centers[i]!.y - centers[j]!.y);
+      pairs++;
+    }
+  }
+  return pairs === 0 ? 0 : sum / pairs;
+}
+
 describe("runMontagePass", () => {
   it("success: adopts the montage solve — version+1, source 'montage', engine-shaped emit", async () => {
     const s = await setup();
@@ -199,7 +254,8 @@ describe("runMontagePass", () => {
     expect(renderOpts.grading).toBeUndefined();
 
     // Persisted: version+1, source "montage", placements = the exact solve
-    // the module should have run (same opts the engine passes + montage seed).
+    // the module should have run (same opts the engine passes — card/k/
+    // textZone/hints + montage seed + the ALWAYS-relax montage opts).
     const row = await s.repo.getLayoutState(s.teamId, 1);
     const items = (await s.repo.listItems(s.teamId, 1, ["READY"])).map((r, orderIndex) => ({
       id: r.id,
@@ -215,6 +271,9 @@ describe("runMontagePass", () => {
       textZone: defaultTextZone(s.card),
       hints: montagePayload(s.itemId, s.card),
       rng: mulberry32(hashString(`${s.teamId}:1:montage`)),
+      overlapCapFactor: MONTAGE_OVERLAP_RELAX_FACTOR,
+      coverageTarget: MONTAGE_COVERAGE_TARGET,
+      spaceComfortScale: MONTAGE_SPACE_COMFORT_SCALE,
     });
     expect(row!.version).toBe(s.settled.version + 1);
     expect(row!.source).toBe("montage");
@@ -230,6 +289,49 @@ describe("runMontagePass", () => {
       placements: row!.placements,
       source: "montage",
     });
+  });
+
+  it("compactness: montage opts pack tighter — higher union coverage, smaller mean pairwise center distance", () => {
+    // The SAME fixture geometry the pass solves against (card/k/textZone from
+    // the real card config), with a multi-sticker item set — the three
+    // always-relax montage opts (overlapCapFactor / coverageTarget /
+    // spaceComfortScale) are the ONLY difference between the two solves, and
+    // the same rng seed keeps both deterministic.
+    const card = cardBox(COORD_DIMS, DEFAULT_CARD_CONFIG.cardRatioW, DEFAULT_CARD_CONFIG.cardRatioH);
+    const k = baseFit(card);
+    const textZone = defaultTextZone(card);
+    const items: LayoutItem[] = [
+      { id: "hero", imgW: 256, imgH: 256, visualWeight: 1, orderIndex: 0, subject: "hero" },
+      { id: "s1", imgW: 180, imgH: 220, visualWeight: 0.6, orderIndex: 1, subject: "s1" },
+      { id: "s2", imgW: 200, imgH: 160, visualWeight: 0.6, orderIndex: 2, subject: "s2" },
+      { id: "s3", imgW: 140, imgH: 140, visualWeight: 0.4, orderIndex: 3, subject: "s3" },
+      { id: "s4", imgW: 160, imgH: 200, visualWeight: 0.5, orderIndex: 4, subject: "s4" },
+    ];
+    const base = {
+      cardDims: card,
+      k,
+      textZone,
+      rng: mulberry32(hashString("montage-compactness")),
+    };
+
+    const build = solveLayout(items, base);
+    const montage = solveLayout(items, {
+      ...base,
+      overlapCapFactor: MONTAGE_OVERLAP_RELAX_FACTOR,
+      coverageTarget: MONTAGE_COVERAGE_TARGET,
+      spaceComfortScale: MONTAGE_SPACE_COMFORT_SCALE,
+    });
+
+    expect(build.placements).toHaveLength(items.length);
+    expect(montage.placements).toHaveLength(items.length);
+    // Denser poster: MORE canvas covered by drawn bounds AND the centers
+    // pulled CLOSER together (tighter packing, not just bigger stickers).
+    expect(unionCoverage(items, montage.placements, k, card)).toBeGreaterThan(
+      unionCoverage(items, build.placements, k, card),
+    );
+    expect(meanPairCenterDistance(items, montage.placements, k)).toBeLessThan(
+      meanPairCenterDistance(items, build.placements, k),
+    );
   });
 
   it("AI failure (ai.run rejects): settled layout intact, no upsert, no emit, no throw", async () => {

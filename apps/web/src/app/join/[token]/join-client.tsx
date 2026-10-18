@@ -465,6 +465,7 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
               onSubmit={handleSubmitScore}
               gameCode={identity.code}
               sessionToken={identity.sessionToken}
+              cardVersion={snapshot.cardVersion}
               testId="player-rating-panel"
             />
           ) : judging ? (

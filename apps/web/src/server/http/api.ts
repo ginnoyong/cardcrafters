@@ -138,12 +138,18 @@ async function renderTeamCardPng(
   repo: Repository,
   game: GameRow,
   teamId: string,
+  opts: { runtimeRound?: number } = {},
 ): Promise<Buffer> {
-  const layout = await repo.getLayoutState(teamId, game.round);
-  const items: RenderableItem[] = (await repo.listItems(teamId, game.round, ["READY"]))
+  // Round-source alignment (step 2): the authoritative round is the HUB's
+  // runtime state round (what `scoringOrder` and the phase gates are keyed
+  // on), NOT the potentially stale persisted `game.round`. Callers pass the
+  // runtime round when available; otherwise fall back to the persisted row.
+  const round = opts.runtimeRound ?? game.round;
+  const layout = await repo.getLayoutState(teamId, round);
+  const items: RenderableItem[] = (await repo.listItems(teamId, round, ["READY"]))
     .filter((r) => (r.width ?? 0) > 0 && (r.height ?? 0) > 0)
     .map((r) => ({ itemId: r.id, imageUrl: r.imageUrl, width: r.width!, height: r.height! }));
-  const greeting = (await repo.listGreetings(game.id, game.round)).find(
+  const greeting = (await repo.listGreetings(game.id, round)).find(
     (g) => g.teamId === teamId,
   );
   return renderCardPng(
@@ -305,10 +311,11 @@ export async function handleApiRequest(
       targetTeamId = winnerTeamId;
     }
     // Shared gather-and-render path (fail-open: stickers that cannot load are
-    // skipped by the renderer itself).
+    // skipped by the renderer itself). The hub's runtime round is authoritative
+    // for layout/items reads (persisted game.round can lag the runtime state).
     let png: Buffer;
     try {
-      png = await renderTeamCardPng(repo, game, targetTeamId);
+      png = await renderTeamCardPng(repo, game, targetTeamId, { runtimeRound: state.round });
     } catch (err) {
       sendJson(res, 500, {
         ok: false,
@@ -355,7 +362,7 @@ export async function handleApiRequest(
     const card = order.cards.find((c) => c.cardId === cardId)!;
     let png: Buffer;
     try {
-      png = await renderTeamCardPng(repo, game, card.teamId);
+      png = await renderTeamCardPng(repo, game, card.teamId, { runtimeRound: state.round });
     } catch (err) {
       sendJson(res, 500, {
         ok: false,

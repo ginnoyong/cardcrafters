@@ -10,15 +10,50 @@
  */
 
 import { type AddressInfo } from "node:net";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import sharp from "sharp";
+
+import { DEFAULT_CARD_CONFIG, type MontageGrading, type StyleDerivation } from "@cardcrafters/shared";
 
 import { createAiRouter, type AiRouter } from "../ai/router";
+import { drawMockSticker } from "../ai/mock-provider";
 import { createServer, type CardCraftersServer } from "../../../server";
 import { waitForGreetings } from "../flows/greetings";
-import { deriveGradingFromStyle, renderCardPng } from "../render/card-render";
+import { DEFAULT_ITEMS_DIR } from "../flows/item-image";
+import { REF_SIZE, cardBoxNormalized, baseFit } from "../../lib/canvas-geometry";
+import { DEFAULT_CARD_WIDTH_PX, deriveGradingFromStyle, renderCardPng } from "../render/card-render";
 import type { GameRow } from "../repo/repository";
 import { MemoryRepo } from "../repo/memory-repo";
+
+const RATIO_W = DEFAULT_CARD_CONFIG.cardRatioW;
+const RATIO_H = DEFAULT_CARD_CONFIG.cardRatioH;
+const STAGE_W = DEFAULT_CARD_WIDTH_PX;
+const STAGE_H = Math.round((STAGE_W * RATIO_H) / RATIO_W); // → 1120 (5:7)
+
+/** Paper background color — must stay in sync with card-render.ts. */
+const PAPER = { r: 0xfa, g: 0xf5, b: 0xec };
+
+/** RGBA pixel at (x, y) from a raw decode (pattern from card-render.test.ts). */
+function pixelAt(raw: Buffer, x: number, y: number, width: number): [number, number, number, number] {
+  const i = (y * width + x) * 4;
+  return [raw[i]!, raw[i + 1]!, raw[i + 2]!, raw[i + 3]!];
+}
+
+function isPaper([r, g, b]: [number, number, number, number]): boolean {
+  return r === PAPER.r && g === PAPER.g && b === PAPER.b;
+}
+
+/** Write a real mock sticker PNG into the default storage dir under its item id. */
+async function writeSticker(storageDir: string, itemId: string, prompt: string, size = 512) {
+  const { base64 } = drawMockSticker(prompt);
+  await mkdir(storageDir, { recursive: true });
+  await writeFile(path.join(storageDir, `${itemId}.png`), Buffer.from(base64, "base64"));
+  return { itemId, imageUrl: `/static/items/${itemId}.png`, width: size, height: size };
+}
 
 let srv: CardCraftersServer;
 let port: number;
@@ -36,6 +71,17 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await srv.close();
+  // Clean up any sticker PNGs written to the default storage dir by tests.
+  try {
+    const files = await import("node:fs/promises").then((fs) => fs.readdir(DEFAULT_ITEMS_DIR));
+    for (const f of files) {
+      if (f.startsWith("seed-")) {
+        await import("node:fs/promises").then((fs) => fs.rm(path.join(DEFAULT_ITEMS_DIR, f), { force: true }));
+      }
+    }
+  } catch {
+    // dir may not exist — nothing to clean.
+  }
 });
 
 function base(path: string): string {
@@ -505,5 +551,106 @@ describe("GET /api/games/:code/scoring-card/:cardId?token= (player rating card P
     // …and distinct from the crisp build-phase render (finalPass grading,
     // neutral vignette included, applies even for a zero-item card).
     expect(Buffer.compare(fetched, crispRender)).not.toBe(0);
+  });
+
+  /**
+   * END-TO-END: a seeded game with READY items (real sticker PNGs on disk)
+   * and a persisted layout → the scoring-card PNG must decode to a REAL,
+   * non-paper pixel-variance image (the stickers actually drawn), and must
+   * match the reveal-card render byte-for-byte (parity — same gather+render
+   * path: renderTeamCardPng in api.ts).
+   */
+  it("SCORING → decodes to a non-paper pixel-variance render with reveal-card parity", async () => {
+    const { code, gameId, sessionToken, firstCardId } = await createGameInScoring();
+    const game = (await srv.repo.getGame(gameId))!;
+    const card = game.scoringOrder!.cards.find((c) => c.cardId === firstCardId)!;
+    const teamId = card.teamId;
+    const round = game.round;
+
+    // 1. Seed a READY item with a REAL sticker PNG in the default storage
+    //    dir — the same DEFAULT_ITEMS_DIR the renderer reads from.
+    const sticker = await writeSticker(DEFAULT_ITEMS_DIR, `seed-${gameId}-item`, "red balloon");
+    const item = await srv.repo.createItem({
+      teamId,
+      playerId: "seed-player",
+      round,
+      promptRaw: "a red balloon",
+      status: "GENERATING",
+    });
+    await srv.repo.updateItem(item.id, {
+      status: "READY",
+      imageUrl: sticker.imageUrl,
+      width: sticker.width,
+      height: sticker.height,
+      placedAt: Date.now(),
+    });
+
+    // 2. Persist the layout: one centered hero placement for that item,
+    //    scaled through the same geometry the renderer maps through (65%
+    //    of the card width — the "fixed 65% centered" montage policy).
+    const cardBox = cardBoxNormalized(RATIO_W, RATIO_H);
+    const k = baseFit(cardBox);
+    const pxPerUnit = STAGE_W / cardBox.w;
+    const heroDisplayPx = 0.65 * STAGE_W;
+    const heroScale = heroDisplayPx / (REF_SIZE * k * pxPerUnit);
+    const placements = [{ itemId: item.id, x: cardBox.w / 2, y: 550, scale: heroScale, rotation: 0, zIndex: 0 }];
+    await srv.repo.upsertLayoutState(teamId, round, {
+      version: 2,
+      source: "montage",
+      placements,
+      greetingStyle: null,
+      critique: null,
+    });
+
+    // 3. Fetch the scoring card with the player token.
+    const res = await fetch(
+      base(`/api/games/${code}/scoring-card/${firstCardId}?token=${sessionToken}`),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    const fetched = Buffer.from(await res.arrayBuffer());
+
+    // 4. Decode and assert REAL sticker pixels: a blank/paper-only render
+    //    (the bug under test) would count ZERO non-paper pixels around the
+    //    hero placement. With the sticker drawn, they are thousands.
+    const meta = await sharp(fetched).metadata();
+    const width = meta.width!;
+    const raw = await sharp(fetched).ensureAlpha().raw().toBuffer();
+    const nonPaper = (() => {
+      let count = 0;
+      for (let i = 0; i < raw.length; i += 4) {
+        if (!isPaper([raw[i]!, raw[i + 1]!, raw[i + 2]!, raw[i + 3]!])) count++;
+      }
+      return count;
+    })();
+    expect(nonPaper).toBeGreaterThan(20_000);
+    // Sample inside the mapped hero box (centered at 65% width): the pixel
+    // must NOT be paper — the sticker is actually composited.
+    const heroCx = Math.round(placements[0]!.x * pxPerUnit);
+    const heroCy = Math.round(placements[0]!.y * (STAGE_H / cardBox.h));
+    expect(heroCx).toBe(Math.round(STAGE_W / 2)); // centered
+    // Sample a small region around the hero center (±20px): a single pixel
+    // can land on a sticker's own paper-colored area; the hero box center
+    // must contain at least one sticker pixel in the sampled window.
+    const sampled = [
+      pixelAt(raw, heroCx, heroCy + 40, width),
+      pixelAt(raw, heroCx - 20, heroCy, width),
+      pixelAt(raw, heroCx + 20, heroCy, width),
+      pixelAt(raw, heroCx, heroCy - 20, width),
+      pixelAt(raw, heroCx, heroCy + 20, width),
+    ];
+    const anyNonPaper = sampled.some((px) => !isPaper(px));
+    if (!anyNonPaper) {
+      console.log(
+        `[scoring-card] FAIL: no non-paper pixels in hero window (heroCx=${heroCx}, heroCy=${heroCy}, nonPaper=${nonPaper})`,
+      );
+    }
+    expect(anyNonPaper).toBe(true);
+
+    // 5. reveal-card parity: the same gather+render path (renderTeamCardPng)
+    //    serves the reveal-card route — the fetched scoring render must be
+    //    byte-identical to the local finalPass render of the same state.
+    const [finalPassRender] = await localFinalPassAndCrispRender(game, teamId);
+    expect(Buffer.compare(fetched, finalPassRender)).toBe(0);
   });
 });

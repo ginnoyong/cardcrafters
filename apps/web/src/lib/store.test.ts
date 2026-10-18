@@ -548,6 +548,7 @@ describe("selectMyItems merge precedence (stuck drawing chip)", () => {
         ],
       }),
       myItems: { i1: { promptRaw: "red balloon", status: "pending", round: 1 } },
+      cardVersion: 0,
     } as GameSnapshot;
     const mine = selectMyItems(snap, TEAM_A, PLAYER_ME);
     expect(mine).toHaveLength(1);
@@ -568,6 +569,7 @@ describe("selectMyItems merge precedence (stuck drawing chip)", () => {
           round: 1,
         },
       },
+      cardVersion: 0,
     } as GameSnapshot;
     const mine = selectMyItems(snap, TEAM_A, PLAYER_ME);
     expect(mine).toHaveLength(1);
@@ -606,6 +608,7 @@ describe("selectMyItems merge precedence (stuck drawing chip)", () => {
         },
       ],
       myItems: { i3: { promptRaw: "cat", status: "pending", round: 1 } },
+      cardVersion: 0,
     } as GameSnapshot;
     const mine = selectMyItems(snap, TEAM_A, PLAYER_ME);
     expect(mine).toHaveLength(1);
@@ -652,5 +655,84 @@ describe("sync:full double-normalize regression (team items must survive)", () =
     const items = s!.teams.find((t) => t.id === TEAM_A)!.items;
     expect(items.map((i) => i.id)).toEqual(["item-1", "item-2", "item-3"]);
     expect(items.map((i) => i.status)).toEqual(["ready", "pending", "rejected"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sync:full prev-preservation (omitted fields keep prev state)
+// ---------------------------------------------------------------------------
+
+describe("sync:full prev-preservation (omitted fields keep prev state)", () => {
+  /** A committed layout for TEAM_A's prev state (as ClientLayout). */
+  const prevLayout = {
+    version: 2,
+    placements: [
+      { itemId: "item-1", x: 400, y: 550, scale: 1, rotation: 0, zIndex: 0 },
+    ],
+    greetingStyle: undefined,
+    source: "solver" as const,
+  };
+  const prevCritique = { score: 5, issues: ["ok"], focalOk: true };
+  const prevItem = {
+    id: "item-1",
+    promptRaw: "a test item",
+    nickname: "Me",
+    playerId: PLAYER_ME,
+    status: "ready" as const,
+  };
+
+  /** Build a realistic prev GameSnapshot via normalizeSyncFull. */
+  function makePrev(): GameSnapshot {
+    const base = normalizeSyncFull(baseSnapshot(), {}, PLAYER_ME);
+    return {
+      ...base,
+      teams: base.teams.map((t) =>
+        t.id === TEAM_A
+          ? { ...t, items: [prevItem], layout: prevLayout, critique: prevCritique }
+          : t,
+      ),
+    };
+  }
+
+  it("omitted teams → prev preserved (same round)", () => {
+    const prev = makePrev();
+    const { teams: _omitted, ...rest } = baseSnapshot();
+    const s = normalizeSyncFull(rest as SyncFullEvent, {}, PLAYER_ME, prev);
+    expect(s.teams).toEqual(prev.teams);
+  });
+
+  it("omitted teams → NOT preserved across a round bump", () => {
+    const prev = makePrev();
+    const { teams: _omitted, ...rest } = baseSnapshot({ round: 2 });
+    const s = normalizeSyncFull(rest as SyncFullEvent, {}, PLAYER_ME, prev);
+    expect(s.teams).toEqual([]);
+  });
+
+  it("omitted layout per team → prev layout kept (+ critique)", () => {
+    const prev = makePrev();
+    const raw = baseSnapshot({
+      teams: [
+        { ...prev.teams[0]!, layout: undefined as unknown as null },
+        { ...prev.teams[1]! },
+      ],
+    });
+    const s = normalizeSyncFull(raw, {}, PLAYER_ME, prev);
+    expect(s.teams[0]!.layout).toEqual(prevLayout);
+    expect(s.teams[0]!.critique).toEqual(prevCritique);
+    // TEAM_B had no layout in prev → still null.
+    expect(s.teams[1]!.layout).toBeNull();
+  });
+
+  it("omitted items → prev items kept", () => {
+    const prev = makePrev();
+    const raw = baseSnapshot({
+      teams: [
+        { ...prev.teams[0]!, items: undefined as unknown as [] },
+        { ...prev.teams[1]! },
+      ],
+    });
+    const s = normalizeSyncFull(raw, {}, PLAYER_ME, prev);
+    expect(s.teams[0]!.items).toEqual([prevItem]);
+    expect(s.teams[1]!.items).toEqual([]);
   });
 });

@@ -211,6 +211,9 @@ export interface GameSnapshot {
   myItems: Record<string, MyItemEvent>;
   /** THIS client's player id (client-only; null for GM/presenter sockets). */
   myPlayerId: string | null;
+  /** Monotonic render-version used to cache-bust the scoring-card PNG URL
+   *  (bumped on layout/scoring phase changes → `&v=N` forces a re-fetch). */
+  cardVersion: number;
 }
 
 /** Max entries kept per team's activity feed (newest first). */
@@ -225,7 +228,13 @@ export const ACTIVITY_FEED_MAX = 30;
 export interface SyncFullEvent
   extends Omit<
     GameSnapshot,
-    "scoring" | "scores" | "myScores" | "winnerTeamId" | "peoplesChoiceTeamId" | "standings"
+    | "scoring"
+    | "scores"
+    | "myScores"
+    | "winnerTeamId"
+    | "peoplesChoiceTeamId"
+    | "standings"
+    | "cardVersion"
   > {
   seq?: number;
   ts?: number;
@@ -464,7 +473,12 @@ function ownsItem(base: GameSnapshot, itemId: string, payloadPlayerId?: unknown)
 export function storeReducer(state: GameSnapshot | null, action: StoreAction): GameSnapshot | null {
   switch (action.type) {
     case "sync:full":
-      return normalizeSnapshot(action.snapshot, state?.myItems ?? {}, action.myPlayerId ?? null);
+      return normalizeSnapshot(
+        action.snapshot,
+        state?.myItems ?? {},
+        action.myPlayerId ?? null,
+        state, // prev snapshot for field-omission preservation (same round only)
+      );
     case "phaseChanged": {
       const parsed = phaseChangedSchema.safeParse(action.payload);
       if (!parsed.success) return state;
@@ -495,6 +509,9 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
           phaseEndsAt: p.phaseEndsAt !== undefined ? p.phaseEndsAt : base.phaseEndsAt,
           cutoffAt: p.cutoffAt !== undefined ? p.cutoffAt : base.cutoffAt,
           serverNow: p.serverNow,
+          // BUILD→SCORING is where the montage pass re-renders every card —
+          // bump so the scoring-card PNG URL cache-busts.
+          ...(p.phase === "SCORING" ? { cardVersion: base.cardVersion + 1 } : {}),
         };
       }
       const myItems = bump
@@ -768,6 +785,10 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
           ? (p.greetingStyle as ClientGreetingStyle)
           : undefined;
       const source = typeof p.source === "string" ? p.source : "solver";
+      // Cache-bust: the montage pass runs at BUILD→SCORING, so late layout
+      // updates can change the final card render — bump so the scoring-card
+      // PNG URL re-fetches.
+      base.cardVersion += 1;
       return withTeam(base, p.teamId, (team) => {
         // Version guard: older/equal layouts are stale — ignore them.
         if (team.layout && version <= team.layout.version) return team;
@@ -848,6 +869,9 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
       const cards = parseScoringCards(action.payload.cards);
       if (cards === null) return state; // malformed → keep the old section
       const yourTeamCardId = action.payload.yourTeamCardId;
+      // Cache-bust: a fresh scoring order means the montage card render just
+      // changed → force the scoring-card PNG to re-fetch.
+      base.cardVersion += 1;
       return {
         ...base,
         scoring: {
@@ -908,16 +932,38 @@ export function normalizeSyncFull(
   raw: SyncFullEvent,
   prevMyItems: Record<string, MyItemEvent> = {},
   myPlayerId: string | null = null,
+  prev: GameSnapshot | null = null,
 ): GameSnapshot {
-  return normalizeSnapshot(raw, prevMyItems, myPlayerId);
+  return normalizeSnapshot(raw, prevMyItems, myPlayerId, prev);
 }
 
 function normalizeSnapshot(
   raw: SyncFullEvent,
   prevMyItems: Record<string, MyItemEvent> = {},
   myPlayerId: string | null = null,
+  prev: GameSnapshot | null = null,
 ): GameSnapshot {
-  const teams = Array.isArray(raw.teams) ? raw.teams : [];
+  // Prev-preservation: the server may omit fields it didn't need to send
+  // (payload size / audience-dependent sync:full variants). When a field is
+  // omitted, keep the previous state's value instead of blanking it.
+  //  - raw.teams omitted entirely → reuse prev.teams (same round only).
+  //  - Per team: t.layout omitted → keep prev team's layout (+ critique).
+  //  - Per team: t.items omitted → keep prev team's items.
+  // Same-round-only guard: after a round bump the server MUST send the
+  // fresh (blank) teams — stale prev data would show last round's cards.
+  const prevUsable = prev !== null && prev.round === Number(raw.round ?? 1);
+  const prevTeamsById = new Map(
+    prevUsable ? prev.teams.map((t) => [t.id, t] as const) : [],
+  );
+  // raw.teams omitted entirely → the mapped rows below ARE the prev client
+  // teams (already normalized); they must be reused verbatim so prev-only
+  // fields (critique, …) survive the round-trip.
+  const teamsOmitted = !Array.isArray(raw.teams);
+  const teams = Array.isArray(raw.teams)
+    ? raw.teams
+    : prevUsable
+      ? prev.teams
+      : [];
   const round = Number(raw.round ?? 1);
   // Round-scoped ledger: drop entries from ANY other round (the card is
   // rebuilt fresh each round — stale rows must never reappear). Entries
@@ -1006,10 +1052,21 @@ function normalizeSnapshot(
     standings,
     myItems,
     myPlayerId,
+    // Cache-bust version: carry the previous snapshot's counter forward (a
+    // sync:full itself doesn't re-render the scoring card; the bumps happen
+    // on the layout/scoring events below).
+    cardVersion: prev?.cardVersion ?? 0,
     teams: teams.map((t) => {
+      // Per-team prev-preservation (see prevUsable above): when the server
+      // omits a team's layout or items, keep the previous snapshot's values
+      // (same round only) instead of blanking them.
+      const prevTeam = prevTeamsById.get(String(t.id));
+      // raw.teams omitted entirely → the row IS the prev client team (already
+      // normalized); reuse it verbatim (see teamsOmitted above).
+      if (teamsOmitted && prevTeam) return prevTeam;
       // Raw sync:full rows carry server-only fields (failReason, playerId…)
       // beyond the client shape — read them off a loose record type.
-      const items: ClientItem[] = (Array.isArray(t.items) ? t.items : []).flatMap((row) => {
+      const items: ClientItem[] = (Array.isArray(t.items) ? t.items : prevTeam?.items ?? []).flatMap((row) => {
         const r = row as unknown as Record<string, unknown>;
         const status = mapItemStatus(r?.status);
         if (!status) return []; // REMOVED and unknown statuses are dropped
@@ -1045,7 +1102,7 @@ function normalizeSnapshot(
           };
         }
       }
-      const layoutRaw = t.layout as
+      const layoutRaw = (t.layout === undefined ? prevTeam?.layout : t.layout) as
         | {
             version?: unknown;
             placements?: unknown;
@@ -1101,8 +1158,12 @@ function normalizeSnapshot(
         activity: [],
         // Critique persistence (D3): the persisted verdict from the snapshot
         // wins when present; otherwise the field stays null until the next
-        // live `layout:critique` event arrives.
-        critique: parseCritique(layoutRaw?.critique),
+        // live `layout:critique` event arrives. When layout was omitted (and
+        // prev-preserved above), the prev verdict rides along with it.
+        critique:
+          t.layout === undefined
+            ? prevTeam?.critique ?? null
+            : parseCritique(layoutRaw?.critique),
       };
     }),
   };

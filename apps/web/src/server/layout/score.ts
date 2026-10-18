@@ -71,6 +71,13 @@ export interface ScoreContext {
   focalPoint?: { x: number; y: number } | null;
   /** When a hint asked for a clustered composition, skip rotation-variance. */
   clustered?: boolean;
+  /**
+   * Comfort-distance multiplier for spacingTerm (1.1 × scale × sqrt(mean pair
+   * area)). Values below 1 pack tighter. ONLY the final montage pass sets it
+   * (MONTAGE_SPACE_COMFORT_SCALE); default (undefined) is byte-identical to
+   * the build-phase comfort distance.
+   */
+  spaceComfortScale?: number;
 }
 
 /** Coverage sampling grid resolution (per axis, over the card box). */
@@ -154,7 +161,7 @@ export function spacingTerm(
       const ca = boxCenter(a.box);
       const cb = boxCenter(b.box);
       const comfort =
-        1.1 * Math.sqrt((boxArea(a.box) + boxArea(b.box)) / 2);
+        1.1 * (ctx.spaceComfortScale ?? 1) * Math.sqrt((boxArea(a.box) + boxArea(b.box)) / 2);
       const d = Math.hypot(ca.x - cb.x, ca.y - cb.y);
       if (d < comfort) penalty += (comfort - d) / comfort;
       pairs++;

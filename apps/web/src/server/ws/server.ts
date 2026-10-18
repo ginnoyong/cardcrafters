@@ -485,12 +485,18 @@ export function registerSocketHandlers(
   // The hook's `round` param is unused: runMontagePass reads the game's current
   // round from the repo itself.
   hub.setPreScoring(async (gameId) => {
-    await layoutDebouncer.flushAll();
-    await critique.settleAll(gameId);
-    await runMontagePass(
-      { repo, ai: ai ?? null, mockMode: ai ? ai.isMock() : true, emit: layoutEmit },
-      gameId,
-    );
+    // Fire-and-forget: the montage chain (debounced layout flushes → critique
+    // settle → montage re-layout) must NOT block `scoring:started` — the GM
+    // sees the montage heads-up (`montage:started`, already emitted by the hub
+    // before this hook) and players get the scoring screen immediately.
+    void (async () => {
+      await layoutDebouncer.flushAll();
+      await critique.settleAll(gameId);
+      await runMontagePass(
+        { repo, ai: ai ?? null, mockMode: ai ? ai.isMock() : true, emit: layoutEmit },
+        gameId,
+      );
+    })().catch((err) => console.warn("montage pass failed", err));
   });
 
   // Queue-level emitter: item:ready → hub-stamped broadcast to the TEAM room;
