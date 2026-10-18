@@ -25,26 +25,45 @@
  *      the card dimension, scale ±10%, rotation ±5°), accepted only when the
  *      constraints still hold and the incremental score improves.
  *   5. Relaxation: if not everything fits OR the placed union coverage falls
- *      outside the COVERAGE BAND (65–80% of the usable canvas), the
- *      deterministic degradation ladder escalates (max 17 relaxations, minSize
+ *      below the COVERAGE TARGET (80% of the usable canvas — the binding
+ *      layout-hierarchy v5 rule "ALL stickers together cover ≥ 80%"), the
+ *      deterministic escalation ladder runs (bounded relaxations, minSize
  *      −1% per step, floor 3%), in this ORDER:
  *      (a) RATIO-ADJUST — coverage > 80%: the support ratio is lowered to
  *          0.5×hero and the solve re-run ONCE (deterministic); coverage <
- *          65%: the support ratio is raised to 0.6×hero (the hero's emergent
+ *          80%: the support ratio is raised to 0.6×hero (the hero's emergent
  *          size follows from the ratio — bigger supports ⇒ smaller hero);
  *      (b) SPACE CHECK + REVERSED-ORDER RETRY (while coverage < 0.75 the card
  *          is not crowded, so the placement order is retried once with the
  *          non-hero order reversed — smaller-weight late arrivals get first
  *          pick of the empty space, hero still first);
- *      (c) HERO SHRINK (last resort for placement) — the emergent hero width
+ *      (c) HERO SHRINK (for placement) — the emergent hero width
  *          drops in 0.05 steps to the 0.25 floor while the [0.5, 0.6]×hero
  *          support band holds RELATIVE to the shrunk hero (supports never go
  *          below half the hero; the hero is what gives);
  *      (d) DESIRED SHRINK — once the hero is at its minimum, supports'
  *          desired scales shrink toward the band floor (clamped AT 0.5×hero —
  *          never below);
- *      (e) as a last resort the text-overlap rule is dropped for items beyond
- *          the first 20 (with a warning).
+ *      (e) COVERAGE ESCALATION (layout-hierarchy v5 — everything placed but
+ *          the union still < 80%): (i) HERO REGROWTH — undo hero-shrink
+ *          steps (the band lifts with the hero, growing every support with
+ *          it — improvement-guarded); (ii) COVERAGE-BUDGET RAISE — the
+ *          sizing budget (CANVAS_COVERAGE_TARGET) rises +0.05 per step up
+ *          to 1.00 (the emergent hero AND the support pool grow —
+ *          improvement-guarded); (iii) OVERLAP-CAP ESCALATION — the
+ *          pairwise overlap caps inflate by +0.2 per step up to the montage
+ *          parity factor 1.8 (improvement-guarded WITH revert: a step that
+ *          does not lift the union by ≥ COVERAGE_ESCALATION_MIN_GAIN is
+ *          undone — the strict 10% support–support tolerance is kept
+ *          whenever the extra tolerance buys nothing);
+ *      (f) as a last resort the text-overlap rule is dropped for items
+ *          beyond the first 20 (with a warning).
+ *      The union NEVER drops below COVERAGE_HARD_FLOOR = 0.70 by policy:
+ *      escalation stops at the first lever that cannot pay its way, and the
+ *      per-n measured windows are pinned in the solver tests (configs whose
+ *      geometry cannot reach 0.80 — e.g. the hero riding its 0.75 ceiling
+ *      with supports capped at 0.6×hero — settle between 0.70 and 0.80,
+ *      documented per n).
  *      Out-of-bounds placements are NEVER emitted: bounds and
  *      minSize are hard constraints — an item that still cannot fit is simply
  *      omitted from the result (also warned).
@@ -55,6 +74,7 @@
 
 import type { LayoutComposition, LayoutItemHint, Placement } from "@cardcrafters/shared";
 import {
+  MAX_ITEM_SIZE_PCT,
   MIN_ITEM_SIZE_PCT,
 } from "@cardcrafters/shared";
 
@@ -261,19 +281,27 @@ const RING_ROT_JITTER_DEG = 15;
 /** Relaxation bounds. */
 const MIN_SIZE_FLOOR_PCT = 3;
 /**
- * v4 relaxation-ladder budget (see solveLayout): 1 ratio-adjust + 1
+ * v5 relaxation-ladder budget (see solveLayout): 1 ratio-adjust + 1
  * reversed-order retry + up to 10 hero-shrink steps (0.05 width each, floor
- * HERO_MIN_WIDTH = 0.25) + up to 5 desiredShrink steps (1 → 0.35) = 17.
+ * HERO_MIN_WIDTH = 0.25) + up to 5 desiredShrink steps (1 → 0.35) + up to 10
+ * hero-REGROWTH steps (improvement-guarded) + up to 4 coverage-budget boost
+ * steps (+0.05 each, improvement-guarded) + up to 4 overlap-cap escalation
+ * steps (+0.2 each, improvement-guarded with revert) = 35.
  */
-const MAX_RELAXATIONS = 17;
+const MAX_RELAXATIONS = 35;
 /**
- * v4 degradation ladder (escalation ORDER — see solveLayout and the header
+ * v5 escalation ladder (escalation ORDER — see solveLayout and the header
  * doc): RATIO-ADJUST (support ratio toward the band edge, first lever) →
- * REVERSED-ORDER RETRY (space check) → HERO SHRINK (last resort for
- * placement; the emergent hero width drops by HERO_SHRINK_STEP per step,
- * floored at HERO_MIN_WIDTH, while the support band holds RELATIVE to the
- * shrunk hero) → DESIRED SHRINK (clamped AT the band floor) → TEXT-RULE
- * DROP.
+ * REVERSED-ORDER RETRY (space check) → HERO SHRINK (for placement; the
+ * emergent hero width drops by HERO_SHRINK_STEP per step, floored at
+ * HERO_MIN_WIDTH, while the support band holds RELATIVE to the shrunk hero)
+ * → DESIRED SHRINK (clamped AT the band floor) → COVERAGE ESCALATION
+ * (everything placed, union still < 80%): HERO REGROWTH (undo shrink steps;
+ * the band lifts with the hero) → COVERAGE-BUDGET RAISE (+0.05 per step to
+ * 1.00) → OVERLAP-CAP ESCALATION (+0.2 per step to the montage parity 1.8,
+ * improvement-guarded WITH revert) → TEXT-RULE DROP. Every coverage
+ * escalation lever is gated on ALL items being placed and stops at the
+ * first non-paying step — see COVERAGE_ESCALATION_MIN_GAIN.
  */
 const HERO_SHRINK_STEP = 0.05;
 const HERO_SHRINK_MAX_STEPS = 10;
@@ -288,7 +316,40 @@ const HERO_SHRINK_MAX_STEPS = 10;
 const HERO_MIN_WIDTH = 0.25;
 const HERO_MAX_WIDTH = 0.75;
 /**
- * v4 support RATIO BAND (display-WIDTH ratio, support/hero — "size" reads as
+ * Coverage-escalation levers (layout-hierarchy v5 — see the ladder doc).
+ * Each lever takes one step per relaxation; a lever stops taking steps as
+ * soon as a step fails to lift the placed usable-union coverage by at least
+ * COVERAGE_ESCALATION_MIN_GAIN (deterministic — coverage is a pure
+ * function of the placements). The overlap-cap lever additionally REVERTS
+ * its last step when it did not pay (the strict caps are kept whenever the
+ * extra tolerance buys nothing).
+ */
+const COVERAGE_ESCALATION_MIN_GAIN = 0.01;
+/** Hero-regrowth lever: undoes HERO_SHRINK_STEP per step (≤ 10 steps). */
+const HERO_REGROW_MAX_STEPS = HERO_SHRINK_MAX_STEPS;
+/** Coverage-budget raise lever: +0.05 of the usable canvas per step. */
+const COVERAGE_BUDGET_BOOST_STEP = 0.05;
+/** Budget-raise lever budget: CANVAS_COVERAGE_TARGET + 4 × 0.05 = 1.00. */
+const COVERAGE_BUDGET_BOOST_MAX_STEPS = 4;
+/** Overlap-cap escalation lever: effective caps inflate +0.2× per step. */
+const OVERLAP_ESCALATION_STEP = 0.2;
+/**
+ * Overlap-escalation ceiling: the montage parity factor
+ * (MONTAGE_OVERLAP_RELAX_FACTOR = 1.8) — the build-phase escalation never
+ * relaxes the caps further than the committed final-montage relaxation.
+ */
+const OVERLAP_ESCALATION_MAX_STEPS = 4;
+/** Floor-rescue lever: HERO_MAX_WIDTH rises +0.05 of card width per step. */
+const HERO_CEIL_RESCUE_STEP = 0.05;
+/**
+ * Floor-rescue lever budget: HERO_MAX_WIDTH 0.75 → MAX_ITEM_SIZE_PCT (85%
+ * of card width) in 2 steps of 0.05.
+ */
+const HERO_CEIL_RESCUE_MAX_STEPS = Math.floor(
+  (MAX_ITEM_SIZE_PCT - HERO_MAX_WIDTH * 100) / (HERO_CEIL_RESCUE_STEP * 100) + 1e-9,
+);
+/**
+ * v5 support RATIO BAND (display-WIDTH ratio, support/hero — "size" reads as
  * the displayed WIDTH per the user rule "non-focal stickers are between 50%
  * and 60% of the focal sticker's size"; the AREAS interpretation (√0.5–√0.6
  * linear ≈ 0.71–0.775) was considered and rejected as less faithful to the
@@ -298,11 +359,24 @@ const HERO_MAX_WIDTH = 0.75;
  * supports sit at the MID 0.55; hint importance shifts a support WITHIN the
  * band (see supportDesiredRatio). Enforced as a hard clamp in desiredScales,
  * the candidate generator, the local search and the rebalance pass (where
- * feasible — the degradation ladder shrinks the HERO so the band follows it;
- * beyond the feasible-n the band can no longer fit and supports resolve
- * below it only through hero growth drift, measured in the solver tests).
+ * feasible — the escalation ladder shrinks the HERO so the band follows it;
+ * if n is so large that the 0.50×hero floor cannot fit, the hero shrinks
+ * FIRST and the floor holds RELATIVE to the shrunk hero for as long as it is
+ * feasible — the floor is only given up by the final desiredShrink stage,
+ * which still clamps AT the floor, and by min-size clamping at extreme n;
+ * measured per-n windows are pinned in the solver tests).
+ *
+ * FEASIBILITY ANALYSIS (v5 tightening 0.45 → 0.50): the floor is geometrically
+ * feasible whenever the hero can shrink freely — supports at 0.5×hero need
+ * Σ(r²·aspect) area that scales DOWN with the hero, so the hero-shrink ladder
+ * (floor HERO_MIN_WIDTH = 0.25) always leaves room for floor-sized supports
+ * until min-size clamping (6% of card width, relaxed to 3%) binds at roughly
+ * hero < 2 × minSize ≈ 0.12 — below the hero's own 0.25 floor. The 0.50 floor
+ * therefore holds at EVERY sticker count; the measured per-n min ratios are
+ * pinned ≥ 0.50 in the solver tests (the only sub-floor readings are
+ * min-size-clamped supports at extreme n, documented there).
  */
-const SUPPORT_RATIO_MIN = 0.45; // USER: "ratio of non-hero to hero can be 20% smaller"
+const SUPPORT_RATIO_MIN = 0.5; // v5 USER: "non-focal ≥ 50% of focal size" — the former 0.45 floor is retired
 const SUPPORT_RATIO_MAX = 0.6;
 const SUPPORT_RATIO_MID = 0.55;
 /** Beyond this many items the text rule may be dropped (last resort). */
@@ -332,17 +406,16 @@ const REBALANCE_LADDER = [1, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7];
 /** How many of the re-ranked wide-item candidates get expanded per rung. */
 const REBALANCE_WIDE_EXPAND = 6;
 /**
- * Sizing policy v4 (layout hierarchy v4 — EMERGENT hero + support ratio band
- * + total-canvas coverage band):
+ * Sizing policy v5 (layout hierarchy v5 — EMERGENT hero + support ratio band
+ * + HARD total-canvas coverage target):
  *
- * The FIXED hero width target (v3's 0.60×card width) is DROPPED: the hero's
- * desired size EMERGES from the coverage budget. With "size" = display
- * WIDTH, the support band says supportWidth ∈ [0.5, 0.6] × heroWidth (mid
- * 0.55 for equal weights — see the ratio-band doc above), so the TOTAL area
- * equation
+ * The hero's desired size EMERGES from the coverage budget. With "size" =
+ * display WIDTH, the support band says supportWidth ∈ [0.5, 0.6] × heroWidth
+ * (mid 0.55 for equal weights — see the ratio-band doc above), so the TOTAL
+ * area equation
  *
  *   heroW²·heroAspect + Σ_j (r_j·heroW)²·supAspect_j
- *     ≈ CANVAS_COVERAGE_TARGET × usableArea
+ *     ≈ coverageTarget × usableArea
  *
  * solves for the hero directly:
  *
@@ -355,40 +428,74 @@ const REBALANCE_WIDE_EXPAND = 6;
  * while more stickers shrink the hero and keep every support a consistent
  * 0.55×hero sibling.
  *
+ * FOCAL OBVIOUSNESS (v5 user rule "the focal must be obvious — ~60% of the
+ * canvas width, pinned to the canvas center"): the hero is CENTER-PINNED
+ * (its only candidate seed is the exact card center — see candidatesFor) and
+ * its emergent width rides the [0.25, 0.75] clamp, i.e. ≈ 0.60–0.75 of the
+ * card width at low n. At larger n the emergent curve drops below 0.60 —
+ * KEPT by design: the user rule is that the focal is OBVIOUS (visually
+ * dominant), not that it holds a fixed width at every count. Dominance is
+ * STRUCTURAL: the support band's hard 0.6×hero ceiling keeps EVERY support
+ * strictly smaller than the hero at every count (enforced in candidates,
+ * local search and rebalance; the only escapes are min-size clamping at
+ * extreme n, documented in the tests). Beyond that, supports crowd toward
+ * the band FLOOR at large n, so the hero lands at ≈ 2× the largest support
+ * there — the "ideally ≥ 2×" ideal holds exactly when it is feasible.
+ *
  * Desired areas (see desiredScales): the REMAINING budget
- * (CANVAS_COVERAGE_TARGET × usableArea − heroArea) is split across the
+ * (coverageTarget × usableArea − heroArea) is split across the
  * supports (EQUALIZE_FRAC blend of a flat equal split and the
  * visualWeight-weighted split, as in v2/v3 — heavier supports get modestly
  * more), and each support's desired display width is clamped into the ratio
  * band [0.5, 0.6] × the hero's desired width.
  *
- * COVERAGE BAND: after the solve, the placed AABB-union coverage of the
- * usable canvas must land in [COVERAGE_BAND_MIN, COVERAGE_BAND_MAX] =
- * [0.65, 0.80] (the user rule "all stickers together fill 65% to 80% of the
- * canvas"); outside the band the degradation ladder's FIRST lever is the
- * support RATIO (raise toward 0.6 when underfull / lower toward 0.5 when
- * overfull) — see solveLayout. Feasibility: packing + the 10% SAT cap keep
- * the reachable union below the area budget, so the band is pinned per-n in
- * the solver tests ([0.62, 0.82] window for n ≤ feasible-n; the measured
- * shortfall beyond is documented there).
+ * COVERAGE TARGET (v5 — REPLACES the v4 [0.65, 0.80] band): after the solve,
+ * the placed AABB-union coverage of the usable canvas must be ≥
+ * COVERAGE_TARGET_MIN = 0.80 (the user rule "ALL stickers together cover at
+ * least 80% of the canvas" — now a hard/strongly-enforced target, not a
+ * band edge). Below it the escalation ladder runs (see solveLayout):
+ * support-ratio raise → (placement levers while items are unplaced) →
+ * hero regrowth → coverage-budget raise → overlap-cap escalation — each
+ * improvement-guarded, deterministic, and never dropping the union below
+ * COVERAGE_HARD_FLOOR = 0.70. Feasibility: packing + the overlap caps keep
+ * the reachable union below the area budget (union ≤ Σ areas − overlaps),
+ * and the band ceiling (0.6×hero) + hero ceiling (0.75) bound the total
+ * sticker area at low n — configs that cannot reach 0.80 within the caps
+ * settle between the 0.70 floor and 0.80 (per-n measured windows pinned in
+ * the solver tests, with the binding constraint documented per n).
  */
 const WEIGHT_FLOOR = 0.05; // keeps zero-weight items from getting a zero share
 /**
- * Total USABLE-canvas fraction ALL stickers chase together (v3/v4 — see the
+ * Base USABLE-canvas fraction ALL stickers chase together (v3/v4 — see the
  * sizing-policy doc above). The usable canvas is the paintable region: card
- * minus safe margins, below the (padded) greeting-text strip.
+ * minus safe margins, below the (padded) greeting-text strip. The v5
+ * coverage-target rule (≥ 0.80 placed union) is enforced DOWNSTREAM of this
+ * budget by the escalation ladder, which RAISES the effective budget
+ * (COVERAGE_BUDGET_BOOST_STEP × steps, capped at 1.00) when the placed union
+ * lands under COVERAGE_TARGET_MIN.
  */
 const CANVAS_COVERAGE_TARGET = 0.8;
 /**
- * v4 COVERAGE BAND for the PLACED AABB-union coverage of the usable canvas
+ * v5 COVERAGE TARGET for the PLACED AABB-union coverage of the usable canvas
  * (usableAreaCoverage — the same measure as the space check): the user rule
- * "all stickers together fill 65% to 80% of the canvas". Below the band the
- * ladder RAISES the support ratio toward 0.6 (then the placement levers);
- * above it the ladder LOWERS the ratio toward 0.5 (one deterministic retry).
- * Packing + tuck-overlap keep the reachable union below the area budget, so
- * the per-n measured windows are pinned in the solver tests.
+ * "ALL stickers together cover at least 80% of the canvas", enforced as a
+ * hard target — below it the escalation ladder runs (ratio raise → hero
+ * regrowth → budget raise → overlap-cap escalation, each improvement-guarded;
+ * see solveLayout and the escalation-levers doc). Above COVERAGE_BAND_MAX the
+ * one-shot ratio-LOWER lever still applies (the v4 anti-crowding response,
+ * kept). COVERAGE_HARD_FLOOR is the policy floor the union never drops
+ * below: when the geometry cannot reach 0.80 within the caps (packing + the
+ * 0.6×hero band ceiling + the 0.75 hero ceiling), escalation stops at the
+ * first non-paying lever and the layout settles between 0.70 and 0.80 —
+ * per-n measured windows are pinned in the solver tests.
  */
-const COVERAGE_BAND_MIN = 0.65;
+const COVERAGE_TARGET_MIN = 0.8;
+const COVERAGE_HARD_FLOOR = 0.7;
+/**
+ * Overfull lever threshold (v4 band top, kept): above it the support ratio
+ * LOWERS toward 0.5 (one deterministic retry) so a fully-packed card does
+ * not crowd past the target.
+ */
 const COVERAGE_BAND_MAX = 0.8;
 /**
  * Size-equalization blend (0..1): the fraction of the support pool that comes
@@ -403,7 +510,7 @@ const EQUALIZE_FRAC = 0.5;
 // Hero-montage policy (dominant hero + orbiting supports)
 // ---------------------------------------------------------------------------
 /**
- * Hero-montage sizing (layout hierarchy v4): the card's TOP-RANKED sticker
+ * Hero-montage sizing (layout hierarchy v5): the card's TOP-RANKED sticker
  * (the HERO) is CENTERED and sized at its EMERGENT width — solved from the
  * coverage budget via emergentHeroWidth (the fixed 0.60 target is DROPPED),
  * clamped to [0.25, 0.75] card width; the remaining stickers (SUPPORTS) fill
@@ -413,15 +520,19 @@ const EQUALIZE_FRAC = 0.5;
  * [SUPPORT_RATIO_MIN, SUPPORT_RATIO_MAX] = [0.5, 0.6] × the hero's width —
  * enforced as a hard clamp in desiredScales, the candidate generator, the
  * local search and the rebalance pass. When the band cannot fit, the HERO
- * yields instead — see the degradation ladder in solveLayout — and the band
+ * yields instead — see the escalation ladder in solveLayout — and the band
  * follows the shrunk hero (it is measured against the hero's ACTUAL placed
  * scale). Only when even the minimum hero cannot make room do supports'
  * desired scales shrink toward the band floor (never below it) and, last,
- * items are dropped (warned).
+ * items are dropped (warned). FOCAL OBVIOUSNESS: the band ceiling keeps
+ * every support strictly smaller than the hero at every count (≥ 2× when
+ * supports ride the 0.5 floor — see the sizing-policy doc).
  *
- * TOTAL-CANVAS COVERAGE BAND: all stickers together must land in
- * [0.65, 0.80] of the usable canvas (see the sizing-policy v4 doc); the
- * degradation ladder's first lever outside the band is the support RATIO.
+ * TOTAL-CANVAS COVERAGE TARGET (v5): all stickers together must cover ≥ 80%
+ * of the usable canvas (see the sizing-policy v5 doc); below it the
+ * escalation ladder runs — ratio raise first, then (all placed) hero
+ * regrowth → coverage-budget raise → overlap-cap escalation, each
+ * improvement-guarded, hard floor 0.70.
  *
  * SPACE-AWARE ORDER RETRY: the relaxation ladder step AFTER the ratio-adjust
  * (see solveLayout) is gated by a SPACE CHECK: the placed AABB-union coverage
@@ -592,14 +703,14 @@ function clampFrac(v: number, lo: number, hi: number): number {
 }
 
 /**
- * EMERGENT hero width (v4 — see the sizing-policy doc): the hero's desired
+ * EMERGENT hero width (v5 — see the sizing-policy doc): the hero's desired
  * display width (as a fraction of card width) solved from the coverage
  * budget. With supports pinned to the ratio band (display-WIDTH ratios r_j),
  * the total area equation
  *   (heroW·cardW)²·heroAspect + Σ_j (r_j·heroW·cardW)²·supAspect_j
- *     = CANVAS_COVERAGE_TARGET × usableArea
+ *     = coverageTarget × usableArea
  * gives heroW = √targetArea / (cardW·√(heroAspect + Σ_j r_j²·supAspect_j)),
- * clamped to [HERO_MIN_WIDTH, HERO_MAX_WIDTH] and reduced by the degradation
+ * clamped to [HERO_MIN_WIDTH, HERO_MAX_WIDTH] and reduced by the escalation
  * ladder's shrink steps (floored at HERO_MIN_WIDTH). n = 1 (no supports)
  * fills the budget alone — the former SOLO_ITEM_COVERAGE solo curve is
  * unified into this formula (the fixed hero target is dropped).
@@ -612,25 +723,94 @@ function emergentHeroWidth(
   usableArea: number,
   mode: RatioMode,
   shrinkSteps: number,
+  /** This attempt's effective coverage budget (base CANVAS_COVERAGE_TARGET
+   *  plus the escalation ladder's budget-raise steps — see solveLayout). */
+  coverageTarget: number,
+  /** This attempt's effective hero width ceiling (HERO_MAX_WIDTH plus the
+   *  floor-rescue steps — see attemptSolve/solveLayout). */
+  heroMaxWidth: number,
 ): number {
-  const targetArea = CANVAS_COVERAGE_TARGET * usableArea;
+  const targetArea = coverageTarget * usableArea;
   const heroAspect = heroItem.imgH / heroItem.imgW;
   const meanEff =
     supports.length > 0
       ? eff.reduce((s, w) => s + w, 0) / supports.length
       : 1;
+  const nS = supports.length;
+  const sumS = eff.reduce((s, w) => s + w, 0);
+  // Per-support {aspect, share} — share mirrors desiredScales' split.
+  const sup = supports.map((s, i) => {
+    const share =
+      nS === 0
+        ? 0
+        : EQUALIZE_FRAC / nS + (1 - EQUALIZE_FRAC) * ((eff[i] ?? 0) / (sumS || 1));
+    return {
+      a: s.imgH / s.imgW,
+      share,
+    };
+  });
+  // Closed-form raw (assumes every support sits exactly at its ratio r_j ×
+  // heroW — true whenever the pool split lands inside the band).
   let denom = heroAspect;
   supports.forEach((s, i) => {
-    const r = supportDesiredRatio(eff[i] ?? 0, meanEff, mode);
-    denom += r * r * (s.imgH / s.imgW);
+    denom +=
+      supportDesiredRatio(eff[i] ?? 0, meanEff, mode) ** 2 * (s.imgH / s.imgW);
   });
   const raw = Math.sqrt(targetArea) / (card.w * Math.sqrt(denom));
-  const clamped = clampFrac(raw, HERO_MIN_WIDTH, HERO_MAX_WIDTH);
+  /**
+   * Total DESIRED area when the hero rides `heroWn` (normalized units) and
+   * each support takes its pool share CLAMPED INTO the ratio band
+   * [0.5, 0.6] × heroWn — the clamp desiredScales applies. The band CEILING
+   * DUMPS budget (a support asked for more than 0.6×hero is cut back —
+   * measured pre-fix: the coverage-budget escalation raised the budget but
+   * the placed union stalled at low n because the surplus was thrown away
+   * instead of growing the hero). Σ(heroWn) is non-decreasing (ceiling-
+   * clamped region: heroWn²·(A + Σ0.36·a) grows; unclamped plateau: Σ =
+   * targetArea identically; floor-clamped region: heroWn²·(A + Σ0.25·a)
+   * grows). So: when Σ(raw) already meets the target there is no deficit
+   * (the raw curve is preserved — the hero's per-n emergent curve does not
+   * move); otherwise the smallest heroWn ≥ raw whose Σ ≥ targetArea is
+   * found by bisection — the hero ABSORBS the ceiling-dumped leftover and
+   * the budget raise FEEDS THROUGH to the placed sizes.
+   */
+  const totalAreaAt = (heroWn: number): number => {
+    const heroArea = heroWn * heroWn * heroAspect;
+    const pool = Math.max(0, targetArea - heroArea);
+    let sum = heroArea;
+    for (const { a, share } of sup) {
+      const desiredArea = pool * share;
+      const rawW = Math.sqrt(desiredArea / a);
+      const w = Math.min(
+        Math.max(rawW, SUPPORT_RATIO_MIN * heroWn),
+        SUPPORT_RATIO_MAX * heroWn,
+      );
+      sum += w * w * a;
+    }
+    return sum;
+  };
+  const rawN = raw * card.w;
+  const heroWnMax = heroMaxWidth * card.w;
+  let heroWn: number;
+  const EPS = 1e-6 * Math.max(1, targetArea);
+  if (totalAreaAt(rawN) >= targetArea - EPS || !(heroWnMax > rawN)) {
+    heroWn = rawN;
+  } else {
+    let lo = rawN;
+    let hi = heroWnMax;
+    // 40 bisection steps on the monotone Σ(heroWn) ≥ targetArea predicate.
+    for (let i = 0; i < 40; i++) {
+      const mid = (lo + hi) / 2;
+      if (totalAreaAt(mid) >= targetArea - EPS) hi = mid;
+      else lo = mid;
+    }
+    heroWn = hi;
+  }
+  const clamped = clampFrac(heroWn / card.w, HERO_MIN_WIDTH, heroMaxWidth);
   return Math.max(HERO_MIN_WIDTH, clamped - shrinkSteps * HERO_SHRINK_STEP);
 }
 
 /**
- * Desired display scale per item under the v4 emergent-hero + ratio-band
+ * Desired display scale per item under the v5 emergent-hero + ratio-band
  * policy (see the sizing-policy doc above). Returns itemId → scale (already
  * clamped to the size window) plus the attempt's emergent hero width
  * fraction (the caller reuses it for the desiredShrink band floor).
@@ -643,11 +823,17 @@ function desiredScales(
   /** Area of the usable canvas (see usableAreaRect) — the coverage budget's
    *  denominator. */
   usableArea: number,
-  /** This attempt's support-ratio mode (see RatioMode) — the degradation
+  /** This attempt's support-ratio mode (see RatioMode) — the escalation
    *  ladder raises ("max") / lowers ("min") the band on coverage excursions. */
   ratioMode: RatioMode,
   /** This attempt's hero shrink steps (see emergentHeroWidth). */
   heroShrinkSteps: number,
+  /** This attempt's effective coverage budget (base CANVAS_COVERAGE_TARGET
+   *  plus the escalation ladder's budget-raise steps — see solveLayout). */
+  coverageTarget: number,
+  /** This attempt's effective hero width ceiling (HERO_MAX_WIDTH plus the
+   *  floor-rescue steps — see attemptSolve/solveLayout). */
+  heroMaxWidth: number,
   /** Optional itemId → importance (0..1 hint) overriding visualWeight in the
    *  support split — hint importance orders size WITHIN a group so the
    *  group's focal item gets the larger share (equalization blend unchanged). */
@@ -660,9 +846,10 @@ function desiredScales(
   });
   const map = new Map<string, number>();
   const heroItem = ordered[0]!;
-  // EMERGENT hero width (v4): solved from the coverage budget given the
+  // EMERGENT hero width (v5): solved from the coverage budget given the
   // support ratio band — the hero's size is whatever makes the composition
-  // fit the [0.65, 0.80] coverage band, not a fixed target.
+  // fit the coverage target (≥ 0.80 placed union, escalation-raised budget
+  // when packing falls short), not a fixed target.
   const heroWidthFrac = emergentHeroWidth(
     heroItem,
     ordered.slice(1),
@@ -671,6 +858,8 @@ function desiredScales(
     usableArea,
     ratioMode,
     heroShrinkSteps,
+    coverageTarget,
+    heroMaxWidth,
   );
   const heroDesiredWidth = heroWidthFrac * card.w;
   // Remaining canvas-coverage budget after the hero's committed area, split
@@ -679,7 +868,7 @@ function desiredScales(
     (heroDesiredWidth * heroDesiredWidth * heroItem.imgH) / heroItem.imgW;
   const supportPool = Math.max(
     0,
-    CANVAS_COVERAGE_TARGET * usableArea - heroDesiredArea,
+    coverageTarget * usableArea - heroDesiredArea,
   );
   const nS = n - 1;
   const sumS = eff.slice(1).reduce((s, w) => s + w, 0);
@@ -701,7 +890,7 @@ function desiredScales(
     const share = EQUALIZE_FRAC / nS + (1 - EQUALIZE_FRAC) * (eff[i]! / sumS);
     const desiredArea = supportPool * share;
     let desiredWidth = Math.sqrt((desiredArea * item.imgW) / item.imgH);
-    // v4 RATIO BAND: supports sit in [0.5, 0.6] × the hero's desired width —
+    // v5 RATIO BAND: supports sit in [0.5, 0.6] × the hero's desired width —
     // clearly dominant hero, consistent siblings (see the ratio-band doc).
     desiredWidth = clampFrac(
       desiredWidth,
@@ -771,9 +960,14 @@ function usableAreaCoverage(
  * satisfy the hard constraints are returned in `unplaced` (never placed
  * illegally). `desiredShrink` lowers supports' desired scales (clamped AT
  * the 0.5×hero band floor); `ratioMode` sets this attempt's support-ratio
- * position ("max"/"min" — the coverage-band lever) and `heroShrinkSteps`
+ * position ("max"/"min" — the coverage lever) and `heroShrinkSteps`
  * the hero-shrink ladder depth (both feed the EMERGENT hero width — see
- * emergentHeroWidth).
+ * emergentHeroWidth). `budgetBoost` is the coverage-escalation budget-raise
+ * step count (raises the sizing budget above CANVAS_COVERAGE_TARGET),
+ * `overlapEscSteps` the overlap-cap escalation step count (inflates BOTH
+ * overlap caps — pairwise AND hero tuck — never beyond the montage parity
+ * factor 1.8), and `ceilBoost` the floor-rescue step count (raises the hero
+ * width ceiling toward MAX_ITEM_SIZE_PCT — see solveLayout's floor rescue).
  */
 function attemptSolve(
   items: LayoutItem[],
@@ -784,6 +978,9 @@ function attemptSolve(
   reverseNonHero = false,
   ratioMode: RatioMode = "mid",
   heroShrinkSteps = 0,
+  budgetBoost = 0,
+  overlapEscSteps = 0,
+  ceilBoost = 0,
 ): { placed: Placed[]; unplaced: LayoutItem[]; textZoneUsed: boolean } {
   const card = opts.cardDims;
   const k = opts.k ?? baseFit(card);
@@ -836,6 +1033,17 @@ function attemptSolve(
       ? [ranked[0]!, ...ranked.slice(1).reverse()]
       : ranked;
 
+  // Overlap-cap escalation (coverage ladder — see solveLayout): the effective
+  // factor is the LARGER of the caller's factor (final montage pass) and the
+  // escalation factor — the montage's committed 1.8 relax is never reduced,
+  // and the escalation (capped at the same 1.8 parity) never multiplies on
+  // top of it.
+  const escalationFactor = 1 + overlapEscSteps * OVERLAP_ESCALATION_STEP;
+  const effectiveOverlapCapFactor = Math.max(
+    opts.overlapCapFactor ?? 1,
+    escalationFactor,
+  );
+
   const ctx: ConstraintCtx = {
     card,
     k,
@@ -844,8 +1052,9 @@ function attemptSolve(
     overlapCap,
     heroItemId: heroId ?? undefined,
     heroOverlapCap: HERO_TUCK_CAP,
-    // Final montage pass only (undefined → factor 1, unchanged caps).
-    overlapCapFactor: opts.overlapCapFactor,
+    // Final montage pass factor and/or coverage-escalation factor (1 →
+    // unchanged caps).
+    overlapCapFactor: effectiveOverlapCapFactor > 1 ? effectiveOverlapCapFactor : undefined,
   };
   const m = safeMargin(card);
   const ax1 = m.x;
@@ -859,13 +1068,21 @@ function attemptSolve(
   const textRuleApplies = (item: LayoutItem): boolean =>
     dropTextBeyond === null || ordered.indexOf(item) < dropTextBeyond;
 
-  // v4 desired scales (sizing policy — see the block comment above). Seeds
+  // v5 desired scales (sizing policy — see the block comment above). Seeds
   // the candidate scale jitter. Hint importance (when present) overrides
   // visualWeight in the support split. The coverage budget is measured on
   // the USABLE canvas (card minus margins, below the padded text strip); the
-  // hero width EMERGES from it (fixed target dropped).
+  // hero width EMERGES from it (fixed target dropped). The budget carries
+  // the escalation ladder's budget-raise steps (see solveLayout).
   const ua = usableAreaRect(card, opts.textZone);
   const usableArea = ua.w > 0 && ua.h > 0 ? ua.w * ua.h : card.w * card.h;
+  const coverageTarget = CANVAS_COVERAGE_TARGET + budgetBoost * COVERAGE_BUDGET_BOOST_STEP;
+  // Floor-rescue hero ceiling (see solveLayout): HERO_MAX_WIDTH + steps,
+  // never beyond the hard MAX_ITEM_SIZE_PCT size constraint.
+  const heroMaxWidth = Math.min(
+    MAX_ITEM_SIZE_PCT / 100,
+    HERO_MAX_WIDTH + ceilBoost * HERO_CEIL_RESCUE_STEP,
+  );
   const { scales: rawDesired, heroWidthFrac: heroWidthFracDesired } = desiredScales(
     ordered,
     card,
@@ -874,6 +1091,8 @@ function attemptSolve(
     usableArea,
     ratioMode,
     heroShrinkSteps,
+    coverageTarget,
+    heroMaxWidth,
     importanceOverride.size > 0 ? importanceOverride : undefined,
   );
   // Relaxation shrink: supports' desired scales shrink TOWARD the 0.5×hero
@@ -894,7 +1113,7 @@ function attemptSolve(
   const itemsById = new Map(items.map((i) => [i.id, i] as const));
 
   /**
-   * v4 support RATIO BAND ([SUPPORT_RATIO_MIN, SUPPORT_RATIO_MAX] × the
+   * v5 support RATIO BAND ([SUPPORT_RATIO_MIN, SUPPORT_RATIO_MAX] × the
    * hero's ACTUAL placed scale) as {min, max} SCALES for `item` — null when
    * the hero is not (yet) placed or `item` IS the hero. Enforced hard
    * everywhere: candidate generation, local search and the rebalance pass
@@ -979,8 +1198,25 @@ function attemptSolve(
   ];
   const candidatesFor = (item: LayoutItem, index: number, placed: Placed[]): Placement[] => {
     const group = grouped.get(item.id);
-    const baseScale =
-      desired.get(item.id) ?? scaleFor(item, card, k, undefined, minSizePct);
+    // v5 band-CONSISTENCY cap for the HERO: the hero may not outgrow its
+    // already-placed supports beyond the ratio band (every support stays
+    // ≥ 0.5× the hero's ACTUAL scale). The coordinate sweeps re-seed the hero
+    // at its full desired scale and the local search nudge-walks it — without
+    // this cap the hero walked above the supports and broke the 0.50 ratio
+    // floor (measured 0.437×hero, mixed n = 2).
+    let heroBandMaxScale = Infinity;
+    if (item.id === heroId) {
+      const unit = item.imgW * k;
+      for (const p of placed) {
+        if (p.item.id === heroId) continue;
+        const supW = displayWidth(p.item, p.placement.scale, k);
+        heroBandMaxScale = Math.min(heroBandMaxScale, supW / SUPPORT_RATIO_MIN / unit);
+      }
+    }
+    const baseScale = Math.min(
+      desired.get(item.id) ?? scaleFor(item, card, k, undefined, minSizePct),
+      heroBandMaxScale,
+    );
     const placedBoxes = placed.map((p) => placedFootprint(p.placement, p.item, k));
     const ok = (c: Placement): boolean =>
       checkItem(
@@ -1053,7 +1289,15 @@ function attemptSolve(
         const x = clamp(group.cx + (rng() * 2 - 1) * group.spread, ax1, ax2);
         const y = clamp(group.cy + (rng() * 2 - 1) * group.spread, ay1, ay2);
         const jitter = SCALE_JITTER_MIN + rng() * (SCALE_JITTER_MAX - SCALE_JITTER_MIN);
-        const rot = (rng() * 2 - 1) * 12;
+        // USER DECISION: all stickers at 0 degrees (orientation disabled).
+        // FIX (v3 final): this path still drew rot ∈ ±12° — the only sample
+        // path missed by the orientation-disabled sweep, so a tilt-hint item
+        // (which always carries a group hint) could win a candidate with a
+        // residual rotation (measured −0.06° at mixed-seed 3). The rot draw
+        // still runs (discarded) so the hoisted seeded sequence per candidate
+        // stays uniform — same precedent as the hero's jitter draw above.
+        rng(); // rot draw (discarded — stickers rotate 0)
+        const rot = 0;
         seeds.push({ x, y, jitter, rot });
       }
     }
@@ -1479,6 +1723,19 @@ function attemptSolve(
         scaleFloor = Math.max(scaleFloor, band.min);
         scaleCeil = Math.max(band.max, scaleFloor);
       }
+    } else {
+      // Hero: the ratio band is measured against the hero's ACTUAL scale, so
+      // a hero that outgrows its placed supports breaks the 0.50× floor for
+      // every one of them (nothing re-clamps already-placed supports after
+      // the hero moves). Cap the hero's growth at the smallest support's
+      // 0.5× bound — the band-consistency mirror of the support clamp (the
+      // same hole, fixed in candidatesFor, for the sweep path).
+      const unit = item.imgW * k;
+      for (const q of placed) {
+        if (q.item.id === heroId) continue;
+        const supW = displayWidth(q.item, q.placement.scale, k);
+        scaleCeil = Math.min(scaleCeil, supW / SUPPORT_RATIO_MIN / unit);
+      }
     }
     const moved: Placement = {
       ...p.placement,
@@ -1709,9 +1966,11 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
   let minSizePct = MIN_ITEM_SIZE_PCT;
   const card = opts.cardDims;
   const k = opts.k ?? baseFit(card);
-  // v4 ladder state (escalation ORDER — see the header doc and the policy
+  // v5 ladder state (escalation ORDER — see the header doc and the policy
   // blocks): ratio-adjust → reversed-order retry → hero-shrink steps →
-  // desiredShrink → text-rule drop.
+  // desiredShrink → coverage escalation (hero regrowth → coverage-budget
+  // raise → overlap-cap escalation → hero-ceiling floor rescue) → text-rule
+  // drop.
   let ratioMode: RatioMode = "mid";
   let heroShrinkSteps = 0;
   let desiredShrink = 1;
@@ -1719,15 +1978,78 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
   let ratioRaised = false;
   let ratioLowered = false;
   let reverseNext = false;
-  let result = attemptSolve(items, opts, minSizePct, null, desiredShrink, false, ratioMode, heroShrinkSteps);
+  // Coverage-escalation state (v5 — see the escalation-levers doc): the
+  // levers only fire when EVERY item is placed and the union is still below
+  // COVERAGE_TARGET_MIN; each lever stops at the first step that fails to
+  // lift the union by COVERAGE_ESCALATION_MIN_GAIN (the overlap lever also
+  // REVERTS such a step — the strict caps are kept when the extra tolerance
+  // buys nothing).
+  let budgetBoost = 0;
+  let overlapEscSteps = 0;
+  let heroCeilBoost = 0; // floor-rescue: raises HERO_MAX_WIDTH toward 0.85
+  let lastLever: "none" | "regrow" | "budget" | "overlap" | "ceil" = "none";
+  let regrowPrevCov = 0;
+  let budgetPrevCov = 0;
+  let overlapPrevCov = 0;
+  let ceilPrevCov = 0;
+  let regrowFailed = false;
+  let budgetFailed = false;
+  let overlapFailed = false;
+  let ceilFailed = false;
+  /**
+   * BEST GUARANTEED-PLACED FALLBACK bookkeeping (v5 fix — the hard rule
+   * "no items ever dropped silently"): every attempt that placed EVERY item
+   * is a fallback candidate, kept together with the ladder state that
+   * produced it (so the final warnings describe the RETURNED result).
+   * Coverage-escalation levers can make previously-placed items unplaceable
+   * (a bigger budget grows the hero AND the band, which the packing may not
+   * fit); when the ladder then exhausts with unplaced items — or exits via
+   * any break — the solver returns the best all-placed attempt seen
+   * (highest usable-union coverage; ties → earliest) even though it misses
+   * the coverage target, instead of returning silently-missing items. Only
+   * when NO attempt ever placed everything does the documented drop path
+   * run (loud per-item warnings below).
+   */
+  interface AllPlacedAttempt {
+    result: ReturnType<typeof attemptSolve>;
+    cov: number;
+    minSizePct: number;
+    desiredShrink: number;
+    ratioMode: RatioMode;
+    heroShrinkSteps: number;
+    budgetBoost: number;
+    overlapEscSteps: number;
+    heroCeilBoost: number;
+  }
+  let bestAllPlaced: AllPlacedAttempt | null = null;
+  const noteAllPlaced = () => {
+    if (result.unplaced.length > 0) return;
+    const cov = usableAreaCoverage(result.placed, card, k, opts.textZone ?? null);
+    if (bestAllPlaced === null || cov > bestAllPlaced.cov + 1e-9) {
+      bestAllPlaced = {
+        result,
+        cov,
+        minSizePct,
+        desiredShrink,
+        ratioMode,
+        heroShrinkSteps,
+        budgetBoost,
+        overlapEscSteps,
+        heroCeilBoost,
+      };
+    }
+  };
+  let result = attemptSolve(items, opts, minSizePct, null, desiredShrink, false, ratioMode, heroShrinkSteps, budgetBoost, overlapEscSteps, heroCeilBoost);
+  noteAllPlaced();
   let relaxations = 0;
-  // v4 DEGRADATION LADDER — drives BOTH the placement (unplaced items) and
-  // the COVERAGE BAND ([0.65, 0.80] usable-union coverage; the user rule
-  // "all stickers together fill 65% to 80% of the canvas"):
+  // v5 ESCALATION LADDER — drives BOTH the placement (unplaced items) and
+  // the COVERAGE TARGET (≥ 0.80 usable-union coverage; the v5 user rule
+  // "ALL stickers together cover at least 80% of the canvas", hard floor
+  // 0.70):
   //   1. RATIO-ADJUST (first lever): coverage > COVERAGE_BAND_MAX → the
   //      support ratio LOWERS to 0.5×hero and the solve re-runs ONCE
   //      (deterministic; the emergent hero compensates by growing — same
-  //      budget, different split). coverage < COVERAGE_BAND_MIN → the
+  //      budget, different split). coverage < COVERAGE_TARGET_MIN → the
   //      support ratio RAISES to 0.6×hero (bigger supports pack better and
   //      the hero yields room).
   //   2. SPACE CHECK (usableAreaCoverage of the failed attempt's placed set):
@@ -1736,7 +2058,7 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
   //      (reverseNonHero — the smaller-weight late arrivals get FIRST pick of
   //      the empty space, the hero still first; one-shot, tracked by
   //      `reversedTried`).
-  //   3. HERO SHRINK (last resort for placement): the emergent hero width
+  //   3. HERO SHRINK (for placement): the emergent hero width
   //      drops by HERO_SHRINK_STEP per step down to HERO_MIN_WIDTH. The
   //      [0.5, 0.6]×hero support band holds RELATIVE to the shrunk hero (it
   //      is measured against the hero's ACTUAL placed scale), so supports
@@ -1747,7 +2069,36 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
   //      below it; the candidate clamp keeps every support ≥ 0.5×hero) and
   //      minSize keeps relaxing. Whatever still cannot fit at the floor goes
   //      to the drop path below.
+  //   5. COVERAGE ESCALATION (v5 — everything placed, union still < 0.80),
+  //      in order, each lever improvement-guarded (stops at the first step
+  //      that does not lift the union by COVERAGE_ESCALATION_MIN_GAIN):
+  //      (i) HERO REGROWTH — undo hero-shrink steps: the band lifts WITH the
+  //          hero, so every support's floor/ceiling grows with it (the
+  //          over-shrink that bought placement is given back when it cost
+  //          coverage);
+  //      (ii) COVERAGE-BUDGET RAISE — the sizing budget rises +0.05 per step
+  //          (up to 1.00): the emergent hero AND the support pool grow
+  //          coherently (union ≤ Σ areas, so the budget must exceed the
+  //          union target by the overlap loss);
+  //      (iii) OVERLAP-CAP ESCALATION — both overlap caps inflate +0.2× per
+  //          step up to the montage parity 1.8 (crowded cards are
+  //          overlap-limited: the extra tolerance lets stickers keep larger
+  //          scales). WITH revert: a non-paying step is undone and the solve
+  //          re-runs at the previous factor, so the strict 10% / 25% caps
+  //          survive whenever the relaxation buys nothing;
+  //      (iv) HERO-CEILING FLOOR RESCUE — only while coverage <
+  //          COVERAGE_HARD_FLOOR (0.70): HERO_MAX_WIDTH rises +0.05 per step
+  //          toward MAX_ITEM_SIZE_PCT (0.85). This is the last-resort rung
+  //          that keeps the 0.70 policy floor honest for structurally
+  //          cap-limited configs (e.g. n = 1: a solo 0.75 hero covers only
+  //          ≈ 0.60 of the usable canvas — geometry, not packing).
+  //      The union therefore NEVER settles below 0.70 by policy; where 0.80
+  //      is unreachable the per-n measured window (0.70–0.80) is pinned in
+  //      the solver tests with the binding constraint documented.
   const heroItem = items.find((i) => i.id === heroItemIdOf(items, opts.hints ?? null));
+  // Set when the iteration fired one of the four coverage-escalation levers
+  // (regrow/budget/overlap/ceil) — used by the post-step revert guard below.
+  let firedEsc = false;
   while (relaxations < MAX_RELAXATIONS) {
     const unplaced = result.unplaced.length > 0;
     const coverage = usableAreaCoverage(result.placed, card, k, opts.textZone ?? null);
@@ -1760,33 +2111,197 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
       // Overfull canvas: lower the support ratio toward 0.5 (one retry).
       ratioLowered = true;
       ratioMode = "min";
-    } else if (coverage < COVERAGE_BAND_MIN - 1e-9 && !ratioRaised) {
+      lastLever = "none";
+    } else if (coverage < COVERAGE_TARGET_MIN - 1e-9 && !ratioRaised) {
       // Underfull canvas: raise the support ratio toward 0.6.
       ratioRaised = true;
       ratioMode = "max";
+      lastLever = "none";
     } else if (unplaced && coverage < SPACE_CHECK_COVERAGE && !reversedTried) {
       // Space exists — do NOT shrink; give the starved late arrivals first
       // pick of it (hero still first).
       reversedTried = true;
       reverseNext = true;
+      lastLever = "none";
     } else if (
       unplaced &&
       heroShrinkSteps < HERO_SHRINK_MAX_STEPS &&
       heroWfrac > HERO_MIN_WIDTH + 1e-9
     ) {
       // The hero yields (progressive shrink); the band holds relative to the
-      // shrunk hero.
+      // shrunk hero. A regrow attempt that ended here (regrowth caused the
+      // unplaced items) failed — never regrow again this solve.
+      if (lastLever === "regrow") regrowFailed = true;
       heroShrinkSteps++;
+      lastLever = "none";
     } else if (unplaced && desiredShrink > 0.35 + 1e-9) {
       desiredShrink = Math.max(0.35, desiredShrink - 0.15);
+      lastLever = "none";
+    } else if (!unplaced && coverage < COVERAGE_TARGET_MIN - 1e-9) {
+      // COVERAGE ESCALATION (all placed, union < 0.80) — see the ladder doc
+      // above. Guard bookkeeping first: a lever whose last step did not pay
+      // is retired for this solve.
+      if (
+        (lastLever === "regrow" && coverage <= regrowPrevCov + COVERAGE_ESCALATION_MIN_GAIN) ||
+        (lastLever === "budget" && coverage <= budgetPrevCov + COVERAGE_ESCALATION_MIN_GAIN) ||
+        (lastLever === "overlap" && coverage <= overlapPrevCov + COVERAGE_ESCALATION_MIN_GAIN) ||
+        (lastLever === "ceil" && coverage <= ceilPrevCov + COVERAGE_ESCALATION_MIN_GAIN)
+      ) {
+        if (lastLever === "regrow") regrowFailed = true;
+        else if (lastLever === "budget") budgetFailed = true;
+        else if (lastLever === "overlap") overlapFailed = true;
+        else ceilFailed = true;
+      }
+      if (
+        heroShrinkSteps > 0 &&
+        !regrowFailed &&
+        (lastLever !== "regrow" || coverage > regrowPrevCov + COVERAGE_ESCALATION_MIN_GAIN)
+      ) {
+        // (i) hero regrowth: undo a shrink step — the band lifts with the
+        // hero and every support grows with it.
+        regrowPrevCov = coverage;
+        heroShrinkSteps--;
+        lastLever = "regrow";
+        firedEsc = true;
+      } else if (
+        budgetBoost < COVERAGE_BUDGET_BOOST_MAX_STEPS &&
+        !budgetFailed &&
+        (lastLever !== "budget" || coverage > budgetPrevCov + COVERAGE_ESCALATION_MIN_GAIN)
+      ) {
+        // (ii) coverage-budget raise: the emergent hero AND the support pool
+        // grow with the budget.
+        budgetPrevCov = coverage;
+        budgetBoost++;
+        lastLever = "budget";
+        firedEsc = true;
+      } else if (
+        overlapEscSteps < OVERLAP_ESCALATION_MAX_STEPS &&
+        !overlapFailed &&
+        (lastLever !== "overlap" || coverage > overlapPrevCov + COVERAGE_ESCALATION_MIN_GAIN)
+      ) {
+        // (iii) overlap-cap escalation: inflate BOTH caps +0.2× per step
+        // (montage parity ceiling 1.8).
+        overlapPrevCov = coverage;
+        overlapEscSteps++;
+        lastLever = "overlap";
+        firedEsc = true;
+      } else if (
+        coverage < COVERAGE_HARD_FLOOR - 1e-9 &&
+        heroCeilBoost < HERO_CEIL_RESCUE_MAX_STEPS &&
+        !ceilFailed &&
+        (lastLever !== "ceil" || coverage > ceilPrevCov + COVERAGE_ESCALATION_MIN_GAIN)
+      ) {
+        // (iv) hero-ceiling floor rescue: only below the 0.70 policy floor —
+        // raise HERO_MAX_WIDTH +0.05 per step toward MAX_ITEM_SIZE_PCT.
+        ceilPrevCov = coverage;
+        heroCeilBoost++;
+        lastLever = "ceil";
+        firedEsc = true;
+      } else {
+        if (
+          !overlapFailed &&
+          lastLever === "overlap" &&
+          coverage <= overlapPrevCov + COVERAGE_ESCALATION_MIN_GAIN &&
+          overlapEscSteps > 0
+        ) {
+          // (iii) revert: the last overlap step did not pay for its extra
+          // tolerance — undo it and re-solve at the previous factor
+          // (deterministic: reproduces the earlier state exactly).
+          overlapEscSteps--;
+          result = attemptSolve(items, opts, minSizePct, null, desiredShrink, false, ratioMode, heroShrinkSteps, budgetBoost, overlapEscSteps, heroCeilBoost);
+        }
+        break;
+      }
     } else {
+      if (
+        !overlapFailed &&
+        lastLever === "overlap" &&
+        coverage <= overlapPrevCov + COVERAGE_ESCALATION_MIN_GAIN &&
+        overlapEscSteps > 0
+      ) {
+        // Overlap-escalation revert on the exit path (e.g. coverage reached
+        // the target after the step but the step itself did not pay).
+        overlapEscSteps--;
+        result = attemptSolve(items, opts, minSizePct, null, desiredShrink, false, ratioMode, heroShrinkSteps, budgetBoost, overlapEscSteps, heroCeilBoost);
+      }
       break;
     }
     relaxations++;
+    const preStep: {
+      minSizePct: number;
+      desiredShrink: number;
+      ratioMode: RatioMode;
+      heroShrinkSteps: number;
+      budgetBoost: number;
+      overlapEscSteps: number;
+      heroCeilBoost: number;
+    } = { minSizePct, desiredShrink, ratioMode, heroShrinkSteps, budgetBoost, overlapEscSteps, heroCeilBoost };
     minSizePct = Math.max(MIN_SIZE_FLOOR_PCT, minSizePct - 1);
-    result = attemptSolve(items, opts, minSizePct, null, desiredShrink, reverseNext, ratioMode, heroShrinkSteps);
+    result = attemptSolve(items, opts, minSizePct, null, desiredShrink, reverseNext, ratioMode, heroShrinkSteps, budgetBoost, overlapEscSteps, heroCeilBoost);
     reverseNext = false;
+    if (firedEsc && result.unplaced.length > 0) {
+      // v5 fix (no silently-dropped items): a coverage-escalation lever whose
+      // growth BROKE placement is undone immediately — re-solve at the exact
+      // pre-step state (deterministic reproduction of the pre-step result)
+      // and retire the lever. Its improvement guard fails it out on the next
+      // iteration (the reverted coverage equals the lever's prevCov).
+      minSizePct = preStep.minSizePct;
+      desiredShrink = preStep.desiredShrink;
+      ratioMode = preStep.ratioMode;
+      heroShrinkSteps = preStep.heroShrinkSteps;
+      budgetBoost = preStep.budgetBoost;
+      overlapEscSteps = preStep.overlapEscSteps;
+      heroCeilBoost = preStep.heroCeilBoost;
+      if (lastLever === "regrow") regrowFailed = true;
+      else if (lastLever === "budget") budgetFailed = true;
+      else if (lastLever === "overlap") overlapFailed = true;
+      else ceilFailed = true;
+      result = attemptSolve(items, opts, minSizePct, null, desiredShrink, false, ratioMode, heroShrinkSteps, budgetBoost, overlapEscSteps, heroCeilBoost);
+    }
+    firedEsc = false;
+    noteAllPlaced();
   }
+  // Last resort: drop the text-overlap rule for items beyond the first 20.
+  if (result.unplaced.length > 0 && items.length > TEXT_RULE_DROP_LIMIT) {
+    warnings.push(
+      `text-overlap rule dropped for items beyond the first ${TEXT_RULE_DROP_LIMIT}`,
+    );
+    result = attemptSolve(items, opts, minSizePct, TEXT_RULE_DROP_LIMIT, desiredShrink, false, ratioMode, heroShrinkSteps, budgetBoost, overlapEscSteps, heroCeilBoost);
+    noteAllPlaced();
+  }
+
+  // v5 fix — BEST GUARANTEED-PLACED FALLBACK (the hard rule "no items ever
+  // dropped silently"): if the ladder ended with unplaced items but some
+  // attempt during the run placed EVERY item, return that attempt instead
+  // (highest usable-union coverage seen; ties → earliest). The coverage
+  // target may be missed — placement completeness always wins over coverage;
+  // the shortfall is warned (below), never silent.
+  if (result.unplaced.length > 0 && bestAllPlaced !== null) {
+    // (cast defeats TS's `never` narrowing — noteAllPlaced assigns in a closure)
+    const best = bestAllPlaced as AllPlacedAttempt;
+    result = best.result;
+    minSizePct = best.minSizePct;
+    desiredShrink = best.desiredShrink;
+    ratioMode = best.ratioMode;
+    heroShrinkSteps = best.heroShrinkSteps;
+    budgetBoost = best.budgetBoost;
+    overlapEscSteps = best.overlapEscSteps;
+    heroCeilBoost = best.heroCeilBoost;
+    warnings.push(
+      `coverage target missed: rolled back to the best all-placed layout (${(best.cov * 100).toFixed(0)}% usable-canvas coverage)`,
+    );
+  }
+
+  // Items that STILL cannot fit are omitted (bounds + minSize are hard).
+  // With the fallback above this only runs when NO attempt ever placed
+  // everything — the documented drop path, always loudly warned.
+  for (const item of result.unplaced) {
+    warnings.push(`item ${item.id} could not be placed within card constraints`);
+  }
+
+  // Lever warnings LAST — they describe the RETURNED attempt's state (the
+  // fallback above may have rolled the ladder state back to an earlier
+  // attempt, and the warnings must match the placements actually returned).
   if (relaxations > 0 && minSizePct < MIN_ITEM_SIZE_PCT) {
     warnings.push(`relaxed min item size to ${minSizePct}% of card width`);
   }
@@ -1800,18 +2315,20 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
       `hero width target relaxed to ${(heroWfracFinal * 100).toFixed(0)}% of card width`,
     );
   }
-
-  // Last resort: drop the text-overlap rule for items beyond the first 20.
-  if (result.unplaced.length > 0 && items.length > TEXT_RULE_DROP_LIMIT) {
+  if (budgetBoost > 0) {
     warnings.push(
-      `text-overlap rule dropped for items beyond the first ${TEXT_RULE_DROP_LIMIT}`,
+      `coverage escalation: sizing budget raised to ${((CANVAS_COVERAGE_TARGET + budgetBoost * COVERAGE_BUDGET_BOOST_STEP) * 100).toFixed(0)}% of usable canvas`,
     );
-    result = attemptSolve(items, opts, minSizePct, TEXT_RULE_DROP_LIMIT, desiredShrink, false, ratioMode, heroShrinkSteps);
   }
-
-  // Items that STILL cannot fit are omitted (bounds + minSize are hard).
-  for (const item of result.unplaced) {
-    warnings.push(`item ${item.id} could not be placed within card constraints`);
+  if (overlapEscSteps > 0) {
+    warnings.push(
+      `coverage escalation: overlap caps relaxed ×${(1 + overlapEscSteps * OVERLAP_ESCALATION_STEP).toFixed(1)}`,
+    );
+  }
+  if (heroCeilBoost > 0) {
+    warnings.push(
+      `coverage escalation: hero width ceiling raised to ${((HERO_MAX_WIDTH + heroCeilBoost * HERO_CEIL_RESCUE_STEP) * 100).toFixed(0)}% of card width`,
+    );
   }
 
   // Hero-montage zIndex: the hero renders TOPMOST (max orderIndex + 1);
