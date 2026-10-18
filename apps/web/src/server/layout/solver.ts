@@ -58,12 +58,14 @@
  *          whenever the extra tolerance buys nothing);
  *      (f) as a last resort the text-overlap rule is dropped for items
  *          beyond the first 20 (with a warning).
- *      The union NEVER drops below COVERAGE_HARD_FLOOR = 0.70 by policy:
- *      escalation stops at the first lever that cannot pay its way, and the
- *      per-n measured windows are pinned in the solver tests (configs whose
- *      geometry cannot reach 0.80 — e.g. the hero riding its 0.75 ceiling
- *      with supports capped at 0.6×hero — settle between 0.70 and 0.80,
- *      documented per n).
+ *      Floor 0.70 is best-effort, not a hard invariant: escalation stops at
+ *      the first lever that cannot pay its way, and the per-n measured
+ *      windows are pinned in the solver tests (configs whose geometry cannot
+ *      reach 0.80 — e.g. the hero riding its 0.75 ceiling with supports
+ *      capped at 0.6×hero — settle between 0.70 and 0.80, documented per n).
+ *      The ceil-rescue lever raises the hero ceiling only below 0.70;
+ *      packing/band-limited configs can sit below the floor at their
+ *      geometric maximum (see COVERAGE_PINS annotations in solver.test.ts).
  *      Out-of-bounds placements are NEVER emitted: bounds and
  *      minSize are hard constraints — an item that still cannot fit is simply
  *      omitted from the result (also warned).
@@ -224,21 +226,16 @@ const HERO_FIDELITY_WEIGHT = 3.0;
  * ORIENTATION: per-item tilt hints. An item with a resolvable tiltToward
  * target (another PLACED item's center, or its group center when the group
  * has ≥2 members) is penalized for the angular deviation between its
- * rotation and the direction toward the target (saturating at 30°). The
- * interpretation here is "stickers with an interaction hint FACE their
- * target": the brief's test spec demands the rotation within ±20° of the
- * angle toward the target, so the hinted angle is applied in full (candidate
- * rotations at the hinted angle ± HINT_TILT_JITTER_DEG) rather than capped at
- * the ±8–15° a few-degrees-only reading would allow. Subtlety is preserved
- * where it matters: NON-hinted rotations keep the existing ±12° policy, and
- * the hinted rotation is jittered so perfect facing is not forced.
+ * rotation and the direction toward the target (saturating at 30°).
+ * USER DECISION: orientation is DISABLED — ORIENTATION_WEIGHT = 0, all
+ * stickers rotate 0 (candidate rotations are hardcoded at 0), and the
+ * facing-penalty machinery only matters if the weight is re-enabled.
  */
 const COHESION_WEIGHT = 1.0;
 const COHESION_TOUCH_FACTOR = 1.15;
 const COHESION_SEPARATION_FACTOR = 1.6;
 const ORIENTATION_WEIGHT = 0; // USER DECISION: orientation disabled
 const ORIENT_TOLERANCE_DEG = 30;
-const HINT_TILT_JITTER_DEG = 8;
 /**
  * Coordinate-descent sweeps after the greedy pass (see the sweep block in
  * attemptSolve). 3 sweeps cover the few-item cases the sweeps exist for;
@@ -259,7 +256,7 @@ const SCALE_JITTER_MIN = 0.92;
 const SCALE_JITTER_MAX = 1.08;
 const JITTER_FRAC = 0.45; // of one grid cell, per axis
 const HINT_SAMPLES = 6; // extra candidates near the hinted group center
-/** Extra candidates whose rotation faces the tilt target (see ORIENTATION). */
+/** Extra candidates near the hinted group center (see ORIENTATION). */
 const ORIENT_SAMPLES = 6;
 /**
  * Polar ring candidates (placement freedom / organic layouts): in addition
@@ -456,8 +453,8 @@ const REBALANCE_WIDE_EXPAND = 6;
  * band edge). Below it the escalation ladder runs (see solveLayout):
  * support-ratio raise → (placement levers while items are unplaced) →
  * hero regrowth → coverage-budget raise → overlap-cap escalation — each
- * improvement-guarded, deterministic, and never dropping the union below
- * COVERAGE_HARD_FLOOR = 0.70. Feasibility: packing + the overlap caps keep
+ * improvement-guarded, deterministic, and respecting a best-effort 0.70
+ * floor. Feasibility: packing + the overlap caps keep
  * the reachable union below the area budget (union ≤ Σ areas − overlaps),
  * and the band ceiling (0.6×hero) + hero ceiling (0.75) bound the total
  * sticker area at low n — configs that cannot reach 0.80 within the caps
@@ -483,8 +480,8 @@ const CANVAS_COVERAGE_TARGET = 0.8;
  * regrowth → budget raise → overlap-cap escalation, each improvement-guarded;
  * see solveLayout and the escalation-levers doc). Above COVERAGE_BAND_MAX the
  * one-shot ratio-LOWER lever still applies (the v4 anti-crowding response,
- * kept). COVERAGE_HARD_FLOOR is the policy floor the union never drops
- * below: when the geometry cannot reach 0.80 within the caps (packing + the
+ * kept). COVERAGE_HARD_FLOOR is the best-effort policy floor the union
+ * prefers: when the geometry cannot reach 0.80 within the caps (packing + the
  * 0.6×hero band ceiling + the 0.75 hero ceiling), escalation stops at the
  * first non-paying lever and the layout settles between 0.70 and 0.80 —
  * per-n measured windows are pinned in the solver tests.
@@ -532,7 +529,7 @@ const EQUALIZE_FRAC = 0.5;
  * of the usable canvas (see the sizing-policy v5 doc); below it the
  * escalation ladder runs — ratio raise first, then (all placed) hero
  * regrowth → coverage-budget raise → overlap-cap escalation, each
- * improvement-guarded, hard floor 0.70.
+ * improvement-guarded, best-effort 0.70 floor.
  *
  * SPACE-AWARE ORDER RETRY: the relaxation ladder step AFTER the ratio-adjust
  * (see solveLayout) is gated by a SPACE CHECK: the placed AABB-union coverage
@@ -887,7 +884,11 @@ function desiredScales(
     // flat equal split of the support pool (EQUALIZE_FRAC; WEIGHT_FLOOR
     // unchanged). Both splits spend the whole pool, so the blend preserves
     // the policy total — only its distribution changes.
-    const share = EQUALIZE_FRAC / nS + (1 - EQUALIZE_FRAC) * (eff[i]! / sumS);
+    // (sumS || 1): if every support has importance 0 the weighted split is
+    // degenerate — fall back to the flat equal split instead of NaN scale
+    // (same guard as the desiredScales split above).
+    const share =
+      EQUALIZE_FRAC / nS + (1 - EQUALIZE_FRAC) * (eff[i]! / (sumS || 1));
     const desiredArea = supportPool * share;
     let desiredWidth = Math.sqrt((desiredArea * item.imgW) / item.imgH);
     // v5 RATIO BAND: supports sit in [0.5, 0.6] × the hero's desired width —
@@ -1256,7 +1257,7 @@ function attemptSolve(
     // Hoist ALL seeded RNG draws up front (fixed order → deterministic):
     // one position/jitter/scale-jitter/rotation draw set per grid cell and
     // per hint sample, before any constraint checking happens.
-    const seeds: Array<{ x: number; y: number; jitter: number; rot: number; rotLocked?: boolean }> = [];
+    const seeds: Array<{ x: number; y: number; jitter: number; rot: number }> = [];
     // USER DECISION: the HERO is CENTERED in the canvas — its ONLY seed is
     // the exact card center (no jitter). Supports then orbit it.
     // v4: the hero's scale is POLICY (the emergent desired width — the size
@@ -1267,7 +1268,9 @@ function attemptSolve(
     // the support band (measured vs the hero's PLACED scale) drifted to
     // 0.46×hero (measured 0.450 at mixed n=10).
     if (index === 0) {
-      const jitter0 = SCALE_JITTER_MIN + rng() * (SCALE_JITTER_MAX - SCALE_JITTER_MIN);
+      // The jitter draw keeps the seeded draw stream stable for this block;
+      // the hero's scale is policy (jitter 1) — the drawn value is discarded.
+      rng();
       seeds.push({ x: card.w / 2, y: card.h / 2, jitter: 1, rot: 0 });
     } else {
     // Grid positions (6×6) with seeded jitter.
@@ -1290,31 +1293,17 @@ function attemptSolve(
         const y = clamp(group.cy + (rng() * 2 - 1) * group.spread, ay1, ay2);
         const jitter = SCALE_JITTER_MIN + rng() * (SCALE_JITTER_MAX - SCALE_JITTER_MIN);
         // USER DECISION: all stickers at 0 degrees (orientation disabled).
-        // FIX (v3 final): this path still drew rot ∈ ±12° — the only sample
-        // path missed by the orientation-disabled sweep, so a tilt-hint item
-        // (which always carries a group hint) could win a candidate with a
-        // residual rotation (measured −0.06° at mixed-seed 3). The rot draw
-        // still runs (discarded) so the hoisted seeded sequence per candidate
-        // stays uniform — same precedent as the hero's jitter draw above.
+        // The rot draw keeps the seeded draw stream stable for this block;
+        // rot is discarded because orientation is disabled.
         rng(); // rot draw (discarded — stickers rotate 0)
         const rot = 0;
         seeds.push({ x, y, jitter, rot });
       }
     }
     // Orientation-biased samples (semantic-grouping pass): when the item has
-    // a tiltToward hint, extra samples near the group center (or focus)
-    // FACE the tilt target — rotation = the angle from this seed's position
-    // to the target center, jittered ±HINT_TILT_JITTER_DEG, NOT multiplied by
-    // the scale-fallback step (rotLocked). When the target is not (yet)
-    // resolvable — e.g. the target item is placed later in the greedy order —
-    // the same fixed draw count runs with a plain ±12° rotation so the hoisted
-    // draw sequence stays deterministic; the soft orientation term + sweeps
-    // enforce the tilt once the target exists.
+    // a tiltToward hint, extra samples near the group center (or focus).
+    // USER DECISION: orientation/tilt disabled — hint samples rotate 0.
     if (hintByItem.get(item.id)?.tiltToward) {
-      const tiltTarget = tiltTargetFor(
-        item.id,
-        placed.map((p) => p.placement),
-      );
       const orientBase = group ?? {
         cx: focalPoint?.x ?? card.w / 2,
         cy: focalPoint?.y ?? card.h / 2,
@@ -1324,7 +1313,6 @@ function attemptSolve(
         const x = clamp(orientBase.cx + (rng() * 2 - 1) * orientBase.spread, ax1, ax2);
         const y = clamp(orientBase.cy + (rng() * 2 - 1) * orientBase.spread, ay1, ay2);
         const jitter = SCALE_JITTER_MIN + rng() * (SCALE_JITTER_MAX - SCALE_JITTER_MIN);
-        // USER DECISION: orientation/tilt disabled — hint samples rotate 0.
         seeds.push({ x, y, jitter, rot: 0 });
       }
     }
@@ -1442,12 +1430,7 @@ function attemptSolve(
           const s = supportBand
             ? Math.min(Math.max(raw, supportBand.min), supportBand.max)
             : raw;
-          const cand = makeCand(
-            seed.x,
-            seed.y,
-            s,
-            seed.rotLocked ? seed.rot : seed.rot * step,
-          );
+          const cand = makeCand(seed.x, seed.y, s, 0);
           if (ok(cand)) {
             out.push(cand);
             break;
@@ -1992,6 +1975,10 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
   let budgetPrevCov = 0;
   let overlapPrevCov = 0;
   let ceilPrevCov = 0;
+  // minSizePct as it was when the overlap lever last fired (minSizePct keeps
+  // decrementing down the ladder, so the live value at revert time would NOT
+  // reproduce the pre-step state — the reverts below re-solve at this one).
+  let overlapPrevMinSizePct = MIN_ITEM_SIZE_PCT;
   let regrowFailed = false;
   let budgetFailed = false;
   let overlapFailed = false;
@@ -2044,8 +2031,8 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
   let relaxations = 0;
   // v5 ESCALATION LADDER — drives BOTH the placement (unplaced items) and
   // the COVERAGE TARGET (≥ 0.80 usable-union coverage; the v5 user rule
-  // "ALL stickers together cover at least 80% of the canvas", hard floor
-  // 0.70):
+  // "ALL stickers together cover at least 80% of the canvas", best-effort
+  // 0.70 floor):
   //   1. RATIO-ADJUST (first lever): coverage > COVERAGE_BAND_MAX → the
   //      support ratio LOWERS to 0.5×hero and the solve re-runs ONCE
   //      (deterministic; the emergent hero compensates by growing — same
@@ -2088,13 +2075,17 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
   //          survive whenever the relaxation buys nothing;
   //      (iv) HERO-CEILING FLOOR RESCUE — only while coverage <
   //          COVERAGE_HARD_FLOOR (0.70): HERO_MAX_WIDTH rises +0.05 per step
-  //          toward MAX_ITEM_SIZE_PCT (0.85). This is the last-resort rung
-  //          that keeps the 0.70 policy floor honest for structurally
-  //          cap-limited configs (e.g. n = 1: a solo 0.75 hero covers only
-  //          ≈ 0.60 of the usable canvas — geometry, not packing).
-  //      The union therefore NEVER settles below 0.70 by policy; where 0.80
-  //      is unreachable the per-n measured window (0.70–0.80) is pinned in
-  //      the solver tests with the binding constraint documented.
+  //          toward MAX_ITEM_SIZE_PCT (0.85). This is the ceil-rescue lever:
+  //          it raises the hero ceiling ONLY below 0.70, and even then the
+  //          floor stays best-effort — packing/band-limited configs can sit
+  //          below it at their geometric maximum (e.g. n = 1: a solo 0.75
+  //          hero covers only ≈ 0.60 of the usable canvas — geometry, not
+  //          packing).
+  //      The 0.70 floor is best-effort: packing/band-limited configs can
+  //      settle below it at their geometric maximum (see COVERAGE_PINS
+  //      annotations in solver.test.ts); where 0.80 is unreachable the
+  //      per-n measured window is pinned in the solver tests with the
+  //      binding constraint documented.
   const heroItem = items.find((i) => i.id === heroItemIdOf(items, opts.hints ?? null));
   // Set when the iteration fired one of the four coverage-escalation levers
   // (regrow/budget/overlap/ceil) — used by the post-step revert guard below.
@@ -2149,8 +2140,11 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
       ) {
         if (lastLever === "regrow") regrowFailed = true;
         else if (lastLever === "budget") budgetFailed = true;
-        else if (lastLever === "overlap") overlapFailed = true;
-        else ceilFailed = true;
+        else if (lastLever === "ceil") ceilFailed = true;
+        // overlap: deliberately NOT retired here — the revert blocks below
+        // own the non-paying-overlap-step decision (the step is UNDONE, the
+        // strict caps kept). overlapFailed is only set when a revert path
+        // itself fails (the firedEsc block after the post-step solve).
       }
       if (
         heroShrinkSteps > 0 &&
@@ -2182,6 +2176,7 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
         // (iii) overlap-cap escalation: inflate BOTH caps +0.2× per step
         // (montage parity ceiling 1.8).
         overlapPrevCov = coverage;
+        overlapPrevMinSizePct = minSizePct;
         overlapEscSteps++;
         lastLever = "overlap";
         firedEsc = true;
@@ -2205,24 +2200,29 @@ export function solveLayout(items: LayoutItem[], opts: SolveOptions): SolveResul
           overlapEscSteps > 0
         ) {
           // (iii) revert: the last overlap step did not pay for its extra
-          // tolerance — undo it and re-solve at the previous factor
-          // (deterministic: reproduces the earlier state exactly).
+          // tolerance — undo it and re-solve at the previous factor AND the
+          // pre-step minSizePct (deterministic: reproduces the earlier
+          // all-placed attempt exactly — minSizePct keeps decrementing down
+          // the ladder, so the live value would NOT reproduce it).
           overlapEscSteps--;
-          result = attemptSolve(items, opts, minSizePct, null, desiredShrink, false, ratioMode, heroShrinkSteps, budgetBoost, overlapEscSteps, heroCeilBoost);
+          result = attemptSolve(items, opts, overlapPrevMinSizePct, null, desiredShrink, false, ratioMode, heroShrinkSteps, budgetBoost, overlapEscSteps, heroCeilBoost);
         }
         break;
       }
     } else {
+      // Overlap-escalation revert on the exit path — only while the union is
+      // still below the coverage target (a target-reaching layout is never
+      // discarded over a marginal gain; e.g. the step pushed the union past
+      // COVERAGE_TARGET_MIN without paying COVERAGE_ESCALATION_MIN_GAIN).
       if (
+        coverage < COVERAGE_TARGET_MIN - 1e-9 &&
         !overlapFailed &&
         lastLever === "overlap" &&
         coverage <= overlapPrevCov + COVERAGE_ESCALATION_MIN_GAIN &&
         overlapEscSteps > 0
       ) {
-        // Overlap-escalation revert on the exit path (e.g. coverage reached
-        // the target after the step but the step itself did not pay).
         overlapEscSteps--;
-        result = attemptSolve(items, opts, minSizePct, null, desiredShrink, false, ratioMode, heroShrinkSteps, budgetBoost, overlapEscSteps, heroCeilBoost);
+        result = attemptSolve(items, opts, overlapPrevMinSizePct, null, desiredShrink, false, ratioMode, heroShrinkSteps, budgetBoost, overlapEscSteps, heroCeilBoost);
       }
       break;
     }

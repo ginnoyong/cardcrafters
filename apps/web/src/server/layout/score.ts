@@ -15,11 +15,20 @@
  *                "comfort distance" = 1.1 × sqrt(avg of the two AABB areas)
  *                are penalized proportionally to the shortfall.
  *  cover 0.15  — card coverage (fraction of a 24×24 sample grid inside any
- *                AABB) is penalized outside the target band. The band is
- *                derived from the solver's sizing policy: lower bound
- *                TOTAL_COVERAGE_TARGET − 10pp, upper bound
- *                SOLO_ITEM_COVERAGE + 10pp, so coverage-proportional layouts
- *                (solo ~65% target, multi-item ~50% target) score 0 here.
+ *                AABB, measured over the WHOLE card) is penalized outside
+ *                the band [0.40, 0.75] (derived from the solver's sizing
+ *                policy: lower bound TOTAL_COVERAGE_TARGET − 10pp, upper
+ *                bound SOLO_ITEM_COVERAGE + 10pp). NEUTRAL under v5's
+ *                usable-canvas coverage policy: the v5 escalation ladder
+ *                measures the placed union against the USABLE canvas (card
+ *                minus safe margins minus the text zone), not this whole-card
+ *                band — so a solver-optimal layout can score 0 here by
+ *                design. LATENT TENSION: when ctx.textZone is null the
+ *                usable canvas equals the whole card, so the v5 ladder's
+ *                budget-raise escalation (driving usable coverage toward
+ *                0.80) can push the whole-card measure past this band's
+ *                0.75 ceiling — the penalty then disagrees with the ladder's
+ *                intent until the text zone is supplied.
  *  hiera 0.15  — size hierarchy: Spearman-style rank correlation between
  *                visualWeight and display size; penalty = (1 − corr)/2, so
  *                heavy items being big scores 0 and inverted order scores ~1.
@@ -67,10 +76,14 @@ export interface ScoreContext {
 /** Coverage sampling grid resolution (per axis, over the card box). */
 const COVERAGE_GRID = 24;
 /**
- * Coverage band aligned with the solver's sizing policy: lower bound 10pp
- * under the multi-item total target, upper bound 10pp over the solo target.
- * A solo item at its ~65% target and a multi-item layout at ~50% both sit
- * inside the band (AABB-measured coverage ≈ the target area fraction).
+ * Coverage band aligned with the solver's sizing policy: [0.40, 0.75],
+ * measured over the WHOLE card. Lower bound 10pp under the multi-item total
+ * target, upper bound 10pp over the solo target. NEUTRAL under v5's
+ * usable-canvas coverage policy: the v5 ladder measures the placed union
+ * against the USABLE canvas, not this whole-card band. LATENT TENSION: with
+ * a null text zone the usable canvas equals the whole card, so the ladder's
+ * budget-raise escalation can drive the whole-card measure past the 0.75
+ * ceiling (the penalty then disagrees with the ladder's intent).
  */
 const COVERAGE_BAND_LO = TOTAL_COVERAGE_TARGET - 0.1;
 const COVERAGE_BAND_HI = SOLO_ITEM_COVERAGE + 0.1;
