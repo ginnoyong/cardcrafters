@@ -224,6 +224,14 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
       onEvent<Record<string, unknown>>(socket, "layout:updated", (payload) =>
         dispatch({ type: "layoutUpdated", payload }),
       ),
+      // Montage (poster) accumulator — the player's card surfaces the same
+      // status as the GM/presenter (generating indicator / finished poster).
+      onEvent<Record<string, unknown>>(socket, "montage:generating", (payload) =>
+        dispatch({ type: "montageGenerating", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "montage:updated", (payload) =>
+        dispatch({ type: "montageUpdated", payload }),
+      ),
       onEvent<Record<string, unknown>>(socket, "item:withdrawn", (payload) =>
         dispatch({ type: "itemWithdrawn", payload }),
       ),
@@ -516,6 +524,25 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
             onItemTap={handleHighlight}
             ariaLabel={`your team's card — ${team.items.filter((i) => i.status === "ready").length} stickers placed`}
           />
+
+          {/* Montage (poster) accumulator surface — mirrors gm/page.tsx: while
+              the poster pass is in flight show a small indicator next to the
+              composed card; when the poster lands (ready) show the image
+              (the composed card stays); fallback keeps the card unchanged. */}
+          {team.montageStatus === "generating" ? (
+            <p className="cc-montage-status" aria-live="polite">
+              Generating poster…
+            </p>
+          ) : team.montageStatus === "ready" && team.montageImageUrl ? (
+            <div className="cc-montage" aria-label={`poster for ${team.name}`}>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={team.montageImageUrl}
+                alt={`Finished poster for ${team.name}`}
+                className="cc-montage-img"
+              />
+            </div>
+          ) : null}
 
           <MySubmissions items={myItems} onHighlight={handleHighlight} />
 

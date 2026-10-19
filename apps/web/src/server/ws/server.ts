@@ -46,6 +46,7 @@ import {
 } from "../layout/engine";
 import { createCritiqueScheduler, type CritiqueEmit } from "../layout/critique";
 import { runMontagePass } from "../layout/montage";
+import { runMontageAccumulator } from "../flows/montage-accumulator";
 import {
   createPromptPipelineDeps,
   submitPrompt,
@@ -268,6 +269,9 @@ export async function buildSyncFull(
     // the presenter never receive the critique detail.
     const layoutForIdentity =
       layout && identity?.role !== "gm" ? { ...layout, critique: undefined } : layout;
+    // Montage (poster) state — persists with the snapshot so a reload restores
+    // READY (poster image URL), FALLBACK, or an in-flight GENERATING status.
+    const montage = await repo.getMontageState(team.id, round);
     teamSnapshots.push({
       id: team.id,
       name: team.name,
@@ -278,6 +282,14 @@ export async function buildSyncFull(
       items,
       layout: layoutForIdentity,
       greeting: { text: greeting?.text ?? "", status: greeting?.status ?? null },
+      montage: montage
+        ? {
+            status: montage.status.toLowerCase(),
+            ...(montage.status === "READY" && montage.imageUrl
+              ? { imageUrl: montage.imageUrl }
+              : {}),
+          }
+        : null,
     });
   }
 
@@ -461,6 +473,27 @@ export function registerSocketHandlers(
   const critiqueEmit: CritiqueEmit = (event, payload, ctx) => {
     io.to(gmRoom(ctx.gameId)).emit(event, { ...hub.stamp(ctx.gameId), teamId: ctx.teamId, ...payload });
   };
+  // Montage (poster) accumulator routing: `montage:generating` is a GM +
+  // presenter heads-up (players don't need the in-flight marker — their card
+  // just gains the poster later); `montage:updated` goes to EVERYONE — the
+  // team that owns the card, the presenter, and the GM (hub-stamped
+  // envelope, teamId added for GM/presenter routing like layoutEmit).
+  const montageEmit: LayoutEmit = (event, payload, ctx) => {
+    const enveloped = { ...hub.stamp(ctx.gameId), teamId: ctx.teamId, ...payload };
+    if (event === "montage:generating") {
+      for (const room of [presenterRoom(ctx.gameId), gmRoom(ctx.gameId)]) {
+        io.to(room).emit(event, enveloped);
+      }
+      return;
+    }
+    for (const room of [
+      teamRoom(ctx.gameId, ctx.teamId),
+      presenterRoom(ctx.gameId),
+      gmRoom(ctx.gameId),
+    ]) {
+      io.to(room).emit(event, enveloped);
+    }
+  };
   const critique = createCritiqueScheduler({
     repo,
     ai: ai ?? null,
@@ -494,6 +527,20 @@ export function registerSocketHandlers(
       await critique.settleAll(gameId);
       await runMontagePass(
         { repo, ai: ai ?? null, mockMode: ai ? ai.isMock() : true, emit: layoutEmit },
+        gameId,
+      );
+      // Poster accumulator (sibling pass): produces the full-bleed poster
+      // IMAGE per team (montage_prompt → montage_image → persisted PNG) and
+      // emits montage:generating / montage:updated. Unlike the layout-level
+      // pass it ALSO runs in mock mode (deterministic + $0), so demo games
+      // still get a poster. Fail-open: never breaks scoring.
+      await runMontageAccumulator(
+        {
+          repo,
+          ai: ai ?? null,
+          mockMode: ai ? ai.isMock() : true,
+          emit: montageEmit,
+        },
         gameId,
       );
     })().catch((err) => console.warn("montage pass failed", err));

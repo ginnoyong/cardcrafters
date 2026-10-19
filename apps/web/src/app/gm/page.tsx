@@ -73,6 +73,8 @@ interface TeamSetup {
   name: string;
   label: string;
   joinToken: string;
+  montageStatus?: "generating" | "ready" | "fallback" | null;
+  montageImageUrl?: string | null;
 }
 
 interface CreatedGame {
@@ -243,6 +245,24 @@ function TeamCard({
             Writing the first draft…
           </p>
         )}
+
+        {/* Montage (poster) accumulator surface: while the poster pass is in
+            flight show a small indicator next to the composed card; when the
+            poster lands (ready) swap in the image; fallback keeps the card. */}
+        {team.montageStatus === "generating" ? (
+          <p className="cc-montage-status" aria-live="polite">
+            Generating poster…
+          </p>
+        ) : team.montageStatus === "ready" && team.montageImageUrl ? (
+          <div className="cc-montage" aria-label={`poster for ${team.name}`}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={team.montageImageUrl}
+              alt={`Finished poster for ${team.name}`}
+              className="cc-montage-img"
+            />
+          </div>
+        ) : null}
 
         {/* Vision layout critique (GM-only quality intel): score badge
             (red below LAYOUT_CRITIQUE_LOW_SCORE or a failed focal check)
@@ -626,6 +646,16 @@ function Console({ game }: { game: CreatedGame }) {
       // per-team score/issues for the card badges.
       onEvent<Record<string, unknown>>(socket, "layout:critique", (payload) =>
         dispatch({ type: "critiqueReceived", payload }),
+      ),
+      // Montage (poster) accumulator — live status per team. The GM sees the
+      // composed card with a small "Generating poster…" indicator while the
+      // accumulator runs, then either the finished poster image (ready) or
+      // the composed card again (fallback).
+      onEvent<Record<string, unknown>>(socket, "montage:generating", (payload) =>
+        dispatch({ type: "montageGenerating", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "montage:updated", (payload) =>
+        dispatch({ type: "montageUpdated", payload }),
       ),
       // -------------------------------------------------------------------
       // Scoring-phase events. The GM's scoring:started carries the FULL

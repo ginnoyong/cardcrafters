@@ -53,7 +53,7 @@ export interface MontageAi {
     task: string,
     input: Record<string, unknown>,
     opts?: { gameId?: string },
-  ): Promise<{ data: unknown }>;
+  ): Promise<{ data: unknown; imageBase64?: string; imageMime?: string }>;
 }
 
 export interface MontageDeps {

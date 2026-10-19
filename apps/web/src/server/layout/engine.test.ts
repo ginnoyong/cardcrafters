@@ -47,7 +47,7 @@ const UNTIMED_CONFIG: CardConfig = {
 };
 
 interface RecordedEmit {
-  event: "layout:updated";
+  event: "layout:updated" | "montage:generating" | "montage:updated";
   payload: Record<string, unknown>;
   ctx: { gameId: string; teamId: string };
 }

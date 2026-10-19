@@ -52,9 +52,12 @@ export interface LayoutAi {
   ): Promise<{ data: unknown }>;
 }
 
-/** Server→client emitter wired by the ws layer (hub stamps the envelope). */
+/** Server→client emitter wired by the ws layer (hub stamps the envelope).
+ *  Carries the layout event AND the montage-accumulator events
+ *  (montage:generating / montage:updated) — the ws layer routes them to
+ *  different rooms (see montageEmit in ws/server.ts). */
 export type LayoutEmit = (
-  event: "layout:updated",
+  event: "layout:updated" | "montage:generating" | "montage:updated",
   payload: Record<string, unknown>,
   ctx: { gameId: string; teamId: string },
 ) => void;

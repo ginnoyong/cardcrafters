@@ -84,6 +84,8 @@ function TeamCard({
   phaseEndsAt,
   serverNow,
   greetingText,
+  montageStatus,
+  montageImageUrl,
 }: {
   name: string;
   label: string;
@@ -93,6 +95,8 @@ function TeamCard({
   phaseEndsAt: number | null;
   serverNow: number;
   greetingText?: string;
+  montageStatus?: "generating" | "ready" | "fallback" | null;
+  montageImageUrl?: string | null;
 }) {
   const [qr, setQr] = useState<string | null>(null);
   const remaining = useCountdown(phaseEndsAt, serverNow);
@@ -119,6 +123,23 @@ function TeamCard({
         {phaseLabel(phase)} · {memberCount}/{MAX_TEAM_MEMBERS} players
       </p>
       {greetingText ? <p className="cc-greeting">“{greetingText}”</p> : null}
+      {/* Montage (poster) accumulator surface — matches the GM's TeamCard:
+          generating → indicator; ready → poster image; fallback/absent →
+          unchanged composed card. */}
+      {montageStatus === "generating" ? (
+        <p className="cc-montage-status" aria-live="polite">
+          Generating poster…
+        </p>
+      ) : montageStatus === "ready" && montageImageUrl ? (
+        <div className="cc-montage" aria-label={`poster for ${name}`}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={montageImageUrl}
+            alt={`Finished poster for ${name}`}
+            className="cc-montage-img"
+          />
+        </div>
+      ) : null}
       {remaining !== null ? (
         <p className="cc-timer" aria-label="phase timer">
           ⏱ {fmt(remaining)}
@@ -184,6 +205,14 @@ function PresenterBoard({ code }: { code: string }) {
       ),
       onEvent<Record<string, unknown>>(socket, "layout:updated", (payload) =>
         dispatch({ type: "layoutUpdated", payload }),
+      ),
+      // Montage (poster) accumulator — the presenter screen shows the same
+      // per-team status as the GM (generating indicator / finished poster).
+      onEvent<Record<string, unknown>>(socket, "montage:generating", (payload) =>
+        dispatch({ type: "montageGenerating", payload }),
+      ),
+      onEvent<Record<string, unknown>>(socket, "montage:updated", (payload) =>
+        dispatch({ type: "montageUpdated", payload }),
       ),
       // NOTE: no item:rejected / item:failed listeners here — those events
       // are OWNER-ONLY (emitted directly to the submitting player's sockets)
@@ -299,6 +328,8 @@ function PresenterBoard({ code }: { code: string }) {
             phaseEndsAt={snapshot?.phaseEndsAt ?? null}
             serverNow={snapshot?.serverNow ?? Date.now()}
             greetingText={team.greeting?.text || undefined}
+            montageStatus={team.montageStatus}
+            montageImageUrl={team.montageImageUrl}
           />
         ))}
       </section>

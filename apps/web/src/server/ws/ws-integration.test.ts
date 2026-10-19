@@ -15,6 +15,7 @@ import { DEFAULT_CARD_CONFIG, MAX_PROMPT_WORDS } from "@cardcrafters/shared";
 
 import { createAiRouter, type AiRouter } from "../ai/router";
 import { DEFAULT_ITEMS_DIR } from "../flows/item-image";
+import { DEFAULT_MONTAGE_DIR } from "../flows/montage-accumulator";
 import { MOCK_CRITIQUE_VERDICT } from "../layout/critique";
 import { createServer, type CardCraftersServer } from "../../../server";
 import { MemoryRepo } from "../repo/memory-repo";
@@ -60,6 +61,9 @@ afterEach(async () => {
   await srv.close();
   for (const f of writtenFiles) await rm(f, { force: true });
   writtenFiles.length = 0;
+  // Montage posters persist under the real public dir (gameId subdir) —
+  // remove the whole game's montage tree so tests leave no artifacts.
+  if (gameId) await rm(path.join(DEFAULT_MONTAGE_DIR, gameId), { recursive: true, force: true });
 });
 function connect(auth: Record<string, unknown> = {}): Socket {
   return io(`http://127.0.0.1:${port}`, {
@@ -856,28 +860,80 @@ describe("scoring phase end-to-end", () => {
     expect(approve.ok).toBe(true);
     expect(approve.phase).toBe("BUILD");
 
+    // Seed one sized READY item each for teams A and B (owner = the joined
+    // player) so those teams take the accumulator's READY path at scoring
+    // entry; team C stays itemless → its pass must fail-open to FALLBACK.
+    const game = await repo.getGame(gameId);
+    for (const ack of [alexAck, samAck]) {
+      const item = await repo.createItem({
+        teamId: ack.identity.teamId,
+        playerId: ack.identity.playerId,
+        round: game!.round,
+        promptRaw: "seeded poster subject",
+        subject: "seeded subject",
+        status: "READY",
+      });
+      await repo.updateItem(item.id, { width: 512, height: 512, visualWeight: 1 });
+    }
+
     // Waiters registered BEFORE gm:stopBuild so nothing is missed.
     const alexStarted = waitFor<{ cards: Array<Record<string, unknown>>; yourTeamCardId?: string | null }>(alex, "scoring:started");
     const samStarted = waitFor<{ cards: Array<Record<string, unknown>>; yourTeamCardId?: string | null }>(sam, "scoring:started");
     const gmStarted = waitFor<{ cards: Array<{ cardId: string; label: string; teamId: string }> }>(gm, "scoring:started");
+    // Player-side montage payloads: each seeded team's own montage:updated
+    // (team-room broadcast) must arrive with the persisted poster URL.
+    const alexMontage = waitFor<{ teamId: string; status: string; imageUrl?: string | null }>(alex, "montage:updated");
+    const samMontage = waitFor<{ teamId: string; status: string; imageUrl?: string | null }>(sam, "montage:updated");
 
     // Event-order collectors on the gm socket (registered BEFORE gm:stopBuild):
     // montage:started (GM-only heads-up) must precede scoring:started, and —
-    // because the mock provider short-circuits the montage pass — there must be
-    // NO montage-sourced layout:updated re-emit. (No cheap non-mock fixture
-    // exists for this route; montage adoption is unit-covered in montage.test.ts.)
-    const gmEventLog: Array<{ event: string; source?: string }> = [];
+    // because the mock provider short-circuits the montage LAYOUT pass — there
+    // must be NO montage-sourced layout:updated re-emit — the accumulator's
+    // montage:generating / montage:updated DO fire (the mock router runs the
+    // poster pipeline end-to-end: deterministic + $0).
+    const gmEventLog: Array<{
+      event: string;
+      source?: string;
+      teamId?: string;
+      status?: string;
+      imageUrl?: string;
+    }> = [];
     const collect = (event: string): void => {
       gm.on(event, (payload: Record<string, unknown>) => {
         gmEventLog.push({
           event,
           source: typeof payload?.source === "string" ? payload.source : undefined,
+          teamId: typeof payload?.teamId === "string" ? payload.teamId : undefined,
+          status: typeof payload?.status === "string" ? payload.status : undefined,
+          imageUrl: typeof payload?.imageUrl === "string" ? payload.imageUrl : undefined,
         });
       });
     };
     collect("montage:started");
     collect("scoring:started");
     collect("layout:updated");
+    collect("montage:generating");
+    collect("montage:updated");
+    // The accumulator settles asynchronously (fire-and-forget inside the hub's
+    // preScoring hook): one montage:updated EMIT per team — 2 READY + 1
+    // FALLBACK. (The GM socket joins every team room, so each team-room emit
+    // is DELIVERED to the GM socket twice — dedupe by teamId when asserting.)
+    const allMontageUpdated = new Promise<void>((resolve, reject) => {
+      const t = setTimeout(
+        () => reject(new Error("timeout: montage:updated did not cover all 3 teams")),
+        10_000,
+      );
+      const check = (): void => {
+        const teams = new Set(
+          gmEventLog.filter((e) => e.event === "montage:updated").map((e) => e.teamId),
+        );
+        if (teams.size >= 3) {
+          clearTimeout(t);
+          resolve();
+        }
+      };
+      gm.on("montage:updated", check);
+    });
 
     const stop = await emitAck<{ ok: boolean; phase?: string }>(gm, "gm:stopBuild", {});
     expect(stop.ok).toBe(true);
@@ -907,16 +963,65 @@ describe("scoring phase end-to-end", () => {
       new Set((await repo.listTeams(gameId)).map((t) => t.id)),
     );
 
-    // Ordering + montage short-circuit: the montage:started heads-up landed
-    // strictly before scoring:started, and no montage-sourced layout:updated
-    // was emitted (mock short-circuit — see collector comment above).
+    // The 3 accumulator passes (2 seeded teams → READY, empty team C →
+    // FALLBACK) settle after scoring:started — await them, then assert.
+    await allMontageUpdated;
+
+    // Player-side payloads: each seeded team got its own READY montage with
+    // the persisted /static URL (the accumulator's team-room broadcast).
+    const alexMontagePayload = await alexMontage;
+    const samMontagePayload = await samMontage;
+    expect(alexMontagePayload.teamId).toBe(teamAId);
+    expect(samMontagePayload.teamId).toBe(teamBId);
+    for (const p of [alexMontagePayload, samMontagePayload]) {
+      expect(p.status).toBe("ready");
+      expect(p.imageUrl).toMatch(/^\/static\/montages\//);
+    }
+
+    // Ordering: montage:started (GM heads-up) < scoring:started < the
+    // accumulator's montage:generating < montage:updated — the hub emits the
+    // heads-up, awaits the (non-blocking) preScoring hook, then announces
+    // scoring; the accumulator fires after that within the same void async
+    // block. AND: no montage-sourced layout:updated was emitted (mock
+    // short-circuit for the layout pass — see collector comment above).
     const montageIdx = gmEventLog.findIndex((e) => e.event === "montage:started");
     const scoringIdx = gmEventLog.findIndex((e) => e.event === "scoring:started");
+    const generatingIdx = gmEventLog.findIndex((e) => e.event === "montage:generating");
+    const updatedIdx = gmEventLog.findIndex((e) => e.event === "montage:updated");
     expect(montageIdx).toBeGreaterThanOrEqual(0);
     expect(scoringIdx).toBeGreaterThan(montageIdx);
+    expect(generatingIdx).toBeGreaterThan(scoringIdx);
+    expect(updatedIdx).toBeGreaterThan(generatingIdx);
     expect(
       gmEventLog.filter((e) => e.event === "layout:updated" && e.source === "montage"),
     ).toHaveLength(0);
+
+    // Counts + routing (deduped by teamId — see collector note): 2
+    // montage:generating heads-ups for the two seeded teams; 3 montage:updated
+    // EMITS — 2 READY (A, B) + 1 fail-open FALLBACK for the itemless team C.
+    const teamCId = (await repo.listTeams(gameId)).find(
+      (t) => t.id !== teamAId && t.id !== teamBId,
+    )!.id;
+    const generatingTeams = new Set(
+      gmEventLog.filter((e) => e.event === "montage:generating").map((e) => e.teamId),
+    );
+    expect(generatingTeams).toEqual(new Set([teamAId, teamBId]));
+    const updated = gmEventLog.filter((e) => e.event === "montage:updated");
+    const statusByTeam = new Map<string, string>();
+    for (const u of updated) {
+      expect(u.teamId).toBeDefined();
+      // Every delivery for the same team carries the SAME status (the GM
+      // socket's duplicate deliveries come from one emit per team).
+      expect(statusByTeam.get(u.teamId!) ?? u.status).toBe(u.status);
+      statusByTeam.set(u.teamId!, u.status!);
+    }
+    expect(new Set(statusByTeam.keys())).toEqual(new Set([teamAId, teamBId, teamCId]));
+    expect(statusByTeam.get(teamAId)).toBe("ready");
+    expect(statusByTeam.get(teamBId)).toBe("ready");
+    expect(statusByTeam.get(teamCId)).toBe("fallback");
+    for (const u of updated.filter((e) => e.status === "ready")) {
+      expect(u.imageUrl).toMatch(/^\/static\/montages\//);
+    }
 
     const ownCardA = gmCopy.cards.find((c) => c.teamId === teamAId)!.cardId;
     const cardB = gmCopy.cards.find((c) => c.teamId === teamBId)!.cardId;

@@ -115,6 +115,15 @@ export interface ClientTeam {
    *  sync:full (survives reloads); the live `layout:critique` event updates
    *  it in between snapshots. */
   critique: ClientCritique | null;
+  /** Montage (poster) generation state for this team's current round.
+   *  null = no montage attempted yet; "generating" = poster in flight;
+   *  "ready" = poster image available (montageImageUrl);
+   *  "fallback" = generation failed, keep the composed card. */
+  montageStatus?: "generating" | "ready" | "fallback" | null;
+  /** Poster image URL when montageStatus is "ready". */
+  montageImageUrl?: string | null;
+  /** Raw sync:full montage section (read off during normalization). */
+  montage?: { status: string; imageUrl?: string } | null;
 }
 
 /** One vision critique verdict (see shared layoutCritiqueSchema). */
@@ -280,6 +289,14 @@ export type StoreAction =
   // {gameId, round, ts, seq, teamId, score, issues, focalOk}. Stores the
   // LATEST verdict per team (ClientTeam.critique).
   | { type: "critiqueReceived"; payload: Record<string, unknown> }
+  // Montage (poster) lifecycle — see montage-accumulator.ts on the server.
+  // `montage:generating` → montageStatus "generating" (composed card +
+  // "Generating poster…" indicator);
+  // `montage:updated` → status ready (render montageImageUrl) or fallback
+  // (keep the composed card). Payload is a hub-stamped envelope:
+  // {gameId, round, ts, seq, teamId, status, imageUrl?}.
+  | { type: "montageGenerating"; payload: Record<string, unknown> }
+  | { type: "montageUpdated"; payload: Record<string, unknown> }
   // Placeholder — no server event exists yet (gm:removeItem future work).
   | { type: "itemRemoved"; itemId: string }
   // Submit ack ok: register the new submission in the owner's ledger.
@@ -537,6 +554,10 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
               layout: null,
               activity: [],
               critique: null,
+              // The montage (poster) is per-round: a fresh round means the
+              // previous round's poster state/image must never leak in.
+              montageStatus: null,
+              montageImageUrl: null,
             }))
           : base.teams,
         // Round-scoped scoring state is cleared on a round BUMP exactly like
@@ -816,6 +837,49 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
         focalOk: p.focalOk === true,
       };
       return withTeam(base, p.teamId, (team) => ({ ...team, critique }));
+    }
+    // montage:generating — the montage accumulator started a poster render
+    // for this team. Payload is a hub-stamped envelope + {teamId, round}.
+    // Sets montageStatus "generating" (renders as the composed card + a
+    // small "Generating poster…" indicator); any imageUrl from a previous
+    // round-attempt is cleared.
+    case "montageGenerating": {
+      const base = roundGuard(state, action.payload);
+      if (!base) return state;
+      const p = action.payload as { teamId?: unknown };
+      if (typeof p.teamId !== "string") return state;
+      return withTeam(base, p.teamId, (team) => ({
+        ...team,
+        montageStatus: "generating",
+        montageImageUrl: null,
+      }));
+    }
+    // montage:updated — the accumulator finished (READY with imageUrl) or
+    // fell back (FALLBACK / GENERATING-without-image). Payload is a
+    // hub-stamped envelope + {teamId, status, imageUrl?}.
+    //   "ready"    → store the poster URL (render replaces the composed card);
+    //   "fallback" → clear any stale poster state, keep the composed card.
+    case "montageUpdated": {
+      const base = roundGuard(state, action.payload);
+      if (!base) return state;
+      const p = action.payload as { teamId?: unknown; status?: unknown; imageUrl?: unknown };
+      if (typeof p.teamId !== "string") return state;
+      if (p.status === "ready") {
+        if (typeof p.imageUrl !== "string" || p.imageUrl === "") return state;
+        return withTeam(base, p.teamId, (team) => ({
+          ...team,
+          montageStatus: "ready",
+          montageImageUrl: p.imageUrl as string,
+        }));
+      }
+      if (p.status === "fallback") {
+        return withTeam(base, p.teamId, (team) => ({
+          ...team,
+          montageStatus: "fallback",
+          montageImageUrl: null,
+        }));
+      }
+      return state;
     }
     // Placeholder — no server event (gm:removeItem) exists yet. Removes the
     // item AND its placement so the card re-flows on the next layout.
@@ -1136,6 +1200,24 @@ function normalizeSnapshot(
               source: typeof layoutRaw.source === "string" ? layoutRaw.source : "solver",
             }
           : null;
+      const montageRaw = t.montage ?? prevTeam?.montage;
+
+      let montageStatus: "generating" | "ready" | "fallback" | null = null;
+      let montageImageUrl: string | null = null;
+
+      if (typeof montageRaw === "object" && montageRaw !== null) {
+        const raw = montageRaw as Record<string, unknown>;
+        if (
+          raw.status === "generating" ||
+          raw.status === "ready" ||
+          raw.status === "fallback"
+        ) {
+          montageStatus = raw.status as "generating" | "ready" | "fallback";
+        }
+        if (raw.status === "ready" && typeof raw.imageUrl === "string") {
+          montageImageUrl = raw.imageUrl as string;
+        }
+      }
       return {
         id: String(t.id),
         name: String(t.name),
@@ -1164,6 +1246,8 @@ function normalizeSnapshot(
           t.layout === undefined
             ? prevTeam?.critique ?? null
             : parseCritique(layoutRaw?.critique),
+        montageStatus,
+        montageImageUrl,
       };
     }),
   };
