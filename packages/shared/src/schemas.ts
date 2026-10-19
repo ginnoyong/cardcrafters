@@ -213,6 +213,18 @@ export const layoutMontageSchema = layoutCompositionSchema
   .strict();
 export type LayoutMontage = z.infer<typeof layoutMontageSchema>;
 
+/**
+ * Step: montage prompt — ONE vivid poster image prompt for the team montage
+ * (final card). Describes a single cohesive full-bleed illustration
+ * incorporating every sticker subject, with space for the greeting text.
+ */
+export const montagePromptSchema = z
+  .object({
+    prompt: z.string().trim().min(1).max(800),
+  })
+  .strict();
+export type MontagePrompt = z.infer<typeof montagePromptSchema>;
+
 // ---------------------------------------------------------------------------
 // (b) WebSocket payloads — client → server (strict: reject unknown fields)
 // ---------------------------------------------------------------------------

@@ -52,7 +52,9 @@ const DEFAULT_IMAGE_CALL_ESTIMATE_USD = 0.1;
  * Reconciled against the actual cost (from usage) once the call completes.
  */
 function estimateCallCostUsd(task: string): number {
-  return task === "item_image" ? DEFAULT_IMAGE_CALL_ESTIMATE_USD : DEFAULT_CALL_ESTIMATE_USD;
+  return task === "item_image" || task === "montage_image"
+    ? DEFAULT_IMAGE_CALL_ESTIMATE_USD
+    : DEFAULT_CALL_ESTIMATE_USD;
 }
 
 export interface AiRouterOptions {

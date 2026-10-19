@@ -28,6 +28,7 @@ import {
   layoutCritiqueSchema,
   layoutMontageSchema,
   moderationSchema,
+  montagePromptSchema,
   promptValidationSchema,
   styleDerivationSchema,
 } from "@cardcrafters/shared";
@@ -46,6 +47,8 @@ export const TASK_NAMES = [
   "layout_composition",
   "layout_critique",
   "layout_montage",
+  "montage_prompt",
+  "montage_image",
 ] as const;
 
 export type AiTaskName = (typeof TASK_NAMES)[number];
@@ -125,6 +128,7 @@ export const TASK_SCHEMAS: Record<string, z.ZodTypeAny> = {
   layoutCompositionSchema,
   layoutCritiqueSchema,
   layoutMontageSchema,
+  montagePromptSchema,
 };
 
 /** Validate `data` against the schema named by cfg.structured (null = exempt). */

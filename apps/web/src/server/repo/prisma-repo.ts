@@ -42,6 +42,9 @@ import type {
   ItemRow,
   LayoutStatePatch,
   LayoutStateRow,
+  MontageInput,
+  MontagePatch,
+  MontageStateRow,
   PlayerPatch,
   PlayerRow,
   Repository,
@@ -621,6 +624,109 @@ export class PrismaRepo implements Repository {
       critique: (l.critique as LayoutCritique | null) ?? null,
       source: l.source,
       updatedAt: l.updatedAt.getTime(),
+    };
+  }
+
+  // -- Montage ---------------------------------------------------------------
+
+  async getMontageState(teamId: string, round: number): Promise<MontageStateRow | null> {
+    try {
+      const m = await this.prisma.montageState.findUnique({
+        where: { teamId_round: { teamId, round } },
+      });
+      return m ? this.mapMontage(m) : null;
+    } catch (e) {
+      throw wrap(e);
+    }
+  }
+
+  async upsertMontageState(
+    teamId: string,
+    round: number,
+    init: { input?: MontageInput; patch?: MontagePatch },
+  ): Promise<MontageStateRow> {
+    // Append + seq increment happen in one transaction so a concurrent input
+    // can never be lost (mirrors the atomic Map put in memory-repo).
+    try {
+      const m = await this.prisma.$transaction(async (tx) => {
+        const existing = await tx.montageState.findUnique({
+          where: { teamId_round: { teamId, round } },
+        });
+        const stagedInputs = ((existing?.stagedInputs as MontageInput[] | null) ?? []).slice();
+        const seq = (existing?.seq ?? 0) + (init.input ? 1 : 0);
+        if (init.input) stagedInputs.push({ ...init.input });
+        const data = {
+          seq,
+          stagedInputs: stagedInputs as unknown as Prisma.InputJsonValue[],
+          status: init.patch?.status,
+          promptText:
+            init.patch?.promptText === undefined ? undefined : init.patch.promptText,
+          imageUrl:
+            init.patch?.imageUrl === undefined ? undefined : init.patch.imageUrl,
+          imageSeq:
+            init.patch?.imageSeq === undefined ? undefined : init.patch.imageSeq,
+          fallbackUsed: init.patch?.fallbackUsed,
+        };
+        const row = await tx.montageState.upsert({
+          where: { teamId_round: { teamId, round } },
+          create: {
+            teamId,
+            round,
+            seq: data.seq,
+            stagedInputs: data.stagedInputs,
+            status: data.status ?? "STAGED",
+            promptText: data.promptText,
+            imageUrl: data.imageUrl,
+            imageSeq: data.imageSeq,
+            fallbackUsed: data.fallbackUsed ?? false,
+          },
+          update: data,
+        });
+        return row;
+      });
+      return this.mapMontage(m);
+    } catch (e) {
+      throw wrap(e);
+    }
+  }
+
+  async listMontageStates(gameId: string, round: number): Promise<MontageStateRow[]> {
+    try {
+      const rows = await this.prisma.montageState.findMany({
+        where: { team: { gameId }, round },
+        orderBy: { teamId: "asc" },
+      });
+      return rows.map((m) => this.mapMontage(m));
+    } catch (e) {
+      throw wrap(e);
+    }
+  }
+
+  private mapMontage(m: {
+    id: string;
+    teamId: string;
+    round: number;
+    seq: number;
+    stagedInputs: unknown;
+    status: string;
+    promptText: string | null;
+    imageUrl: string | null;
+    imageSeq: number | null;
+    fallbackUsed: boolean;
+    updatedAt: Date;
+  }): MontageStateRow {
+    return {
+      id: m.id,
+      teamId: m.teamId,
+      round: m.round,
+      seq: m.seq,
+      stagedInputs: (m.stagedInputs as MontageInput[] | null) ?? [],
+      status: m.status as MontageStateRow["status"],
+      promptText: m.promptText,
+      imageUrl: m.imageUrl,
+      imageSeq: m.imageSeq,
+      fallbackUsed: m.fallbackUsed,
+      updatedAt: m.updatedAt.getTime(),
     };
   }
 

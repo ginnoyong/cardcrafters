@@ -25,6 +25,7 @@ enum ItemStatus {
   FAILED
   REJECTED
   REMOVED
+  LEDGERED
 }
 
 enum CallStatus {
@@ -74,6 +75,7 @@ model Team {
   items          Item[]
   layouts        LayoutState[]
   greetings      Greeting[]
+  montages       MontageState[]
   scoresReceived Score[]       @relation("targetTeam")
   votesCast      Score[]       @relation("voterTeam")
   winnerPicks    WinnerPick[]
@@ -178,6 +180,24 @@ model WinnerPick {
   role   RoundRole
 
   @@unique([gameId, round, role])
+}
+
+model MontageState {
+  id           String   @id @default(cuid())
+  teamId       String
+  team         Team     @relation(fields: [teamId], references: [id])
+  round        Int
+  seq          Int      @default(0)
+  stagedInputs Json     @default("[]")  // [{itemId, promptRaw, subject, playerId, nickname, seq}]
+  status       String   @default("STAGED") // STAGED|PROMPTED|GENERATING|READY|FALLBACK
+  promptText   String?
+  imageUrl     String?
+  imageSeq     Int?
+  fallbackUsed Boolean  @default(false)
+  updatedAt    DateTime @default(now())
+
+  @@unique([teamId, round])
+  @@index([teamId])
 }
 
 model AiCall {

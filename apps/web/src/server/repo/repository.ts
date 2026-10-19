@@ -129,6 +129,32 @@ export interface WinnerPickRow {
   role: RoundRole;
 }
 
+export type MontageStatus = "STAGED" | "PROMPTED" | "GENERATING" | "READY" | "FALLBACK";
+
+/** One staged player sticker input in a team's montage ({@link MontageStateRow}). */
+export interface MontageInput {
+  itemId: string;
+  promptRaw: string;
+  subject: string;
+  playerId: string;
+  nickname: string;
+  seq: number;
+}
+
+export interface MontageStateRow {
+  id: string;
+  teamId: string;
+  round: number;
+  seq: number;
+  stagedInputs: MontageInput[];
+  status: MontageStatus;
+  promptText: string | null;
+  imageUrl: string | null;
+  imageSeq: number | null;
+  fallbackUsed: boolean;
+  updatedAt: number;
+}
+
 export interface AiCallRow {
   id: string;
   gameId: string | null;
@@ -220,6 +246,14 @@ export interface LayoutStatePatch {
   /** Persist the critique verdict without touching placements. */
   critique?: LayoutCritique | null;
   source: string;
+}
+
+export interface MontagePatch {
+  status?: MontageStatus;
+  promptText?: string | null;
+  imageUrl?: string | null;
+  imageSeq?: number | null;
+  fallbackUsed?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +404,23 @@ export interface Repository {
   upsertLayoutState(teamId: string, round: number, patch: LayoutStatePatch): Promise<LayoutStateRow>;
   /** Current layout for a team+round, or null. */
   getLayoutState(teamId: string, round: number): Promise<LayoutStateRow | null>;
+
+  // -- Montage ---------------------------------------------------------------
+
+  /** Current montage state for a team+round, or null. */
+  getMontageState(teamId: string, round: number): Promise<MontageStateRow | null>;
+  /**
+   * Create-if-missing / patch the montage row keyed by teamId+round.
+   * When `init.input` is given, the input is atomically appended to
+   * stagedInputs and `seq` is incremented in the same operation.
+   */
+  upsertMontageState(
+    teamId: string,
+    round: number,
+    init: { input?: MontageInput; patch?: MontagePatch },
+  ): Promise<MontageStateRow>;
+  /** All montage rows of a game in a round (join through teams). */
+  listMontageStates(gameId: string, round: number): Promise<MontageStateRow[]>;
 
   // -- Scores ----------------------------------------------------------------
 

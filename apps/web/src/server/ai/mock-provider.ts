@@ -23,6 +23,7 @@ import {
   layoutCompositionSchema,
   layoutMontageSchema,
   moderationSchema,
+  montagePromptSchema,
   promptValidationSchema,
   styleDerivationSchema,
 } from "@cardcrafters/shared";
@@ -118,6 +119,12 @@ export class MockProvider implements AiProvider {
       const img = mockImageResult(input);
       return { ...img, model, latencyMs: img.latencyMs + latencyMs };
     }
+    if (task === "montage_image") {
+      // Binary output (like item_image): the procedural 800×1120 poster is
+      // returned as the full AiCallResult, not a { data } payload.
+      const img = mockMontageImageResult(input);
+      return { ...img, model, latencyMs: img.latencyMs + latencyMs };
+    }
     const data = this.compute(task, input);
     return { data, model, latencyMs };
   }
@@ -156,6 +163,12 @@ export class MockProvider implements AiProvider {
         // "character_montage", relaxOverlap false) — never a network call.
         data = mockLayoutMontage(input);
         break;
+      case "montage_prompt":
+        // Deterministic canned poster prompt: hash-seeded flavor words +
+        // theme + greeting + subjects joined. Validated against
+        // montagePromptSchema below (same belt-and-braces as other tasks).
+        data = mockMontagePrompt(input);
+        break;
       case "item_image":
         // Handled in run() (binary output path); unreachable here.
         throw new AiTaskError({
@@ -163,6 +176,14 @@ export class MockProvider implements AiProvider {
           model: `mock/${task}`,
           retryable: false,
           message: "item_image is handled by the binary path in run()",
+        });
+      case "montage_image":
+        // Handled in run() (binary output path); unreachable here.
+        throw new AiTaskError({
+          task,
+          model: `mock/${task}`,
+          retryable: false,
+          message: "montage_image is handled by the binary path in run()",
         });
       default: {
         const never: never = task;
@@ -181,6 +202,7 @@ export class MockProvider implements AiProvider {
       style_derivation: styleDerivationSchema,
       layout_composition: layoutCompositionSchema,
       layout_montage: layoutMontageSchema,
+      montage_prompt: montagePromptSchema,
     };
     const schema = schemaFor[task];
     if (schema) {
@@ -993,6 +1015,206 @@ function mockLayoutMontage(input: Record<string, unknown>): unknown {
     strategy: "character_montage",
     relaxOverlap: false,
   });
+}
+
+// ---------------------------------------------------------------------------
+// montage_prompt — deterministic canned poster prompt (zero network)
+// ---------------------------------------------------------------------------
+
+/** Flavor adjectives for the canned montage prompt; picked by an
+ *  avalanche-hashed seed so near-identical inputs still diverge (the same
+ *  reasoning as stickerSeed — plain djb2 low bits cluster for similar
+ *  strings). */
+const MONTAGE_FLAVOR_ADJECTIVES: readonly string[] = [
+  "Vibrant",
+  "Whimsical",
+  "Radiant",
+  "Playful",
+  "Bold",
+  "Dreamy",
+  "Festive",
+  "Cheerful",
+];
+
+/**
+ * Canned deterministic montage prompt: avalanche-hash-seeded flavor adjective
+ * + theme + greeting text + subjects joined, phrased as ONE vivid poster
+ * image prompt (single cohesive full-bleed illustration, space reserved for
+ * the greeting text, family-friendly). Validated against montagePromptSchema
+ * by compute()'s schema table — the same belt-and-braces as other tasks.
+ */
+function mockMontagePrompt(input: Record<string, unknown>): unknown {
+  const theme = String(input.theme ?? "").trim() || "a happy occasion";
+  const greeting = String(input.greeting ?? "").trim();
+  const subjectsRaw = Array.isArray(input.subjects) ? input.subjects : [];
+  const subjects = subjectsRaw
+    .map((s) => String(s).trim())
+    .filter((s) => s.length > 0);
+
+  // Avalanche the combined seed so similar inputs pick different flavors.
+  let h = hashString(`${theme}:${greeting}:${subjects.join("|")}`);
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35);
+  h ^= h >>> 16;
+  const seed = h >>> 0;
+  const flavor = MONTAGE_FLAVOR_ADJECTIVES[seed % MONTAGE_FLAVOR_ADJECTIVES.length]!;
+
+  const subjectList =
+    subjects.length > 0 ? subjects.join(", ") : "a charming ensemble of themed icons";
+  const greetingNote = greeting
+    ? ` Leave generous clean space across the lower third for the greeting text "${greeting}".`
+    : " Leave generous clean space across the lower third for the greeting text.";
+
+  const prompt =
+    `${flavor} full-bleed movie-poster illustration for a ${theme} greeting card: ` +
+    `a single cohesive composition featuring ${subjectList}, arranged as an ensemble ` +
+    `cast with one clear focal hero. Bright flat vector sticker style, crisp white ` +
+    `outlines, joyful lighting.${greetingNote} Family-friendly; no text rendered in the artwork.`;
+
+  // montagePromptSchema caps at 800 chars — hard-truncate defensively so a
+  // very long subject list can never make the mock itself schema-invalid.
+  return montagePromptSchema.parse({ prompt: prompt.slice(0, 800) });
+}
+
+// ---------------------------------------------------------------------------
+// montage_image — procedural 800×1120 poster via @napi-rs/canvas
+// ---------------------------------------------------------------------------
+
+export const MONTAGE_IMAGE_WIDTH = 800;
+export const MONTAGE_IMAGE_HEIGHT = 1120;
+export const MONTAGE_IMAGE_MIME = "image/png";
+
+/**
+ * Draw one of the mock sticker shapes centered at (cx, cy) with visual size
+ * `size`, by reusing the shared SHAPES pool (each drawer paints into a
+ * centered MOCK_IMAGE_SIZE box) with translate+scale. Zero network.
+ */
+function drawStickerShapeAt(
+  ctx: SKRSContext2D,
+  shape: (typeof SHAPES)[number],
+  cx: number,
+  cy: number,
+  size: number,
+  hue: number,
+): void {
+  const scale = size / MOCK_IMAGE_SIZE;
+  ctx.save();
+  ctx.translate(cx - (MOCK_IMAGE_SIZE / 2) * scale, cy - (MOCK_IMAGE_SIZE / 2) * scale);
+  ctx.scale(scale, scale);
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.lineWidth = 10;
+  ctx.strokeStyle = "#ffffff";
+  ctx.fillStyle = `hsl(${hue}, 72%, 58%)`;
+  ctx.shadowColor = `hsla(${hue}, 60%, 30%, 0.35)`;
+  ctx.shadowBlur = 6;
+  ctx.shadowOffsetY = 4;
+  shape.draw(ctx);
+  ctx.restore();
+}
+
+/** Greedy word-wrap into lines no wider than maxWidth. */
+function wrapText(ctx: SKRSContext2D, text: string, maxWidth: number): string[] {
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let line = "";
+  for (const w of words) {
+    const candidate = line ? `${line} ${w}` : w;
+    if (!line || ctx.measureText(candidate).width <= maxWidth) {
+      line = candidate;
+    } else {
+      lines.push(line);
+      line = w;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+/**
+ * Procedural 800×1120 (2:2.8 portrait) poster: theme-hash gradient
+ * background, seeded simple shapes (the shared sticker pool) arranged as an
+ * ensemble cast in the upper two thirds, and the greeting text baked into the
+ * lower third. Fully deterministic per input, zero network.
+ */
+function mockMontageImageResult(input: Record<string, unknown>): AiCallResult {
+  const theme = String(input.theme ?? "").trim() || "celebration";
+  const greeting = String(input.greeting ?? "").trim();
+  const subjectsRaw = Array.isArray(input.subjects) ? input.subjects : [];
+  const subjects = subjectsRaw
+    .map((s) => String(s).trim())
+    .filter((s) => s.length > 0);
+
+  const canvas = createCanvas(MONTAGE_IMAGE_WIDTH, MONTAGE_IMAGE_HEIGHT);
+  const ctx = canvas.getContext("2d");
+
+  // -- background: theme-hash gradient -------------------------------------
+  const th = hashString(theme);
+  const hue = th % 360;
+  const grad = ctx.createLinearGradient(0, 0, 0, MONTAGE_IMAGE_HEIGHT);
+  grad.addColorStop(0, hslToHex(hue, 70, 84));
+  grad.addColorStop(1, hslToHex((hue + 40) % 360, 65, 56));
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, MONTAGE_IMAGE_WIDTH, MONTAGE_IMAGE_HEIGHT);
+
+  // -- ensemble cast: one seeded sticker shape per subject ------------------
+  // Upper two thirds is the artwork stage; the lower third stays open for the
+  // greeting text (the poster rubric).
+  const stageH = MONTAGE_IMAGE_HEIGHT * (2 / 3);
+  const cast = subjects.length > 0 ? subjects : [theme];
+  const n = cast.length;
+  cast.forEach((subject, i) => {
+    const seed = stickerSeed(subject);
+    const shape = SHAPES[seed % SHAPES.length]!;
+    const shue = seed % 360;
+    const cellW = MONTAGE_IMAGE_WIDTH / n;
+    // Stagger rows deterministically (two loose rows read as a cast lineup).
+    const cy = stageH * (0.36 + ((seed >>> 8) % 2) * 0.24);
+    const cx = cellW * i + cellW / 2;
+    const size = Math.min(cellW * 0.62, stageH * 0.42);
+    drawStickerShapeAt(ctx, shape, cx, cy, size, shue);
+  });
+
+  // -- greeting text, baked into the lower third ---------------------------
+  const text = greeting || theme;
+  const bandY = MONTAGE_IMAGE_HEIGHT - stageH; // top of the lower third
+  const bandH = stageH;
+  ctx.fillStyle = "rgba(255, 255, 255, 0.82)";
+  ctx.fillRect(0, bandY, MONTAGE_IMAGE_WIDTH, bandH);
+  ctx.fillStyle = "#1f2937";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  // Shrink the font until the wrapped text fits the band.
+  let fontSize = 56;
+  let lines: string[] = [];
+  for (;;) {
+    ctx.font = `bold ${fontSize}px sans-serif`;
+    lines = wrapText(ctx, text, MONTAGE_IMAGE_WIDTH - 80);
+    if (lines.length * fontSize * 1.25 <= bandH - 40 || fontSize <= 18) break;
+    fontSize -= 4;
+  }
+  const lineH = fontSize * 1.25;
+  const startY = bandY + bandH / 2 - ((lines.length - 1) * lineH) / 2;
+  lines.forEach((line, i) => {
+    ctx.fillText(line, MONTAGE_IMAGE_WIDTH / 2, startY + i * lineH);
+  });
+
+  return {
+    data: {
+      width: MONTAGE_IMAGE_WIDTH,
+      height: MONTAGE_IMAGE_HEIGHT,
+      subjects: cast,
+      greetingUsed: Boolean(greeting),
+    },
+    model: "mock/montage_image",
+    latencyMs: 0,
+    imageBase64: canvas.toBuffer("image/png").toString("base64"),
+    imageMime: MONTAGE_IMAGE_MIME,
+    imageWidth: MONTAGE_IMAGE_WIDTH,
+    imageHeight: MONTAGE_IMAGE_HEIGHT,
+  };
 }
 
 // ---------------------------------------------------------------------------

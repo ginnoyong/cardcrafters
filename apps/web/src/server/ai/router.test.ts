@@ -102,6 +102,16 @@ describe("AiRouter — mock mode", () => {
       layout_composition: { items: [{ id: "a" }, { id: "b" }] },
       layout_critique: {},
       layout_montage: { items: [{ id: "a" }, { id: "b" }] },
+      montage_prompt: {
+        theme: "birthday",
+        greeting: "Happy Birthday!",
+        subjects: ["a red balloon", "a gift box"],
+      },
+      montage_image: {
+        theme: "birthday",
+        greeting: "Happy Birthday!",
+        subjects: ["a red balloon", "a gift box"],
+      },
     };
     for (const task of TASK_NAMES) {
       const res = await router.run(task, inputs[task], { gameId });

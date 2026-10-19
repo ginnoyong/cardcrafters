@@ -42,8 +42,11 @@ export class PromptTemplates {
    *  extra .md files in the directory (catches renames/typos at startup). */
   async load(): Promise<void> {
     const entries = (await readdir(this.dir)).filter((f) => f.endsWith(".md")).sort();
-    // item_image is a binary image-generation task — it has no text template.
-    const TEMPLATE_TASKS = TASK_NAMES.filter((t) => t !== "item_image");
+    // item_image and montage_image are binary image-generation tasks — they
+    // have no text template.
+    const TEMPLATE_TASKS = TASK_NAMES.filter(
+      (t) => t !== "item_image" && t !== "montage_image",
+    );
     const expected = TEMPLATE_TASKS.map((t) => `${t}.md`);
     for (const task of TEMPLATE_TASKS) {
       const file = `${task}.md`;

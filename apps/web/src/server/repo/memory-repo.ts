@@ -31,6 +31,9 @@ import type {
   ItemRow,
   LayoutStatePatch,
   LayoutStateRow,
+  MontageInput,
+  MontagePatch,
+  MontageStateRow,
   PlayerPatch,
   PlayerRow,
   Repository,
@@ -70,6 +73,7 @@ export class MemoryRepo implements Repository {
   private greetings = new Map<string, GreetingRow>();
   private items = new Map<string, ItemRow>();
   private layouts = new Map<string, LayoutStateRow>(); // key `${teamId}:${round}`
+  private montages = new Map<string, MontageStateRow>(); // key `${teamId}:${round}`
   private scores = new Map<string, ScoreRow>(); // key `${round}:${voterPlayerId}:${targetTeamId}`
   private winnerPicks = new Map<string, WinnerPickRow>(); // key `${gameId}:${round}:${role}`
   private aiCalls = new Map<string, AiCallRow>();
@@ -412,6 +416,54 @@ export class MemoryRepo implements Repository {
   async getLayoutState(teamId: string, round: number): Promise<LayoutStateRow | null> {
     const row = this.layouts.get(this.layoutKey(teamId, round));
     return row ? { ...row, placements: [...row.placements] } : null;
+  }
+
+  // -- Montage ---------------------------------------------------------------
+
+  async getMontageState(teamId: string, round: number): Promise<MontageStateRow | null> {
+    const row = this.montages.get(this.layoutKey(teamId, round));
+    return row ? { ...row, stagedInputs: [...row.stagedInputs] } : null;
+  }
+
+  async upsertMontageState(
+    teamId: string,
+    round: number,
+    init: { input?: MontageInput; patch?: MontagePatch },
+  ): Promise<MontageStateRow> {
+    this.assertTeam(teamId);
+    const key = this.layoutKey(teamId, round);
+    const existing = this.montages.get(key);
+    const stagedInputs = [...(existing?.stagedInputs ?? [])];
+    let seq = existing?.seq ?? 0;
+    if (init.input) {
+      stagedInputs.push({ ...init.input });
+      seq += 1;
+    }
+    const next: MontageStateRow = {
+      id: existing?.id ?? randomUUID(),
+      teamId,
+      round,
+      seq,
+      stagedInputs,
+      status: init.patch?.status ?? existing?.status ?? "STAGED",
+      promptText: init.patch?.promptText !== undefined ? init.patch.promptText : (existing?.promptText ?? null),
+      imageUrl: init.patch?.imageUrl !== undefined ? init.patch.imageUrl : (existing?.imageUrl ?? null),
+      imageSeq: init.patch?.imageSeq !== undefined ? init.patch.imageSeq : (existing?.imageSeq ?? null),
+      fallbackUsed: init.patch?.fallbackUsed ?? existing?.fallbackUsed ?? false,
+      updatedAt: this.now(),
+    };
+    this.montages.set(key, next);
+    return { ...next, stagedInputs: [...next.stagedInputs] };
+  }
+
+  async listMontageStates(gameId: string, round: number): Promise<MontageStateRow[]> {
+    const teamIds = new Set(
+      [...this.teams.values()].filter((t) => t.gameId === gameId).map((t) => t.id),
+    );
+    return [...this.montages.values()]
+      .filter((m) => teamIds.has(m.teamId) && m.round === round)
+      .sort((a, b) => a.teamId.localeCompare(b.teamId))
+      .map((m) => ({ ...m, stagedInputs: [...m.stagedInputs] }));
   }
 
   // -- Scores ----------------------------------------------------------------
