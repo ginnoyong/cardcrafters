@@ -75,6 +75,8 @@ interface TeamSetup {
   joinToken: string;
   montageStatus?: "generating" | "ready" | "fallback" | null;
   montageImageUrl?: string | null;
+  /** The EXACT image-model prompt the accumulator sent (GM-only intel). */
+  montagePromptText?: string | null;
 }
 
 interface CreatedGame {
@@ -166,6 +168,8 @@ function TeamCard({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [regenBusy, setRegenBusy] = useState(false);
+  // Prompt transparency accordion: collapsed by default, per-card.
+  const [showPrompt, setShowPrompt] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [qr, setQr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -262,6 +266,30 @@ function TeamCard({
               className="cc-montage-img"
             />
           </div>
+        ) : null}
+
+        {/* Prompt transparency: the EXACT image-model prompt the accumulator
+            sent for this team's poster, collapsible so it doesn't crowd the
+            card. Visible whenever a prompt is known — regardless of montage
+            status (including fallback, where the prompt explains what was
+            attempted). */}
+        {team.montagePromptText ? (
+          <>
+            <button
+              type="button"
+              className="cc-btn cc-btn-small"
+              aria-expanded={showPrompt}
+              aria-controls={`montage-prompt-${team.id}`}
+              onClick={() => setShowPrompt((v) => !v)}
+            >
+              {showPrompt ? "Hide prompt" : "View prompt"}
+            </button>
+            {showPrompt ? (
+              <pre id={`montage-prompt-${team.id}`} className="cc-prompt-view">
+                {team.montagePromptText}
+              </pre>
+            ) : null}
+          </>
         ) : null}
 
         {/* Vision layout critique (GM-only quality intel): score badge
@@ -697,6 +725,11 @@ function Console({ game }: { game: CreatedGame }) {
       greetingText: live?.greeting.text ?? "",
       members: live?.members ?? [],
       critique: live?.critique ?? null,
+      // Montage (poster) state is live-only — the REST game summary never
+      // carries it, so the snapshot is the sole source once connected.
+      montageStatus: live?.montageStatus ?? t.montageStatus ?? null,
+      montageImageUrl: live?.montageImageUrl ?? t.montageImageUrl ?? null,
+      montagePromptText: live?.montagePromptText ?? t.montagePromptText ?? null,
     };
   });
   const pendingTeams = teams.filter((t) => t.greetingText.trim().length === 0);

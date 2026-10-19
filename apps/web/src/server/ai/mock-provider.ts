@@ -1070,8 +1070,8 @@ function mockMontagePrompt(input: Record<string, unknown>): unknown {
   const prompt =
     `${flavor} full-bleed movie-poster illustration for a ${theme} greeting card: ` +
     `a single cohesive composition featuring ${subjectList}, arranged as an ensemble ` +
-    `cast with one clear focal hero. Bright flat vector sticker style, crisp white ` +
-    `outlines, joyful lighting.${greetingNote} Family-friendly; no text rendered in the artwork.`;
+    `cast with one clear focal hero. Bold cinematic poster style, rich painterly ` +
+    `shading, joyful lighting.${greetingNote} Family-friendly; no text rendered in the artwork.`;
 
   // montagePromptSchema caps at 800 chars — hard-truncate defensively so a
   // very long subject list can never make the mock itself schema-invalid.
@@ -1134,10 +1134,14 @@ function wrapText(ctx: SKRSContext2D, text: string, maxWidth: number): string[] 
 }
 
 /**
- * Procedural 800×1120 (2:2.8 portrait) poster: theme-hash gradient
- * background, seeded simple shapes (the shared sticker pool) arranged as an
- * ensemble cast in the upper two thirds, and the greeting text baked into the
- * lower third. Fully deterministic per input, zero network.
+ * Procedural 800×1120 (2:2.8 portrait) poster: ONE cohesive composition —
+ * theme-hash gradient background, a single dominant central hero shape (the
+ * first subject) with the remaining subjects as satellites orbiting it at
+ * decaying scales, every shape inside the SAME theme-hash hue family, and the
+ * greeting text baked into the lower third. Deliberately NOT a per-subject
+ * column lineup: the mock must model the hardened montage_prompt's "one shared
+ * scene with one focal hero" rubric. Fully deterministic per input, zero
+ * network.
  */
 function mockMontageImageResult(input: Record<string, unknown>): AiCallResult {
   const theme = String(input.theme ?? "").trim() || "celebration";
@@ -1159,22 +1163,59 @@ function mockMontageImageResult(input: Record<string, unknown>): AiCallResult {
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, MONTAGE_IMAGE_WIDTH, MONTAGE_IMAGE_HEIGHT);
 
-  // -- ensemble cast: one seeded sticker shape per subject ------------------
+  // -- ONE hero + satellite ring (cohesive composition) --------------------
   // Upper two thirds is the artwork stage; the lower third stays open for the
-  // greeting text (the poster rubric).
+  // greeting text (the poster rubric). The first subject is the HERO: largest
+  // shape, dead center. Satellites orbit it at varying (decaying) scales —
+  // importance-weighted when the caller supplies per-subject weights — and
+  // every hue stays in the hero's ±24° family so the cast reads as one scene.
   const stageH = MONTAGE_IMAGE_HEIGHT * (2 / 3);
   const cast = subjects.length > 0 ? subjects : [theme];
-  const n = cast.length;
-  cast.forEach((subject, i) => {
+  const [hero, ...satellites] = cast;
+  const heroSeed = stickerSeed(hero);
+  const heroShape = SHAPES[heroSeed % SHAPES.length]!;
+  const heroHue = th % 360;
+  const heroSize = Math.min(MONTAGE_IMAGE_WIDTH * 0.38, stageH * 0.5);
+  const heroCx = MONTAGE_IMAGE_WIDTH / 2;
+  const heroCy = stageH * 0.54;
+  drawStickerShapeAt(ctx, heroShape, heroCx, heroCy, heroSize, heroHue);
+
+  // Importance weights (optional — the accumulator doesn't send them today;
+  // when present, satellite scale follows relative weight instead of rank).
+  const weightsRaw = Array.isArray(input.weights) ? input.weights : [];
+  const satWeights = satellites.map((_, i) => Math.max(Number(weightsRaw[i]) || 0, 0));
+  const maxWeight = Math.max(...satWeights, 0);
+
+  satellites.forEach((subject, i) => {
     const seed = stickerSeed(subject);
     const shape = SHAPES[seed % SHAPES.length]!;
-    const shue = seed % 360;
-    const cellW = MONTAGE_IMAGE_WIDTH / n;
-    // Stagger rows deterministically (two loose rows read as a cast lineup).
-    const cy = stageH * (0.36 + ((seed >>> 8) % 2) * 0.24);
-    const cx = cellW * i + cellW / 2;
-    const size = Math.min(cellW * 0.62, stageH * 0.42);
-    drawStickerShapeAt(ctx, shape, cx, cy, size, shue);
+    // Shared palette: jitter the hero hue by at most ±24° (seeded, stable).
+    const satHue = (heroHue + 24 + ((seed >>> 6) % 48) - 24 + 360) % 360;
+    // Varying scales: deterministic decay 0.52 → 0.40 → 0.46 → 0.34 (rank
+    // order), or the subject's relative weight when weights are supplied.
+    const scale =
+      maxWeight > 0
+        ? 0.32 + 0.28 * (satWeights[i]! / maxWeight)
+        : [0.52, 0.4, 0.46, 0.34][(i + (seed >>> 3)) % 4]!;
+    const satSize = heroSize * scale;
+    // Deterministic ring placement: even base spacing + seeded angle jitter.
+    const angle =
+      -Math.PI / 2 +
+      (i / Math.max(satellites.length, 1)) * Math.PI * 2 +
+      (((seed >>> 9) % 30) - 15) * (Math.PI / 180);
+    // Elliptical orbit (wider than tall) keeps satellites on the wide stage.
+    const rx = heroSize * 0.6 + satSize * 0.6;
+    const ry = heroSize * 0.42 + satSize * 0.5;
+    const cx = heroCx + Math.cos(angle) * rx * 1.1;
+    const cy = heroCy + Math.sin(angle) * ry;
+    // Clamp into the stage: never cross the frame edge nor dip into the
+    // lower-third greeting band.
+    const x = Math.min(
+      Math.max(cx, satSize * 0.45 + 10),
+      MONTAGE_IMAGE_WIDTH - satSize * 0.45 - 10,
+    );
+    const y = Math.min(Math.max(cy, satSize * 0.4 + 10), stageH - 10);
+    drawStickerShapeAt(ctx, shape, x, y, satSize, satHue);
   });
 
   // -- greeting text, baked into the lower third ---------------------------

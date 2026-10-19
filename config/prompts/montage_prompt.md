@@ -13,6 +13,15 @@ The poster must:
 - Describe a single, cohesive, FULL-BLEED illustration (no borders, no frames,
   no separate panels) that incorporates ALL of the sticker subjects listed
   below, arranged like a movie-poster ensemble cast with a clear focal point.
+- Weave the subjects into ONE SHARED SCENE: a common ground plane, ONE lighting
+  setup, ONE color palette, ONE art style across the whole frame. It must NOT
+  read as a collage, a grid, a lineup, or separate floating objects on a plain
+  background — overlap the subjects, echo their colors, and connect them with
+  shared scenery so the image looks painted in a single pass.
+- NOT be a subject list. Name each subject only through its ROLE in the scene
+  (e.g. "a paper crane banking over the festival square"), never as a flat
+  comma-separated inventory; never use sticker, die-cut, or
+  transparent-background wording in the prompt.
 - Leave clean open space in the lower third of the image so the greeting text
   can be overlaid there later.
 - Match the round theme's mood and be suitable for a family-friendly greeting

@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_CARD_CONFIG } from "@cardcrafters/shared";
 
 import { AiBudgetExceededError } from "../ai/errors";
+import { montageImagePrompt } from "../ai/openrouter-provider";
 import { createAiRouter } from "../ai/router";
 import { GameHub } from "../game/hub";
 import { MemoryRepo } from "../repo/memory-repo";
@@ -290,6 +291,47 @@ describe("runMontageAccumulator", () => {
       status: "ready",
       imageUrl: row?.imageUrl,
     });
+  });
+
+  it("(e2) persists promptText === the EXACT montageImagePrompt output (poster prompt + style hint)", async () => {
+    const s = await setup();
+    tempDirs.push(s.storageDir);
+    // A style pack exercises the styleHint half of the persisted prompt (and
+    // proves the sticker imagePromptSuffix is NOT what gets persisted).
+    await s.repo.updateGame(s.gameId, {
+      style: {
+        styleName: "Crayon Pop",
+        palette: ["#ff5a5f", "#ffd166"],
+        lineWeight: "bold",
+        mood: "joyful",
+        imagePromptSuffix: "flat vector sticker illustration, white outline",
+      },
+    });
+    const fake = createFakeAi();
+    const deps: MontageAccumulatorDeps = {
+      repo: s.repo,
+      ai: fake.ai,
+      mockMode: false,
+      emit: s.emit,
+      storageDir: s.storageDir,
+    };
+
+    await runMontageAccumulator(deps, s.gameId);
+
+    const imageCall = fake.calls.find((c) => c.task === "montage_image");
+    expect(imageCall).toBeDefined();
+    const row = await s.repo.getMontageState(s.teamId, s.round);
+    // promptText must be byte-identical to the string the real provider sends
+    // (montageImagePrompt over the SAME poster prompt + styleHint inputs).
+    expect(row?.promptText).toBe(
+      montageImagePrompt({
+        prompt: "a joyful balloon poster",
+        styleHint: String(imageCall!.input.styleHint ?? ""),
+      }),
+    );
+    // And the style hint is the palette/mood pair — NEVER the sticker suffix.
+    expect(row?.promptText).toContain("palette #ff5a5f, #ffd166, joyful mood");
+    expect(row?.promptText).not.toContain("sticker");
   });
 
   it("(e) patches GENERATING + emits montage:generating BEFORE the AI calls", async () => {

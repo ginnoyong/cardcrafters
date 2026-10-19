@@ -24,7 +24,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { PromptTemplates } from "./templates";
-import { OpenRouterProvider } from "./openrouter-provider";
+import { montageImagePrompt, OpenRouterProvider } from "./openrouter-provider";
 
 /** Exact production 404 body (truncated the way the provider stores it). */
 const PROD_404_BODY =
@@ -43,6 +43,31 @@ const IMAGE_CFG = {
 };
 
 const ITEM_INPUT = { subject: "winnie the pooh riding a horse" };
+
+/** montage_image TaskConfig (same shape as the item_image one, poster task). */
+const MONTAGE_CFG = {
+  name: "montage_image" as const,
+  primary: "google/gemini-2.5-flash-image",
+  fallbacks: [],
+  temperature: 1,
+  maxTokens: 0,
+  timeoutMs: 60_000,
+  retries: 1,
+  structured: null,
+  enabled: true,
+};
+
+/** Poster prompt (montage_prompt output) + the accumulator's style hint. */
+const MONTAGE_INPUT = {
+  prompt:
+    "Joyful full-bleed movie-poster illustration for a balloon party greeting card: " +
+    "a single cohesive composition featuring a red balloon, a paper crown and a " +
+    "bunting banner, arranged as an ensemble cast with one clear focal hero.",
+  styleHint: "palette #ff5a5f, #ffd166, joyful mood",
+};
+
+/** Regression guard: sticker framing language must NEVER reach the poster. */
+const STICKER_LEAK = /sticker|die-cut|transparent/i;
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -163,6 +188,83 @@ describe("OpenRouterProvider item_image → /images endpoint fallback (bug c)", 
       ),
     ).rejects.toMatchObject({ retryable: false });
     expect(calls).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// montage_image (poster task) — regression tests for the montage-cohesion fix
+// ---------------------------------------------------------------------------
+
+describe("OpenRouterProvider montage_image (poster task)", () => {
+  it("chat/completions payload carries the poster prompt + style hint and NEVER sticker framing", async () => {
+    const { fetchImpl, calls } = scriptedFetch([
+      () =>
+        jsonResponse({
+          choices: [
+            {
+              message: {
+                content: null,
+                images: [{ image_url: { url: "data:image/png;base64,QUJD" } }],
+              },
+            },
+          ],
+        }),
+    ]);
+    const provider = new OpenRouterProvider({
+      apiKey: "k",
+      fetchImpl,
+      templates: textTemplates(),
+    });
+
+    const result = await provider.run("montage_image", MONTAGE_INPUT, MONTAGE_CFG);
+
+    expect(result.imageBase64).toBe("QUJD");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/chat/completions");
+    // Binary image task: modalities flag must ride along.
+    expect(calls[0]!.body.modalities).toEqual(["image", "text"]);
+    const messages = calls[0]!.body.messages as Array<{ role: string; content: string }>;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!.role).toBe("user");
+    const content = String(messages[0]!.content);
+    // Poster prompt verbatim + the minimal Art-direction style hint.
+    expect(content).toContain(MONTAGE_INPUT.prompt);
+    expect(content).toContain(`Art direction: ${MONTAGE_INPUT.styleHint}.`);
+    // The sent prompt is byte-identical to what the accumulator persists.
+    expect(content).toBe(montageImagePrompt(MONTAGE_INPUT));
+    // The item_image die-cut framing (sticker/die-cut/transparent) must never
+    // leak into the poster prompt — that language re-fragments the scene.
+    expect(STICKER_LEAK.test(content)).toBe(false);
+  });
+
+  it("chat/completions 404 (use /api/v1/images) → retries the same model on POST /images", async () => {
+    const { fetchImpl, calls } = scriptedFetch([
+      // Attempt 1: chat/completions rejects the image-only model (prod body).
+      () => jsonResponse(JSON.parse(PROD_404_BODY), 404),
+      // …then the unified images API answers with base64 image data.
+      () =>
+        jsonResponse({
+          data: [{ b64_json: "QUJD", media_type: "image/png" }],
+        }),
+    ]);
+    const provider = new OpenRouterProvider({
+      apiKey: "k",
+      fetchImpl,
+      templates: textTemplates(),
+    });
+
+    const result = await provider.run("montage_image", MONTAGE_INPUT, MONTAGE_CFG);
+
+    expect(result.imageBase64).toBe("QUJD");
+    expect(result.imageMime).toBe("image/png");
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/chat/completions");
+    expect(calls[1]!.url).toBe("https://openrouter.ai/api/v1/images");
+    expect(calls[1]!.body.model).toBe(MONTAGE_CFG.primary);
+    const prompt = String(calls[1]!.body.prompt);
+    expect(prompt).toContain("single cohesive composition");
+    expect(prompt).toContain(`Art direction: ${MONTAGE_INPUT.styleHint}.`);
+    expect(STICKER_LEAK.test(prompt)).toBe(false);
   });
 });
 

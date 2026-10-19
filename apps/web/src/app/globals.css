@@ -387,6 +387,25 @@ label {
   color: var(--text-muted);
 }
 
+/* GM prompt transparency: the EXACT image-model prompt behind a team's
+   poster, rendered as a collapsible read-only block under the montage
+   status. Monospace, scrollable, capped height so long prompts never blow
+   out the team card layout. */
+.cc-prompt-view {
+  font-family: ui-monospace, monospace;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  max-height: 9rem;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid color-mix(in srgb, var(--text-muted) 30%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--text-muted) 8%, var(--bg-card));
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .cc-greeting-card {
   border-color: color-mix(in srgb, var(--accent) 60%, transparent);
 }

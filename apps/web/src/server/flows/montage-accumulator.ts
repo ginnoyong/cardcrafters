@@ -5,8 +5,10 @@
  *   (a) patch the montage row to GENERATING + emit `montage:generating`
  *       (GM + presenter rooms);
  *   (b) run the `montage_prompt` AI task (theme / greeting / subjects from
- *       the card state + the game's style pack);
- *   (c) run the `montage_image` task with the prompt + styleSuffix;
+ *       the card state + a minimal style-pack color/mood hint);
+ *   (c) run the `montage_image` task with the poster prompt + the same
+ *       style hint (NEVER the sticker item_image suffix — see styleHint
+ *       below); the exact user prompt is persisted as promptText;
  *   (d) persist the image bytes using the SAME storage pattern as
  *       item-image.ts (PNG under public/static, public URL) → status READY +
  *       imageUrl, emit `montage:updated` {status:"ready", imageUrl} (team +
@@ -44,6 +46,7 @@ import { fileURLToPath } from "node:url";
 
 import { montagePromptSchema } from "@cardcrafters/shared";
 
+import { montageImagePrompt } from "../ai/openrouter-provider";
 import type { Repository, ItemRow } from "../repo/repository";
 import { AiBudgetExceededError } from "../ai/errors";
 import type { MontageAi } from "../layout/montage";
@@ -128,7 +131,16 @@ async function runForTeam(
     const items = await repo.listItems(teamId, round, ["READY"]);
     const sized = items.filter((r) => (r.width ?? 0) > 0 && (r.height ?? 0) > 0);
     const style = game?.style ?? null;
-    const styleSuffix = style?.imagePromptSuffix ?? "";
+    // COHESION GUARD: the style pack's imagePromptSuffix is written for
+    // STICKER item images ("flat vector sticker illustration, white outline")
+    // and must never reach the poster tasks — that language is what turned
+    // the full-bleed poster back into loose die-cut stickers. The poster
+    // chain gets only a minimal color/mood hint derived from the SAME style
+    // pack (palette hexes + mood), keeping the deck's identity without the
+    // sticker framing.
+    const styleHint = style
+      ? `palette ${style.palette.join(", ")}, ${style.mood} mood`
+      : "";
     const theme = game?.theme ?? "";
 
     if (sized.length === 0 || !game) {
@@ -153,7 +165,7 @@ async function runForTeam(
         theme,
         greeting: greeting?.text ?? "",
         subjects: sized.map((r) => r.subject ?? ""),
-        stylePack: styleSuffix,
+        styleHint,
       },
       { gameId },
     );
@@ -162,13 +174,17 @@ async function runForTeam(
     const parsed = montagePromptSchema.parse(promptRes.data);
     const posterPrompt = parsed.prompt;
 
-    // (c) montage_image — the poster prompt + the style pack suffix (plus the
-    // theme/greeting/subjects keys the mock provider's generator reads).
+    // (c) montage_image — the poster prompt + the minimal style hint (plus
+    // the theme/greeting/subjects keys the mock provider's generator reads).
+    // The EXACT user prompt the real provider sends is computed by the same
+    // montageImagePrompt helper the provider itself uses — persisted below so
+    // the GM can see precisely what the image model was asked to draw.
+    const imagePromptText = montageImagePrompt({ prompt: posterPrompt, styleHint });
     const imageRes = await deps.ai!.run(
       "montage_image",
       {
         prompt: posterPrompt,
-        styleSuffix,
+        styleHint,
         theme,
         greeting: greeting?.text ?? "",
         subjects: sized.map((r) => r.subject ?? ""),
@@ -193,7 +209,10 @@ async function runForTeam(
     await repo.upsertMontageState(teamId, round, {
       patch: {
         status: "READY",
-        promptText: posterPrompt,
+        // promptText = the EXACT image-model prompt (poster prompt + style
+        // hint) — the montage_prompt output is embedded verbatim inside it —
+        // surfaced to the GM via sync:full + montage:updated ("View prompt").
+        promptText: imagePromptText,
         imageUrl,
         imageSeq: round,
         fallbackUsed: false,
@@ -201,7 +220,7 @@ async function runForTeam(
     });
     deps.emit(
       "montage:updated",
-      { round, teamId, status: "ready", imageUrl },
+      { round, teamId, status: "ready", imageUrl, promptText: imagePromptText },
       { gameId, teamId },
     );
   } catch (err) {

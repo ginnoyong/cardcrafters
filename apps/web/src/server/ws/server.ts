@@ -182,6 +182,14 @@ export interface SyncFullPayload extends Record<string, unknown> {
     layout: unknown;
     /** Current-round greeting (empty text + null status until generated). */
     greeting: { text: string; status: string | null };
+    /** Montage (poster) state — null until the accumulator first runs.
+     *  `promptText` rides along for GM snapshots ONLY (internal craft
+     *  detail; presenter/player payloads stay lean). */
+    montage?: {
+      status: string;
+      imageUrl?: string;
+      promptText?: string;
+    } | null;
   }>;
   myScores?: Array<{ cardId: string; value: number }>;
   /**
@@ -287,6 +295,15 @@ export async function buildSyncFull(
             status: montage.status.toLowerCase(),
             ...(montage.status === "READY" && montage.imageUrl
               ? { imageUrl: montage.imageUrl }
+              : {}),
+            // promptText (the EXACT image-model prompt, persisted by the
+            // accumulator) is INTERNAL craft detail — GM ONLY. Players and
+            // the presenter get the lean status/imageUrl payload; the GM's
+            // "View prompt" transparency toggle reads this field (live
+            // montage:updated events may still carry promptText, but the
+            // refresh-surviving snapshot keeps it out of non-GM payloads).
+            ...(identity?.role === "gm" && montage.promptText
+              ? { promptText: montage.promptText }
               : {}),
           }
         : null,

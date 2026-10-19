@@ -122,8 +122,11 @@ export interface ClientTeam {
   montageStatus?: "generating" | "ready" | "fallback" | null;
   /** Poster image URL when montageStatus is "ready". */
   montageImageUrl?: string | null;
+  /** The EXACT image-model prompt the accumulator sent (GM-only intel via
+   *  sync:full / montage:updated; null for every other role). */
+  montagePromptText?: string | null;
   /** Raw sync:full montage section (read off during normalization). */
-  montage?: { status: string; imageUrl?: string } | null;
+  montage?: { status: string; imageUrl?: string; promptText?: string } | null;
 }
 
 /** One vision critique verdict (see shared layoutCritiqueSchema). */
@@ -558,6 +561,7 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
               // previous round's poster state/image must never leak in.
               montageStatus: null,
               montageImageUrl: null,
+              montagePromptText: null,
             }))
           : base.teams,
         // Round-scoped scoring state is cleared on a round BUMP exactly like
@@ -841,8 +845,8 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
     // montage:generating — the montage accumulator started a poster render
     // for this team. Payload is a hub-stamped envelope + {teamId, round}.
     // Sets montageStatus "generating" (renders as the composed card + a
-    // small "Generating poster…" indicator); any imageUrl from a previous
-    // round-attempt is cleared.
+    // small "Generating poster…" indicator); any imageUrl/promptText from a
+    // previous round-attempt is cleared.
     case "montageGenerating": {
       const base = roundGuard(state, action.payload);
       if (!base) return state;
@@ -852,24 +856,35 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
         ...team,
         montageStatus: "generating",
         montageImageUrl: null,
+        montagePromptText: null,
       }));
     }
     // montage:updated — the accumulator finished (READY with imageUrl) or
     // fell back (FALLBACK / GENERATING-without-image). Payload is a
-    // hub-stamped envelope + {teamId, status, imageUrl?}.
+    // hub-stamped envelope + {teamId, status, imageUrl?, promptText?}.
     //   "ready"    → store the poster URL (render replaces the composed card);
     //   "fallback" → clear any stale poster state, keep the composed card.
+    // promptText (the EXACT image-model prompt) rides along on GM routes;
+    // a string keeps/refreshes it, anything else clears it (non-GM payloads
+    // simply never carry it).
     case "montageUpdated": {
       const base = roundGuard(state, action.payload);
       if (!base) return state;
-      const p = action.payload as { teamId?: unknown; status?: unknown; imageUrl?: unknown };
+      const p = action.payload as {
+        teamId?: unknown;
+        status?: unknown;
+        imageUrl?: unknown;
+        promptText?: unknown;
+      };
       if (typeof p.teamId !== "string") return state;
+      const promptText = typeof p.promptText === "string" && p.promptText !== "" ? p.promptText : null;
       if (p.status === "ready") {
         if (typeof p.imageUrl !== "string" || p.imageUrl === "") return state;
         return withTeam(base, p.teamId, (team) => ({
           ...team,
           montageStatus: "ready",
           montageImageUrl: p.imageUrl as string,
+          montagePromptText: promptText,
         }));
       }
       if (p.status === "fallback") {
@@ -877,6 +892,7 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
           ...team,
           montageStatus: "fallback",
           montageImageUrl: null,
+          montagePromptText: promptText,
         }));
       }
       return state;
@@ -1204,6 +1220,11 @@ function normalizeSnapshot(
 
       let montageStatus: "generating" | "ready" | "fallback" | null = null;
       let montageImageUrl: string | null = null;
+      // promptText rides along for GM snapshots ONLY; other roles get a
+      // montage section without it → null. When the montage section is
+      // omitted entirely the prev value is preserved (same pattern as the
+      // status/imageUrl fields above).
+      let montagePromptText: string | null = null;
 
       if (typeof montageRaw === "object" && montageRaw !== null) {
         const raw = montageRaw as Record<string, unknown>;
@@ -1217,6 +1238,13 @@ function normalizeSnapshot(
         if (raw.status === "ready" && typeof raw.imageUrl === "string") {
           montageImageUrl = raw.imageUrl as string;
         }
+        if (typeof raw.promptText === "string" && raw.promptText !== "") {
+          montagePromptText = raw.promptText;
+        }
+      }
+      // Section omitted (undefined, not null): preserve the prev prompt text.
+      if (t.montage === undefined) {
+        montagePromptText = montagePromptText ?? prevTeam?.montagePromptText ?? null;
       }
       return {
         id: String(t.id),
@@ -1248,6 +1276,7 @@ function normalizeSnapshot(
             : parseCritique(layoutRaw?.critique),
         montageStatus,
         montageImageUrl,
+        montagePromptText,
       };
     }),
   };

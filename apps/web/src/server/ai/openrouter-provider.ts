@@ -140,7 +140,7 @@ export class OpenRouterProvider implements AiProvider {
     };
     if (cfg.maxTokens > 0) body.max_tokens = cfg.maxTokens;
     if (cfg.structured) body.response_format = { type: "json_object" };
-    if (task === "item_image") body.modalities = ["image", "text"];
+    if (task === "item_image" || task === "montage_image") body.modalities = ["image", "text"];
 
     let res: Response;
     try {
@@ -178,7 +178,7 @@ export class OpenRouterProvider implements AiProvider {
       // instead of failing the whole chain (this is what killed real stickers:
       // the gpt-image-1 fallback burned every attempt on the wrong endpoint).
       if (
-        task === "item_image" &&
+        (task === "item_image" || task === "montage_image") &&
         status === 404 &&
         /api\/v1\/images|images endpoint/i.test(text)
       ) {
@@ -210,7 +210,7 @@ export class OpenRouterProvider implements AiProvider {
     const usage = usageOutKeys(json.usage);
 
     // -- image task -----------------------------------------------------------
-    if (task === "item_image") {
+    if (task === "item_image" || task === "montage_image") {
       const imageUrl = json.choices?.[0]?.message?.images?.[0]?.image_url?.url;
       if (!imageUrl) {
         throw new AiTaskError({
@@ -220,7 +220,7 @@ export class OpenRouterProvider implements AiProvider {
           message: "openrouter image response contained no image",
         });
       }
-      const image = await toImageBase64(imageUrl, this.fetchImpl);
+      const image = await toImageBase64(imageUrl, this.fetchImpl, task);
       const latencyMs = Date.now() - started;
       return {
         data: { imageMime: image.mime },
@@ -353,6 +353,15 @@ export class OpenRouterProvider implements AiProvider {
   ): Promise<ChatMessage[]> {
     await this.ensureTemplates(); // loaded once per provider instance
     const messages: ChatMessage[] = [];
+    if (task === "montage_image") {
+      // Binary image task — no text template; the prompt is the POSTER prompt
+      // produced by montage_prompt, verbatim, plus at most a minimal
+      // color/mood style hint. It must NEVER reuse the item_image sticker
+      // framing (die-cut / transparent background / centered 75–85%) — that
+      // language turns the full-bleed poster back into loose stickers.
+      messages.push({ role: "user", content: montageImagePrompt(input) });
+      return messages;
+    }
     if (task === "item_image") {
       // Binary image task — no text template; prompt is synthesized from input.
       // Die-cut look: subject centered with generous transparent padding, never
@@ -397,6 +406,19 @@ export class OpenRouterProvider implements AiProvider {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * The montage_image user prompt (chat/completions + images endpoint):
+ * ONLY the poster prompt (montage_prompt's output, verbatim) + an optional
+ * minimal style-pack color/mood hint. NO die-cut/transparent/sticker framing
+ * is added here and the sticker item_image suffix never reaches this task.
+ * Exported so the montage accumulator can persist the EXACT string sent.
+ */
+export function montageImagePrompt(input: Record<string, unknown>): string {
+  const prompt = String(input.prompt ?? "").trim();
+  const style = String(input.styleHint ?? "").trim();
+  return style ? `${prompt}\nArt direction: ${style}.` : prompt;
+}
+
 /** The shared item-image user prompt (chat/completions + images endpoint). */
 function itemImagePrompt(input: Record<string, unknown>): string {
   const subject = String(input.subject ?? input.prompt ?? "");
@@ -421,6 +443,7 @@ function usageOutKeys(usage: ChatCompletionResponse["usage"]): {
 async function toImageBase64(
   url: string,
   fetchImpl: typeof fetch,
+  imageTask: AiTaskName = "item_image",
 ): Promise<{ base64: string; mime: string }> {
   const dataUrl = /^data:([^;]+);base64,(.*)$/s.exec(url);
   if (dataUrl) return { mime: dataUrl[1]!, base64: dataUrl[2]! };
@@ -430,7 +453,7 @@ async function toImageBase64(
   });
   if (!res.ok) {
     throw new AiTaskError({
-      task: "item_image",
+      task: imageTask,
       retryable: true,
       message: `failed to download generated image (${res.status})`,
     });
