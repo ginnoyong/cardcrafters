@@ -736,3 +736,86 @@ describe("sync:full prev-preservation (omitted fields keep prev state)", () => {
     expect(s.teams[1]!.items).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// montageError lifecycle
+// ---------------------------------------------------------------------------
+
+describe("storeReducer — montageError lifecycle", () => {
+  it("montageGenerating clears montageError from a prior fallback", () => {
+    let s: GameSnapshot | null = normalizeSyncFull(baseSnapshot(), {}, PLAYER_ME);
+    // Seed a fallback with an error first
+    s = storeReducer(s, {
+      type: "montageUpdated",
+      payload: envelope({
+        teamId: TEAM_A,
+        status: "fallback",
+        fallbackUsed: true,
+        error: "budget exceeded",
+      }),
+    });
+    expect(s!.teams[0]!.montageError).toBe("budget exceeded");
+
+    s = storeReducer(s, {
+      type: "montageGenerating",
+      payload: envelope({ teamId: TEAM_A }),
+    });
+    expect(s!.teams[0]!.montageStatus).toBe("generating");
+    expect(s!.teams[0]!.montageError).toBeNull();
+  });
+
+  it("montageUpdated ready clears montageError", () => {
+    let s: GameSnapshot | null = normalizeSyncFull(baseSnapshot(), {}, PLAYER_ME);
+    s = storeReducer(s, {
+      type: "montageUpdated",
+      payload: envelope({
+        teamId: TEAM_A,
+        status: "fallback",
+        fallbackUsed: true,
+        error: "boom",
+      }),
+    });
+    expect(s!.teams[0]!.montageError).toBe("boom");
+
+    s = storeReducer(s, {
+      type: "montageUpdated",
+      payload: envelope({
+        teamId: TEAM_A,
+        status: "ready",
+        imageUrl: "/static/montages/t.png",
+      }),
+    });
+    expect(s!.teams[0]!.montageStatus).toBe("ready");
+    expect(s!.teams[0]!.montageError).toBeNull();
+  });
+
+  it("montageUpdated fallback sets montageError from payload", () => {
+    let s: GameSnapshot | null = normalizeSyncFull(baseSnapshot(), {}, PLAYER_ME);
+    s = storeReducer(s, {
+      type: "montageUpdated",
+      payload: envelope({
+        teamId: TEAM_A,
+        status: "fallback",
+        fallbackUsed: true,
+        error: "AI task failed",
+      }),
+    });
+    expect(s!.teams[0]!.montageStatus).toBe("fallback");
+    expect(s!.teams[0]!.montageError).toBe("AI task failed");
+  });
+
+  it("sync:full preserves montageError for GM snapshot", () => {
+    const snap = baseSnapshot({
+      teams: [
+        {
+          ...baseSnapshot().teams[0]!,
+          montage: { status: "fallback", lastError: "persisted error" },
+        },
+        baseSnapshot().teams[1]!,
+      ],
+    } as Partial<SyncFullEvent>);
+    const s = normalizeSyncFull(snap, {}, PLAYER_ME);
+    expect(s.teams[0]!.montageError).toBe("persisted error");
+    expect(s.teams[0]!.montageStatus).toBe("fallback");
+  });
+});

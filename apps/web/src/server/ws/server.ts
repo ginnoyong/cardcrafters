@@ -305,6 +305,11 @@ export async function buildSyncFull(
             ...(identity?.role === "gm" && montage.promptText
               ? { promptText: montage.promptText }
               : {}),
+            // lastError (why the poster fell back) is GM-facing diagnosis,
+            // same visibility rules as promptText.
+            ...(identity?.role === "gm" && montage.lastError
+              ? { lastError: montage.lastError }
+              : {}),
           }
         : null,
     });

@@ -125,8 +125,16 @@ export interface ClientTeam {
   /** The EXACT image-model prompt the accumulator sent (GM-only intel via
    *  sync:full / montage:updated; null for every other role). */
   montagePromptText?: string | null;
+  /** Why the poster fell back (montage:updated fallback error / persisted
+   *  lastError) — GM-facing diagnosis, cleared on generating/ready. */
+  montageError?: string | null;
   /** Raw sync:full montage section (read off during normalization). */
-  montage?: { status: string; imageUrl?: string; promptText?: string } | null;
+  montage?: {
+    status: string;
+    imageUrl?: string;
+    promptText?: string;
+    lastError?: string;
+  } | null;
 }
 
 /** One vision critique verdict (see shared layoutCritiqueSchema). */
@@ -562,6 +570,7 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
               montageStatus: null,
               montageImageUrl: null,
               montagePromptText: null,
+              montageError: null,
             }))
           : base.teams,
         // Round-scoped scoring state is cleared on a round BUMP exactly like
@@ -856,6 +865,7 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
         ...team,
         montageStatus: "generating",
         montageImageUrl: null,
+        montageError: null,
         montagePromptText: null,
       }));
     }
@@ -875,6 +885,7 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
         status?: unknown;
         imageUrl?: unknown;
         promptText?: unknown;
+        error?: unknown;
       };
       if (typeof p.teamId !== "string") return state;
       const promptText = typeof p.promptText === "string" && p.promptText !== "" ? p.promptText : null;
@@ -884,6 +895,7 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
           ...team,
           montageStatus: "ready",
           montageImageUrl: p.imageUrl as string,
+          montageError: null,
           montagePromptText: promptText,
         }));
       }
@@ -893,6 +905,7 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
           montageStatus: "fallback",
           montageImageUrl: null,
           montagePromptText: promptText,
+          montageError: typeof p.error === "string" && p.error !== "" ? p.error : null,
         }));
       }
       return state;
@@ -1225,6 +1238,7 @@ function normalizeSnapshot(
       // omitted entirely the prev value is preserved (same pattern as the
       // status/imageUrl fields above).
       let montagePromptText: string | null = null;
+      let montageError: string | null = null;
 
       if (typeof montageRaw === "object" && montageRaw !== null) {
         const raw = montageRaw as Record<string, unknown>;
@@ -1241,10 +1255,16 @@ function normalizeSnapshot(
         if (typeof raw.promptText === "string" && raw.promptText !== "") {
           montagePromptText = raw.promptText;
         }
+        // lastError: persisted row carries the fallback diagnosis; sync:full
+        // is the refresh-surviving source (live fallback payloads use `error`).
+        if (typeof raw.lastError === "string" && raw.lastError !== "") {
+          montageError = raw.lastError;
+        }
       }
       // Section omitted (undefined, not null): preserve the prev prompt text.
       if (t.montage === undefined) {
         montagePromptText = montagePromptText ?? prevTeam?.montagePromptText ?? null;
+        montageError = montageError ?? prevTeam?.montageError ?? null;
       }
       return {
         id: String(t.id),
@@ -1276,6 +1296,7 @@ function normalizeSnapshot(
             : parseCritique(layoutRaw?.critique),
         montageStatus,
         montageImageUrl,
+        montageError,
         montagePromptText,
       };
     }),
