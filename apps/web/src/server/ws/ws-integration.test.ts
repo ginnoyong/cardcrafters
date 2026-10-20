@@ -881,9 +881,10 @@ describe("scoring phase end-to-end", () => {
     const samStarted = waitFor<{ cards: Array<Record<string, unknown>>; yourTeamCardId?: string | null }>(sam, "scoring:started");
     const gmStarted = waitFor<{ cards: Array<{ cardId: string; label: string; teamId: string }> }>(gm, "scoring:started");
     // Player-side montage payloads: each seeded team's own montage:updated
-    // (team-room broadcast) must arrive with the persisted poster URL.
-    const alexMontage = waitFor<{ teamId: string; status: string; imageUrl?: string | null }>(alex, "montage:updated");
-    const samMontage = waitFor<{ teamId: string; status: string; imageUrl?: string | null }>(sam, "montage:updated");
+    // (team-room broadcast) must arrive with the persisted poster URL + the
+    // exact sent prompt (prompt transparency: promptText rides the payload).
+    const alexMontage = waitFor<{ teamId: string; status: string; imageUrl?: string | null; promptText?: string | null }>(alex, "montage:updated");
+    const samMontage = waitFor<{ teamId: string; status: string; imageUrl?: string | null; promptText?: string | null }>(sam, "montage:updated");
 
     // Event-order collectors on the gm socket (registered BEFORE gm:stopBuild):
     // montage:started (GM-only heads-up) must precede scoring:started, and —
@@ -897,6 +898,7 @@ describe("scoring phase end-to-end", () => {
       teamId?: string;
       status?: string;
       imageUrl?: string;
+      promptText?: string | null;
     }> = [];
     const collect = (event: string): void => {
       gm.on(event, (payload: Record<string, unknown>) => {
@@ -906,6 +908,10 @@ describe("scoring phase end-to-end", () => {
           teamId: typeof payload?.teamId === "string" ? payload.teamId : undefined,
           status: typeof payload?.status === "string" ? payload.status : undefined,
           imageUrl: typeof payload?.imageUrl === "string" ? payload.imageUrl : undefined,
+          promptText:
+            typeof payload?.promptText === "string" || payload?.promptText === null
+              ? (payload.promptText as string | null)
+              : undefined,
         });
       });
     };
@@ -1022,6 +1028,22 @@ describe("scoring phase end-to-end", () => {
     for (const u of updated.filter((e) => e.status === "ready")) {
       expect(u.imageUrl).toMatch(/^\/static\/montages\//);
     }
+
+    // Prompt transparency: every READY montage:updated payload (GM copy AND
+    // each player's own) carries a non-empty promptText string — the exact
+    // sent image-model prompt. (Team C's FALLBACK payload intentionally has
+    // promptText: null — no prompt was ever attempted for the itemless team.)
+    for (const u of updated.filter((e) => e.status === "ready")) {
+      expect(typeof u.promptText).toBe("string");
+      expect(u.promptText!.length).toBeGreaterThan(0);
+    }
+    for (const p of [alexMontagePayload, samMontagePayload]) {
+      expect(typeof p.promptText).toBe("string");
+      expect(p.promptText!.length).toBeGreaterThan(0);
+    }
+    expect(
+      updated.find((e) => e.status === "fallback" && e.teamId === teamCId)?.promptText ?? null,
+    ).toBeNull();
 
     const ownCardA = gmCopy.cards.find((c) => c.teamId === teamAId)!.cardId;
     const cardB = gmCopy.cards.find((c) => c.teamId === teamBId)!.cardId;

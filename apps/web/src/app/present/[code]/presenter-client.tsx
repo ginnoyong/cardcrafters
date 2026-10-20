@@ -84,8 +84,6 @@ function TeamCard({
   phaseEndsAt,
   serverNow,
   greetingText,
-  montageStatus,
-  montageImageUrl,
 }: {
   name: string;
   label: string;
@@ -95,8 +93,6 @@ function TeamCard({
   phaseEndsAt: number | null;
   serverNow: number;
   greetingText?: string;
-  montageStatus?: "generating" | "ready" | "fallback" | null;
-  montageImageUrl?: string | null;
 }) {
   const [qr, setQr] = useState<string | null>(null);
   const remaining = useCountdown(phaseEndsAt, serverNow);
@@ -123,23 +119,6 @@ function TeamCard({
         {phaseLabel(phase)} · {memberCount}/{MAX_TEAM_MEMBERS} players
       </p>
       {greetingText ? <p className="cc-greeting">“{greetingText}”</p> : null}
-      {/* Montage (poster) accumulator surface — matches the GM's TeamCard:
-          generating → indicator; ready → poster image; fallback/absent →
-          unchanged composed card. */}
-      {montageStatus === "generating" ? (
-        <p className="cc-montage-status" aria-live="polite">
-          Generating poster…
-        </p>
-      ) : montageStatus === "ready" && montageImageUrl ? (
-        <div className="cc-montage" aria-label={`poster for ${name}`}>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={montageImageUrl}
-            alt={`Finished poster for ${name}`}
-            className="cc-montage-img"
-          />
-        </div>
-      ) : null}
       {remaining !== null ? (
         <p className="cc-timer" aria-label="phase timer">
           ⏱ {fmt(remaining)}
@@ -328,8 +307,6 @@ function PresenterBoard({ code }: { code: string }) {
             phaseEndsAt={snapshot?.phaseEndsAt ?? null}
             serverNow={snapshot?.serverNow ?? Date.now()}
             greetingText={team.greeting?.text || undefined}
-            montageStatus={team.montageStatus}
-            montageImageUrl={team.montageImageUrl}
           />
         ))}
       </section>
@@ -351,6 +328,26 @@ function PresenterBoard({ code }: { code: string }) {
                   greeting={team.greeting.text}
                   ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
                 />
+                {/* Montage (poster) accumulator surface — moved here from the
+                    team META card so the poster shows next to the team's live
+                    card: generating → small indicator line under the composed
+                    canvas; ready → the finished poster image (the composed
+                    CardCanvas stays the live build view); fallback/absent →
+                    unchanged. */}
+                {team.montageStatus === "generating" ? (
+                  <p className="cc-montage-status" aria-live="polite">
+                    Generating poster…
+                  </p>
+                ) : team.montageStatus === "ready" && team.montageImageUrl ? (
+                  <div className="cc-montage" aria-label={`poster for ${team.name}`}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={team.montageImageUrl}
+                      alt={`Finished poster for ${team.name}`}
+                      className="cc-montage-img"
+                    />
+                  </div>
+                ) : null}
                 <p className="cc-hint" aria-live="polite">
                   {readyCount} sticker{readyCount === 1 ? "" : "s"} on the card
                 </p>

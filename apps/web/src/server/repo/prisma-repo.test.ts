@@ -42,6 +42,7 @@ async function cleanupGame(gameId: string): Promise<void> {
   await prisma.score.deleteMany({ where: { gameId } });
   await prisma.greeting.deleteMany({ where: { team: { gameId } } });
   await prisma.layoutState.deleteMany({ where: { team: { gameId } } });
+  await prisma.montageState.deleteMany({ where: { team: { gameId } } });
   await prisma.item.deleteMany({ where: { team: { gameId } } });
   await prisma.player.deleteMany({ where: { gameId } });
   await prisma.team.deleteMany({ where: { gameId } });
@@ -438,6 +439,119 @@ describe.skipIf(!DB_OK)("PrismaRepo (postgres)", () => {
       expect(same.version).toBe(2);
       expect(same.critique).toEqual(verdict);
       expect((await repo.getLayoutState(team.id, 1))!.critique).toEqual(verdict);
+    });
+  });
+
+  it("montage state: upsert with input/patch lastError round-trip + null defaults (memory-repo parity)", async () => {
+    await withGame(async (gameId) => {
+      const team = await mkTeam(gameId, "T");
+
+      // No row before anything is staged.
+      expect(await repo.getMontageState(team.id, 1)).toBeNull();
+
+      // Input append #1: seq increments, defaults are null/false.
+      const r1 = await repo.upsertMontageState(team.id, 1, {
+        input: {
+          itemId: "i1",
+          promptRaw: "red balloon",
+          subject: "red balloon",
+          playerId: "p1",
+          nickname: "Alex",
+          seq: 1,
+        },
+      });
+      expect(r1.seq).toBe(1);
+      expect(r1.stagedInputs).toHaveLength(1);
+      expect(r1.status).toBe("STAGED");
+      expect(r1.promptText).toBeNull();
+      expect(r1.imageUrl).toBeNull();
+      expect(r1.imageSeq).toBeNull();
+      expect(r1.fallbackUsed).toBe(false);
+      expect(r1.lastError).toBeNull();
+
+      // Input append #2 (hop 2): seq grows, both entries survive the JSON column.
+      const r2 = await repo.upsertMontageState(team.id, 1, {
+        input: {
+          itemId: "i2",
+          promptRaw: "blue cake",
+          subject: "blue cake",
+          playerId: "p2",
+          nickname: "Sam",
+          seq: 2,
+        },
+      });
+      expect(r2.seq).toBe(2);
+      expect(r2.stagedInputs.map((i) => i.subject)).toEqual(["red balloon", "blue cake"]);
+
+      // Patch to READY: every column round-trips through the patch interface.
+      await repo.upsertMontageState(team.id, 1, {
+        patch: {
+          status: "READY",
+          promptText: "poster prompt text",
+          imageUrl: "/static/montages/g/t/poster.png",
+          imageSeq: 2,
+          lastError: null,
+          fallbackUsed: false,
+        },
+      });
+      const ready = await repo.getMontageState(team.id, 1);
+      expect(ready).toMatchObject({
+        status: "READY",
+        promptText: "poster prompt text",
+        imageUrl: "/static/montages/g/t/poster.png",
+        imageSeq: 2,
+        lastError: null,
+        fallbackUsed: false,
+        seq: 2,
+      });
+      // A patch never clobbers the staged inputs.
+      expect(ready?.stagedInputs).toHaveLength(2);
+
+      // Patch to FALLBACK with lastError set (the gen-pass failure path).
+      await repo.upsertMontageState(team.id, 1, {
+        patch: {
+          status: "FALLBACK",
+          fallbackUsed: true,
+          imageUrl: null,
+          lastError: "image provider outage",
+        },
+      });
+      const fallback = await repo.getMontageState(team.id, 1);
+      expect(fallback?.status).toBe("FALLBACK");
+      expect(fallback?.lastError).toBe("image provider outage");
+      expect(fallback?.fallbackUsed).toBe(true);
+      expect(fallback?.imageUrl).toBeNull();
+      // promptText from the READY patch survives the fallback patch.
+      expect(fallback?.promptText).toBe("poster prompt text");
+
+      // A successful retry clears lastError via an explicit null patch.
+      await repo.upsertMontageState(team.id, 1, {
+        patch: { status: "READY", lastError: null, fallbackUsed: false },
+      });
+      const cleared = await repo.getMontageState(team.id, 1);
+      expect(cleared?.lastError).toBeNull();
+      expect(cleared?.fallbackUsed).toBe(false);
+
+      // listMontageStates joins through teams (game+round scope).
+      const listed = await repo.listMontageStates(gameId, 1);
+      expect(listed).toHaveLength(1);
+      expect(listed[0]!.teamId).toBe(team.id);
+      expect(listed[0]!.stagedInputs).toHaveLength(2);
+
+      // Round isolation: a new round starts from nothing.
+      const r2round = await repo.upsertMontageState(team.id, 2, {
+        input: {
+          itemId: "i3",
+          promptRaw: "green kite",
+          subject: "green kite",
+          playerId: "p3",
+          nickname: "Ari",
+          seq: 1,
+        },
+      });
+      expect(r2round.seq).toBe(1);
+      expect(r2round.stagedInputs).toHaveLength(1);
+      expect((await repo.getMontageState(team.id, 1))?.stagedInputs).toHaveLength(2);
     });
   });
 

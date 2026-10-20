@@ -1,10 +1,19 @@
 /**
- * Montage accumulator tests (poster step at SCORING entry) — the real
- * runMontageAccumulator against the MemoryRepo with a controllable fake
- * MontageAi (plus the real mock AiRouter for the mock-mode end-to-end):
- * in-flight dedup per team+round, AI-error fail-open (FALLBACK),
- * budget-skip at zero AI spend, mock-mode READY + file persistence, and
- * the GENERATING patch + `montage:generating` heads-up ordering.
+ * Montage accumulator tests (STAGING-DRIVEN poster step) — the real
+ * stageMontageInput / finalizeMontageAll against the MemoryRepo with a
+ * controllable fake MontageAi (plus the real mock AiRouter for the mock-mode
+ * end-to-end): staging → maybeStart dedup per team+round, the trailing-edge
+ * re-arm (seq > imageSeq), finalize's one-guaranteed-extra-pass / skip
+ * semantics, AI-error fail-open (FALLBACK) with lastError + attempted
+ * promptText, budget-skip at zero AI spend, and the GENERATING patch +
+ * `montage:generating` heads-up ordering.
+ *
+ * Trigger routing:
+ *  - staging-path tests use stageMontageInput (maybeStart awaits the pass it
+ *    starts, so one await settles the whole chain);
+ *  - legacy/no-staging tests trigger via finalizeMontageAll (the hub's
+ *    preScoring hook) — idle + un-posted or rowless teams get exactly one
+ *    final gen there.
  */
 
 import { mkdtemp, readdir, rm } from "node:fs/promises";
@@ -23,9 +32,11 @@ import { MemoryRepo } from "../repo/memory-repo";
 import type { MontageAi } from "../layout/montage";
 import type { LayoutEmit } from "../layout/engine";
 import {
+  finalizeMontageAll,
   resetMontageAccumulatorInFlight,
-  runMontageAccumulator,
+  stageMontageInput,
   type MontageAccumulatorDeps,
+  type StageMontageInput,
 } from "./montage-accumulator";
 
 const START = 1_700_000_000_000;
@@ -102,7 +113,8 @@ async function setup(): Promise<Setup> {
   await hub.applyEvent(game.id, { type: "gm:setTheme", theme: "Balloon party", now: START });
   const joined = await hub.joinPlayer({ joinToken: teams[0]!.joinToken, nickname: "Alex" });
 
-  // One sized READY sticker — the accumulator's minimum poster input.
+  // One sized READY sticker — the accumulator's minimum poster input for the
+  // legacy (no-staging) fallback path.
   const item = await repo.createItem({
     teamId: joined.team.id,
     playerId: joined.player.id,
@@ -127,6 +139,21 @@ async function setup(): Promise<Setup> {
   };
 }
 
+function depsOf(s: Setup, ai: MontageAi | null, mockMode = false): MontageAccumulatorDeps {
+  return { repo: s.repo, ai, mockMode, emit: s.emit, storageDir: s.storageDir };
+}
+
+/** A synthetic staged player input (no FK validation on montage staging). */
+function stagedInput(subject: string, nickname = "Alex"): StageMontageInput {
+  return {
+    itemId: `item-${subject.replace(/\s+/g, "-")}`,
+    promptRaw: subject,
+    subject,
+    playerId: "player-1",
+    nickname,
+  };
+}
+
 /** Fresh temp storage dir per test (cleaned up in afterEach). */
 const tempDirs: string[] = [];
 afterEach(async () => {
@@ -135,28 +162,23 @@ afterEach(async () => {
   }
 });
 
-describe("runMontageAccumulator", () => {
+describe("montage accumulator (staging-driven)", () => {
   beforeEach(() => {
     // The dedup map is module-level — clear it between tests.
     resetMontageAccumulatorInFlight();
   });
 
-  it("(a) dedups concurrent triggers per team+round — two triggers → ONE AI pass", async () => {
+  it("(a) two concurrent stageMontageInput with a held image → exactly ONE pass while held; the trailing edge converges (imageSeq === seq === 2, both subjects)", async () => {
     const s = await setup();
     tempDirs.push(s.storageDir);
     const fake = createFakeAi({ holdImage: true });
-    const deps: MontageAccumulatorDeps = {
-      repo: s.repo,
-      ai: fake.ai,
-      mockMode: false,
-      emit: s.emit,
-      storageDir: s.storageDir,
-    };
+    const deps = depsOf(s, fake.ai);
 
-    // Two overlapping triggers — the second must rejoin the SAME in-flight
-    // promise (no second AI pass), not queue a duplicate pipeline.
-    const p1 = runMontageAccumulator(deps, s.gameId);
-    const p2 = runMontageAccumulator(deps, s.gameId);
+    // Two overlapping stagings — round 1's hop-2 concurrency case: seq 2 ≠
+    // round 1, so the poster needs TWO staged inputs, and the second must
+    // never fork a second concurrent pass.
+    const p1 = stageMontageInput(deps, s.gameId, s.teamId, stagedInput("red balloon"));
+    const p2 = stageMontageInput(deps, s.gameId, s.teamId, stagedInput("blue star"));
 
     // Exactly one pass is in flight: montage_prompt ran once and
     // montage_image is held on its deferred.
@@ -167,32 +189,45 @@ describe("runMontageAccumulator", () => {
 
     fake.releaseImage();
     await Promise.all([p1, p2]);
+    // The staging promises don't cover the trailing-edge pass — wait for the
+    // row to converge on the full staged set.
+    await vi.waitFor(async () => {
+      const row = await s.repo.getMontageState(s.teamId, s.round);
+      expect(row?.status).toBe("READY");
+      expect(row?.seq).toBe(2);
+      expect(row?.imageSeq).toBe(2);
+    });
 
-    // Still exactly one AI pass after everything settled.
-    expect(fake.calls.filter((c) => c.task === "montage_prompt")).toHaveLength(1);
-    expect(fake.calls.filter((c) => c.task === "montage_image")).toHaveLength(1);
     const row = await s.repo.getMontageState(s.teamId, s.round);
-    expect(row?.status).toBe("READY");
+    expect(row?.imageSeq).toBe(row?.seq);
+    // seq is the staging counter, NOT the round (round 1 got 2 staged inputs).
+    expect(row?.imageSeq).not.toBe(s.round);
+
+    // The LAST prompt call's subjects cover BOTH staged inputs (the trailing
+    // pass re-snapshotted after the second staging landed).
+    const promptCalls = fake.calls.filter((c) => c.task === "montage_prompt");
+    const last = promptCalls[promptCalls.length - 1]!;
+    const subjects = last.input.subjects as string[];
+    expect(subjects).toContain("red balloon");
+    expect(subjects).toContain("blue star");
   });
 
-  it("(b) montage_prompt failure → FALLBACK + fallbackUsed, montage:updated {status:\"fallback\"}", async () => {
+  it("(b) montage_prompt failure (finalize trigger) → FALLBACK + lastError, payload {status:\"fallback\", error, promptText: null}, no image call", async () => {
     const s = await setup();
     tempDirs.push(s.storageDir);
     const fake = createFakeAi({ promptError: new Error("prompt model down") });
-    const deps: MontageAccumulatorDeps = {
-      repo: s.repo,
-      ai: fake.ai,
-      mockMode: false,
-      emit: s.emit,
-      storageDir: s.storageDir,
-    };
+    const deps = depsOf(s, fake.ai);
 
-    await runMontageAccumulator(deps, s.gameId);
+    // No staging — the legacy path (sized READY items) via the finalize hook.
+    await finalizeMontageAll(deps, s.gameId);
 
     const row = await s.repo.getMontageState(s.teamId, s.round);
     expect(row?.status).toBe("FALLBACK");
     expect(row?.fallbackUsed).toBe(true);
     expect(row?.imageUrl).toBeNull();
+    expect(row?.lastError).toBe("prompt model down");
+    // No prompt was generated before the failure → promptText stays null.
+    expect(row?.promptText).toBeNull();
     // The image task is never attempted after the prompt failure.
     expect(fake.calls.some((c) => c.task === "montage_image")).toBe(false);
     const updates = s.events.filter((e) => e.event === "montage:updated");
@@ -201,49 +236,117 @@ describe("runMontageAccumulator", () => {
       round: s.round,
       teamId: s.teamId,
       status: "fallback",
+      error: "prompt model down",
+      promptText: null,
     });
     expect(updates[0]!.ctx).toEqual({ gameId: s.gameId, teamId: s.teamId });
   });
 
-  it("(b2) montage_image failure → FALLBACK + fallbackUsed, montage:updated {status:\"fallback\"}", async () => {
+  it("(b2/hop 1) montage_image failure → the ATTEMPTED promptText persists + lastError; the emit carries both", async () => {
     const s = await setup();
     tempDirs.push(s.storageDir);
     const fake = createFakeAi({ imageError: new Error("image provider outage") });
-    const deps: MontageAccumulatorDeps = {
-      repo: s.repo,
-      ai: fake.ai,
-      mockMode: false,
-      emit: s.emit,
-      storageDir: s.storageDir,
-    };
+    const deps = depsOf(s, fake.ai);
 
-    await runMontageAccumulator(deps, s.gameId);
+    // Staging path: maybeStart awaits the (failing, fail-open) pass.
+    await stageMontageInput(deps, s.gameId, s.teamId, stagedInput("red balloon"));
 
     const row = await s.repo.getMontageState(s.teamId, s.round);
     expect(row?.status).toBe("FALLBACK");
     expect(row?.fallbackUsed).toBe(true);
     expect(row?.imageUrl).toBeNull();
+    expect(row?.lastError).toBe("image provider outage");
+    // The prompt DID run before the image failure — the exact image-model
+    // prompt is persisted so the GM's "View prompt" toggle survives.
+    expect(row?.promptText).toBe(
+      montageImagePrompt({ prompt: "a joyful balloon poster", styleHint: "" }),
+    );
     expect(fake.calls.some((c) => c.task === "montage_image")).toBe(true);
     const updates = s.events.filter((e) => e.event === "montage:updated");
     expect(updates).toHaveLength(1);
-    expect(updates[0]!.payload).toMatchObject({ status: "fallback" });
+    expect(updates[0]!.payload).toMatchObject({
+      status: "fallback",
+      error: "image provider outage",
+      promptText: row?.promptText,
+    });
   });
 
-  it("(c) AiBudgetExceededError → FALLBACK with ZERO AI image calls", async () => {
+  it("(hop 2) two inputs staged sequentially → imageSeq === 2 === row.seq (NOT the round)", async () => {
+    const s = await setup();
+    tempDirs.push(s.storageDir);
+    const fake = createFakeAi();
+    const deps = depsOf(s, fake.ai);
+
+    // Await each staging: the first pass settles (imageSeq 1), the second
+    // staging re-arms exactly one more pass (imageSeq 2).
+    await stageMontageInput(deps, s.gameId, s.teamId, stagedInput("red balloon"));
+    await stageMontageInput(deps, s.gameId, s.teamId, stagedInput("blue star"));
+
+    const row = await s.repo.getMontageState(s.teamId, s.round);
+    expect(row?.status).toBe("READY");
+    expect(row?.seq).toBe(2);
+    expect(row?.imageSeq).toBe(2);
+    // The core hop-2 invariant: imageSeq tracks the STAGING counter, never
+    // the round number.
+    expect(row?.imageSeq).not.toBe(s.round);
+    expect(fake.calls.filter((c) => c.task === "montage_prompt")).toHaveLength(2);
+  });
+
+  it("(hop 3) finalize skips an already-current team → still 1 prompt call, 1 montage:updated, row READY", async () => {
+    const s = await setup();
+    tempDirs.push(s.storageDir);
+    const fake = createFakeAi();
+    const deps = depsOf(s, fake.ai);
+
+    await stageMontageInput(deps, s.gameId, s.teamId, stagedInput("red balloon"));
+    // seq === imageSeq now — finalize must NOT gen again (no gen, no event).
+    await finalizeMontageAll(deps, s.gameId);
+
+    expect(fake.calls.filter((c) => c.task === "montage_prompt")).toHaveLength(1);
+    const updates = s.events.filter((e) => e.event === "montage:updated");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.payload).toMatchObject({ status: "ready" });
+    const row = await s.repo.getMontageState(s.teamId, s.round);
+    expect(row?.status).toBe("READY");
+    expect(row?.imageSeq).toBe(row?.seq);
+  });
+
+  it("(hop 4) staging lands during a held pass + finalize → exactly 2 passes (the guaranteed extra one)", async () => {
+    const s = await setup();
+    tempDirs.push(s.storageDir);
+    const fake = createFakeAi({ holdImage: true });
+    const deps = depsOf(s, fake.ai);
+
+    // Fire-and-forget staging (production wires it the same way); the pass
+    // parks on the held montage_image.
+    void stageMontageInput(deps, s.gameId, s.teamId, stagedInput("red balloon"));
+    await vi.waitFor(() => {
+      expect(fake.calls.filter((c) => c.task === "montage_image")).toHaveLength(1);
+    });
+
+    // Finalize while the pass is in flight: flags ONE guaranteed extra pass,
+    // then awaits the running loop.
+    const fin = finalizeMontageAll(deps, s.gameId);
+    fake.releaseImage();
+    await fin;
+
+    // Exactly 2 passes: the released in-flight one + the finalize extra.
+    expect(fake.calls.filter((c) => c.task === "montage_prompt")).toHaveLength(2);
+    expect(fake.calls.filter((c) => c.task === "montage_image")).toHaveLength(2);
+    const row = await s.repo.getMontageState(s.teamId, s.round);
+    expect(row?.status).toBe("READY");
+    expect(row?.imageSeq).toBe(row?.seq);
+  });
+
+  it("(c) AiBudgetExceededError (finalize trigger) → FALLBACK with ZERO AI image calls", async () => {
     const s = await setup();
     tempDirs.push(s.storageDir);
     const fake = createFakeAi({
       budgetError: new AiBudgetExceededError({ gameId: s.gameId, spentUsd: 5, budgetUsd: 5 }),
     });
-    const deps: MontageAccumulatorDeps = {
-      repo: s.repo,
-      ai: fake.ai,
-      mockMode: false,
-      emit: s.emit,
-      storageDir: s.storageDir,
-    };
+    const deps = depsOf(s, fake.ai);
 
-    await runMontageAccumulator(deps, s.gameId);
+    await finalizeMontageAll(deps, s.gameId);
 
     const row = await s.repo.getMontageState(s.teamId, s.round);
     expect(row?.status).toBe("FALLBACK");
@@ -256,22 +359,16 @@ describe("runMontageAccumulator", () => {
     expect(updates[0]!.payload).toMatchObject({ status: "fallback" });
   });
 
-  it("(d) mock mode runs end-to-end → READY, PNG persisted under storageDir, montage:updated {status:\"ready\"}", async () => {
+  it("(d) mock mode runs end-to-end (finalize trigger) → READY, PNG persisted under storageDir, montage:updated {status:\"ready\"}", async () => {
     const s = await setup();
     tempDirs.push(s.storageDir);
     const ai = await createAiRouter({
       repo: s.repo,
       env: { AI_MODE: "mock", MOCK_AI_DELAY_MS: "0", NODE_ENV: "test" } as unknown as NodeJS.ProcessEnv,
     });
-    const deps: MontageAccumulatorDeps = {
-      repo: s.repo,
-      ai,
-      mockMode: true,
-      emit: s.emit,
-      storageDir: s.storageDir,
-    };
+    const deps = depsOf(s, ai, true);
 
-    await runMontageAccumulator(deps, s.gameId);
+    await finalizeMontageAll(deps, s.gameId);
 
     const row = await s.repo.getMontageState(s.teamId, s.round);
     expect(row?.status).toBe("READY");
@@ -308,15 +405,9 @@ describe("runMontageAccumulator", () => {
       },
     });
     const fake = createFakeAi();
-    const deps: MontageAccumulatorDeps = {
-      repo: s.repo,
-      ai: fake.ai,
-      mockMode: false,
-      emit: s.emit,
-      storageDir: s.storageDir,
-    };
+    const deps = depsOf(s, fake.ai);
 
-    await runMontageAccumulator(deps, s.gameId);
+    await finalizeMontageAll(deps, s.gameId);
 
     const imageCall = fake.calls.find((c) => c.task === "montage_image");
     expect(imageCall).toBeDefined();
@@ -334,19 +425,15 @@ describe("runMontageAccumulator", () => {
     expect(row?.promptText).not.toContain("sticker");
   });
 
-  it("(e) patches GENERATING + emits montage:generating BEFORE the AI calls", async () => {
+  it("(e) staging patches GENERATING + emits montage:generating BEFORE the AI calls", async () => {
     const s = await setup();
     tempDirs.push(s.storageDir);
     const fake = createFakeAi({ holdImage: true });
-    const deps: MontageAccumulatorDeps = {
-      repo: s.repo,
-      ai: fake.ai,
-      mockMode: false,
-      emit: s.emit,
-      storageDir: s.storageDir,
-    };
+    const deps = depsOf(s, fake.ai);
 
-    const p = runMontageAccumulator(deps, s.gameId);
+    // Triggered via stageMontageInput — finalize would add a second pass, i.e.
+    // a SECOND montage:generating that would break the toHaveLength(1) below.
+    const p = stageMontageInput(deps, s.gameId, s.teamId, stagedInput("red balloon"));
     // Hold the image call open so the in-flight state is observable.
     await vi.waitFor(() => {
       expect(fake.calls.some((c) => c.task === "montage_image")).toBe(true);
@@ -365,5 +452,7 @@ describe("runMontageAccumulator", () => {
     await p;
     const settled = await s.repo.getMontageState(s.teamId, s.round);
     expect(settled?.status).toBe("READY");
+    // No duplicate pass fired: still exactly one heads-up.
+    expect(s.events.filter((e) => e.event === "montage:generating")).toHaveLength(1);
   });
 });

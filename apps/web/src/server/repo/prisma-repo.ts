@@ -666,6 +666,8 @@ export class PrismaRepo implements Repository {
           imageSeq:
             init.patch?.imageSeq === undefined ? undefined : init.patch.imageSeq,
           fallbackUsed: init.patch?.fallbackUsed,
+          lastError:
+            init.patch?.lastError === undefined ? undefined : init.patch.lastError,
         };
         const row = await tx.montageState.upsert({
           where: { teamId_round: { teamId, round } },
@@ -679,6 +681,7 @@ export class PrismaRepo implements Repository {
             imageUrl: data.imageUrl,
             imageSeq: data.imageSeq,
             fallbackUsed: data.fallbackUsed ?? false,
+            lastError: data.lastError,
           },
           update: data,
         });
@@ -713,6 +716,7 @@ export class PrismaRepo implements Repository {
     imageUrl: string | null;
     imageSeq: number | null;
     fallbackUsed: boolean;
+    lastError: string | null;
     updatedAt: Date;
   }): MontageStateRow {
     return {
@@ -726,6 +730,7 @@ export class PrismaRepo implements Repository {
       imageUrl: m.imageUrl,
       imageSeq: m.imageSeq,
       fallbackUsed: m.fallbackUsed,
+      lastError: m.lastError,
       updatedAt: m.updatedAt.getTime(),
     };
   }

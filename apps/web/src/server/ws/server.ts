@@ -46,7 +46,7 @@ import {
 } from "../layout/engine";
 import { createCritiqueScheduler, type CritiqueEmit } from "../layout/critique";
 import { runMontagePass } from "../layout/montage";
-import { runMontageAccumulator } from "../flows/montage-accumulator";
+import { finalizeMontageAll } from "../flows/montage-accumulator";
 import {
   createPromptPipelineDeps,
   submitPrompt,
@@ -511,6 +511,19 @@ export function registerSocketHandlers(
       io.to(room).emit(event, enveloped);
     }
   };
+  // Post-definition threading: pipelineDeps is created (inside the AI branch)
+  // BEFORE montageEmit exists, so the montage accumulator deps are attached
+  // here — the prompt pipeline stages every ACCEPTED submission into the
+  // team's montage row (stageMontageInput → maybeStart, fire-and-forget) so
+  // the poster is already generating (or generated) before scoring entry.
+  if (ai && pipelineDeps) {
+    pipelineDeps.montageDeps = {
+      repo,
+      ai,
+      mockMode: ai.isMock(),
+      emit: montageEmit,
+    };
+  }
   const critique = createCritiqueScheduler({
     repo,
     ai: ai ?? null,
@@ -550,8 +563,11 @@ export function registerSocketHandlers(
       // IMAGE per team (montage_prompt → montage_image → persisted PNG) and
       // emits montage:generating / montage:updated. Unlike the layout-level
       // pass it ALSO runs in mock mode (deterministic + $0), so demo games
-      // still get a poster. Fail-open: never breaks scoring.
-      await runMontageAccumulator(
+      // still get a poster. finalizeMontageAll guarantees ONE last pass over
+      // the staged-at-that-moment inputs for teams with a pass still in
+      // flight, gens idle teams with un-posted staging, and skips teams that
+      // are already current. Fail-open: never breaks scoring.
+      await finalizeMontageAll(
         {
           repo,
           ai: ai ?? null,

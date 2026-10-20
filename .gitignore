@@ -20,4 +20,4 @@ dist/
 Thumbs.db
 npm-debug.log*
 
-# prisma generated client is inside node_modules (default output), nothing extra
+# prisma generated client is inside node_modules (default output), nothing extraapps/web/public/static/montages/

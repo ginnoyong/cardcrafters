@@ -194,6 +194,7 @@ model MontageState {
   imageUrl     String?
   imageSeq     Int?
   fallbackUsed Boolean  @default(false)
+  lastError    String?
   updatedAt    DateTime @default(now())
 
   @@unique([teamId, round])

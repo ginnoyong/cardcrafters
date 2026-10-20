@@ -450,6 +450,7 @@ export class MemoryRepo implements Repository {
       imageUrl: init.patch?.imageUrl !== undefined ? init.patch.imageUrl : (existing?.imageUrl ?? null),
       imageSeq: init.patch?.imageSeq !== undefined ? init.patch.imageSeq : (existing?.imageSeq ?? null),
       fallbackUsed: init.patch?.fallbackUsed ?? existing?.fallbackUsed ?? false,
+      lastError: init.patch?.lastError !== undefined ? init.patch.lastError : (existing?.lastError ?? null),
       updatedAt: this.now(),
     };
     this.montages.set(key, next);

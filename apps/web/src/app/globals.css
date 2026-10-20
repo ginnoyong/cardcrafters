@@ -369,24 +369,6 @@ label {
   margin: 0;
 }
 
-/* GM vision-critique block: score badge + issue list (team card front). */
-.cc-critique {
-  display: grid;
-  gap: 0.25rem;
-}
-
-.cc-critique-score.is-low {
-  color: var(--danger);
-  border-color: var(--danger);
-}
-
-.cc-critique-issues {
-  margin: 0;
-  padding-left: 1.1rem;
-  font-size: 0.8rem;
-  color: var(--text-muted);
-}
-
 /* GM prompt transparency: the EXACT image-model prompt behind a team's
    poster, rendered as a collapsible read-only block under the montage
    status. Monospace, scrollable, capped height so long prompts never blow
@@ -503,6 +485,29 @@ label {
 .cc-mini h3 {
   margin: 0;
   font-size: 1rem;
+}
+
+/* Montage (poster) accumulator surfaces (GM/presenter minis + player card
+   area): while generating a small muted status line; when ready the finished
+   poster image fits its container's width (inside .cc-mini that is the 240px
+   column) so it never blows out the mini grid. */
+.cc-montage-status {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.cc-montage {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.cc-montage-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.25);
 }
 
 /* Prompt bar: input + counter + submit in one row (tap targets ≥44px). */

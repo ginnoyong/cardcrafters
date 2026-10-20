@@ -73,6 +73,7 @@ import {
 import type { ImageQueue } from "../queue/queue";
 import type { GameEvent, TransitionResult } from "../game/types";
 import type { ItemRow, Repository } from "../repo/repository";
+import { stageMontageInput, type MontageAccumulatorDeps } from "./montage-accumulator";
 
 // ---------------------------------------------------------------------------
 // Public shapes
@@ -123,6 +124,10 @@ export interface PromptPipelineDeps {
   /** Per-player submit mutex (see the SUBMIT RACES note in the module doc).
    *  Optional: absent → no serialization (only ad-hoc deps objects). */
   submitLocks?: Map<string, Promise<void>>;
+  /** Montage accumulator deps — attached POST-DEFINITION by ws/server.ts
+   *  (montageEmit does not exist when createPromptPipelineDeps runs). Absent
+   *  (tests, AI-less servers) → accepted prompts are not staged. */
+  montageDeps?: MontageAccumulatorDeps;
 }
 
 export type PromptSubmitResult =
@@ -406,6 +411,22 @@ async function runSubmit(
     }
   }
   deps.cooldowns.set(player.id, now());
+  // Montage staging (poster hop): EVERY fully-validated submission is staged
+  // into the team's montage row regardless of the sticker image outcome.
+  // Fire-and-forget: staging runs maybeStart (the gen pass loop), whose
+  // failures are converted to FALLBACK internally — a montage hiccup must
+  // never fail the submit ack.
+  if (deps.montageDeps) {
+    void stageMontageInput(deps.montageDeps, identity.gameId, player.teamId, {
+      itemId: accepted.id,
+      promptRaw: text,
+      subject: validation.normalized_subject,
+      playerId: player.id,
+      nickname: player.nickname,
+    }).catch((err) =>
+      console.warn(`[prompt-pipeline] montage staging failed for item ${accepted.id}:`, err),
+    );
+  }
   return { ok: true, itemId: accepted.id };
 }
 

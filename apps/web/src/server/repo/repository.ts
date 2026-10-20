@@ -152,6 +152,8 @@ export interface MontageStateRow {
   imageUrl: string | null;
   imageSeq: number | null;
   fallbackUsed: boolean;
+  /** Why the last gen pass fell back (null when it succeeded or never ran). */
+  lastError: string | null;
   updatedAt: number;
 }
 
@@ -254,6 +256,7 @@ export interface MontagePatch {
   imageUrl?: string | null;
   imageSeq?: number | null;
   fallbackUsed?: boolean;
+  lastError?: string | null;
 }
 
 // ---------------------------------------------------------------------------

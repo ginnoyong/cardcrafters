@@ -34,7 +34,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import QRCode from "qrcode";
 
-import { LAYOUT_CRITIQUE_LOW_SCORE, MAX_TEAMS, PHASE } from "@cardcrafters/shared";
+import { MAX_TEAMS, PHASE } from "@cardcrafters/shared";
 
 import { PeoplesChoiceBanner, StandingsList, WinnerBanner, teamLabel } from "@/components/Standings";
 import { minutesToSeconds } from "@/lib/timers";
@@ -63,7 +63,6 @@ import {
   GameStoreProvider,
   phaseLabel,
   useGameStore,
-  type ClientCritique,
   type ClientTeam,
   type SyncFullEvent,
 } from "@/lib/store";
@@ -145,7 +144,6 @@ function TeamCard({
   joinUrl,
   greetingText,
   members,
-  critique,
   qrActive,
   scoringLabel,
   onToggleQr,
@@ -157,7 +155,6 @@ function TeamCard({
   joinUrl: string;
   greetingText: string;
   members: Array<{ id: string; nickname: string; connected: boolean }>;
-  critique: ClientCritique | null;
   qrActive: boolean;
   scoringLabel: string | null;
   onToggleQr: () => void;
@@ -250,24 +247,6 @@ function TeamCard({
           </p>
         )}
 
-        {/* Montage (poster) accumulator surface: while the poster pass is in
-            flight show a small indicator next to the composed card; when the
-            poster lands (ready) swap in the image; fallback keeps the card. */}
-        {team.montageStatus === "generating" ? (
-          <p className="cc-montage-status" aria-live="polite">
-            Generating poster…
-          </p>
-        ) : team.montageStatus === "ready" && team.montageImageUrl ? (
-          <div className="cc-montage" aria-label={`poster for ${team.name}`}>
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={team.montageImageUrl}
-              alt={`Finished poster for ${team.name}`}
-              className="cc-montage-img"
-            />
-          </div>
-        ) : null}
-
         {/* Prompt transparency: the EXACT image-model prompt the accumulator
             sent for this team's poster, collapsible so it doesn't crowd the
             card. Visible whenever a prompt is known — regardless of montage
@@ -290,31 +269,6 @@ function TeamCard({
               </pre>
             ) : null}
           </>
-        ) : null}
-
-        {/* Vision layout critique (GM-only quality intel): score badge
-            (red below LAYOUT_CRITIQUE_LOW_SCORE or a failed focal check)
-            + the verdict's issues, right under the greeting. */}
-        {critique ? (
-          <div className="cc-critique" aria-label={`layout critique for ${team.name}`}>
-            <span
-              className={`cc-badge cc-critique-score${
-                critique.score < LAYOUT_CRITIQUE_LOW_SCORE || !critique.focalOk
-                  ? " is-low"
-                  : ""
-              }`}
-              aria-live="polite"
-            >
-              Layout {critique.score}/100{critique.focalOk ? "" : " · focal unclear"}
-            </span>
-            {critique.issues.length > 0 ? (
-              <ul className="cc-critique-issues">
-                {critique.issues.map((issue, i) => (
-                  <li key={i}>{issue}</li>
-                ))}
-              </ul>
-            ) : null}
-          </div>
         ) : null}
 
         {/* Inline edit flow (textarea + Save/Cancel) while editing. */}
@@ -445,10 +399,14 @@ function TeamCard({
 
 function TeamMiniCanvas({
   team,
+  montageStatus,
+  montageImageUrl,
   interactive,
   onOpen3d,
 }: {
   team: ClientTeam;
+  montageStatus?: "generating" | "ready" | "fallback" | null;
+  montageImageUrl?: string | null;
   interactive: boolean;
   onOpen3d: () => void;
 }) {
@@ -483,6 +441,26 @@ function TeamMiniCanvas({
         greeting={team.greeting.text}
         ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
       />
+      {/* Montage (poster) accumulator surface, moved here from the greeting/QR
+          TeamCard: while the poster pass is in flight show a small indicator
+          line under the live composed card; when the poster lands (ready) the
+          finished poster image renders BELOW the composed CardCanvas — the
+          composed canvas stays the live build view, the poster is the
+          as-shipped card face. Fallback/absent keeps the canvas alone. */}
+      {montageStatus === "generating" ? (
+        <p className="cc-montage-status" aria-live="polite">
+          Generating poster…
+        </p>
+      ) : montageStatus === "ready" && montageImageUrl ? (
+        <div className="cc-montage" aria-label={`poster for ${team.name}`}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={montageImageUrl}
+            alt={`Finished poster for ${team.name}`}
+            className="cc-montage-img"
+          />
+        </div>
+      ) : null}
       <p className="cc-hint" aria-live="polite">
         {readyCount} sticker{readyCount === 1 ? "" : "s"} on the card
       </p>
@@ -827,7 +805,6 @@ function Console({ game }: { game: CreatedGame }) {
               joinUrl={joinUrl}
               greetingText={team.greetingText}
               members={team.members}
-              critique={team.critique}
               qrActive={qrActive}
               scoringLabel={scoringLabelByTeam.get(team.id) ?? null}
               onToggleQr={() => setQrTeamId(qrActive ? null : team.id)}
@@ -1015,14 +992,21 @@ function Console({ game }: { game: CreatedGame }) {
           3D reveal modal for that team (winner = gloss rig). */}
       {snapshot && snapshot.teams.length > 0 ? (
         <section aria-label="live card previews" className="cc-mini-grid">
-          {snapshot.teams.map((team) => (
-            <TeamMiniCanvas
-              key={team.id}
-              team={team}
-              interactive={resultsStage && snapshot.winnerTeamId !== null}
-              onOpen3d={() => setModalTeamId(team.id)}
-            />
-          ))}
+          {snapshot.teams.map((team) => {
+            // Montage state rides the live snapshot; the Console's merged
+            // teams map is the refresh fallback (REST summary fields).
+            const merged = teams.find((t) => t.id === team.id);
+            return (
+              <TeamMiniCanvas
+                key={team.id}
+                team={team}
+                montageStatus={merged?.montageStatus ?? team.montageStatus ?? null}
+                montageImageUrl={merged?.montageImageUrl ?? team.montageImageUrl ?? null}
+                interactive={resultsStage && snapshot.winnerTeamId !== null}
+                onOpen3d={() => setModalTeamId(team.id)}
+              />
+            );
+          })}
         </section>
       ) : null}
 
