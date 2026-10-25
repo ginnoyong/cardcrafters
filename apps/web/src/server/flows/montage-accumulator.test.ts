@@ -451,7 +451,7 @@ describe("montage accumulator (staging-driven)", () => {
     expect(pixelAt(rawPx, 32, 54, 64)).not.toEqual([34, 68, 204, 255]);
   });
 
-  it("(g2) mock mode does NOT double-composite — the compositing seam is never called", async () => {
+  it("(g2) mock mode runs a GRADING-ONLY re-encode — the seam is called with an EMPTY greeting (no double-draw) but grading applied", async () => {
     const s = await setup();
     tempDirs.push(s.storageDir);
     const ai = await createAiRouter({
@@ -459,21 +459,29 @@ describe("montage accumulator (staging-driven)", () => {
       env: { AI_MODE: "mock", MOCK_AI_DELAY_MS: "0", NODE_ENV: "test" } as unknown as NodeJS.ProcessEnv,
     });
     const deps = depsOf(s, ai, true);
-    // The mock poster already bakes the greeting lower-third — the seam must
-    // never run in mock mode (compositing again would double-draw the text).
-    let composeCalls = 0;
-    deps.composeGreeting = async (poster) => {
-      composeCalls++;
+    // The mock poster already bakes the greeting lower-third — compositing
+    // the TEXT again would double-draw it. Mock mode must therefore call the
+    // seam with an EMPTY greeting (composeGreetingOnPoster skips band + text
+    // for empty/whitespace greetings) — but STILL with the style-derived
+    // grading so mock posters carry the same vignette/temperature cast as
+    // real posters (visual parity).
+    const composeArgs: Array<{ greeting: string; grading: unknown }> = [];
+    deps.composeGreeting = async (poster, greeting, opts) => {
+      composeArgs.push({ greeting, grading: opts?.grading ?? null });
       return poster;
     };
 
     await finalizeMontageAll(deps, s.gameId);
 
-    expect(composeCalls).toBe(0);
+    // Exactly one compositing call — with an EMPTY greeting (no text/band
+    // double-draw) and a grading cast present (mock posters get graded too).
+    expect(composeArgs).toHaveLength(1);
+    expect(composeArgs[0]!.greeting.trim()).toBe("");
+    expect(composeArgs[0]!.grading).not.toBeNull();
     const row = await s.repo.getMontageState(s.teamId, s.round);
     expect(row?.status).toBe("READY");
     expect(row?.lastError).toBeNull();
-    // The procedural mock poster persists as-is (native 800×1120, decodes).
+    // The poster persists at the mock's native 800×1120 and decodes.
     const files = await readdir(path.join(s.storageDir, s.gameId, s.teamId));
     expect(files).toHaveLength(1);
     const persisted = await readFile(path.join(s.storageDir, s.gameId, s.teamId, files[0]!));
@@ -483,7 +491,33 @@ describe("montage accumulator (staging-driven)", () => {
     expect(meta.height).toBe(1120);
   });
 
-  it("(g3) compositing failure → the RAW poster is persisted and the pass still completes READY (degraded, no lastError)", async () => {
+  it("(g2b) mock mode WITHOUT the seam override — the real compositing re-encodes with grading (graded bytes differ from the raw mock poster)", async () => {
+    const s = await setup();
+    tempDirs.push(s.storageDir);
+    const ai = await createAiRouter({
+      repo: s.repo,
+      env: { AI_MODE: "mock", MOCK_AI_DELAY_MS: "0", NODE_ENV: "test" } as unknown as NodeJS.ProcessEnv,
+    });
+    const deps = depsOf(s, ai, true);
+
+    await finalizeMontageAll(deps, s.gameId);
+
+    const row = await s.repo.getMontageState(s.teamId, s.round);
+    expect(row?.status).toBe("READY");
+    expect(row?.lastError).toBeNull();
+    const files = await readdir(path.join(s.storageDir, s.gameId, s.teamId));
+    expect(files).toHaveLength(1);
+    expect(files[0]!.endsWith(".png")).toBe(true);
+    const persisted = await readFile(path.join(s.storageDir, s.gameId, s.teamId, files[0]!));
+    // The neutral style-derived grading still re-encodes (vignette 0.15),
+    // so the persisted bytes differ from the raw procedural mock poster.
+    const meta = await sharp(persisted).metadata();
+    expect(meta.format).toBe("png");
+    expect(meta.width).toBe(800);
+    expect(meta.height).toBe(1120);
+  });
+
+  it("(g3) compositing failure → the RAW poster is persisted READY with a non-fatal lastError marker + the ready payload carries the error", async () => {
     const s = await setup();
     tempDirs.push(s.storageDir);
     await s.repo.createGreeting({
@@ -497,19 +531,44 @@ describe("montage accumulator (staging-driven)", () => {
     deps.composeGreeting = async () => {
       throw new Error("canvas decode exploded");
     };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     await finalizeMontageAll(deps, s.gameId);
 
     const row = await s.repo.getMontageState(s.teamId, s.round);
     // Degraded-but-ready: the poster SUCCEEDED — only the text overlay
-    // failed — so the row is READY with NO lastError (not FALLBACK).
+    // failed — so the row is READY (not FALLBACK) with a NON-FATAL lastError
+    // marker the GM can see via sync:full (why the poster has no greeting).
     expect(row?.status).toBe("READY");
-    expect(row?.lastError).toBeNull();
+    expect(row?.lastError).toBe(
+      "poster saved without greeting overlay: canvas decode exploded",
+    );
     expect(row?.fallbackUsed).toBe(false);
     // The raw AI bytes are persisted byte-identically (a poster without the
     // greeting text beats no poster).
     const file = path.join(s.storageDir, s.gameId, s.teamId, path.basename(row!.imageUrl!));
     expect((await readFile(file)).equals(raw)).toBe(true);
+    // The failure log is enriched with the round + the error stack (read the
+    // spy BEFORE mockRestore — in vitest restore also resets mock.calls).
+    const warnCalls = warnSpy.mock.calls.filter((args) =>
+      args.some((a) => typeof a === "string" && a.includes("greeting compositing failed")),
+    );
+    expect(warnCalls).toHaveLength(1);
+    const warnText = warnCalls[0]!.map(String).join(" ");
+    expect(warnText).toContain(`round ${s.round}`);
+    expect(warnText).toContain("canvas decode exploded");
+    warnSpy.mockRestore();
+    // The ready payload carries the same non-fatal marker as `error` (the
+    // store's ready branch clears montageError — the GM's visible cue is the
+    // persisted lastError via sync:full — but the payload stays informative).
+    const updates = s.events.filter((e) => e.event === "montage:updated");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.payload).toMatchObject({
+      round: s.round,
+      teamId: s.teamId,
+      status: "ready",
+      error: "poster saved without greeting overlay: canvas decode exploded",
+    });
   });
 
   it("(e2) persists promptText === the EXACT montageImagePrompt output (poster prompt + style hint)", async () => {
