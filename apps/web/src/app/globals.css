@@ -510,6 +510,84 @@ label {
   box-shadow: 0 2px 8px rgb(0 0 0 / 0.25);
 }
 
+/* Team showcase (montage-poster hero layout — player SCORING+ screen and the
+   presenter's one-at-a-time stage): MAIN hero (poster image, or the composed
+   CardCanvas while generating / on fallback) above a 2-column SUB row with
+   the sticker CardCanvas on the left and the team's prompts list on the
+   right. When the composed card already IS the hero (no poster yet) the
+   left sub is omitted (no duplicate card below). */
+.cc-showcase {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.cc-showcase-main {
+  width: min(100%, 480px);
+  margin-inline: auto;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.cc-showcase-subs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.9rem;
+  align-items: start;
+}
+
+.cc-showcase-sub {
+  min-width: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.cc-showcase-sub h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.cc-showcase-prompts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}
+
+@media (max-width: 720px) {
+  .cc-showcase-subs {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Presenter one-at-a-time stage (SCORING onward): one team's showcase fills
+   the viewport below the header/meta rows; the cycle buttons ride the stage
+   header. Reuses .cc-btn / .cc-btn-row for the buttons. */
+.cc-present-stage {
+  min-height: calc(100dvh - 6rem);
+  display: grid;
+  gap: 0.9rem;
+  align-content: start;
+}
+
+.cc-present-stage-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.cc-present-stage-header h2 {
+  margin: 0;
+}
+
+.cc-present-stage-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
 /* Prompt bar: input + counter + submit in one row (tap targets ≥44px). */
 
 .cc-promptbar {

@@ -36,6 +36,7 @@ import NoUndoNotice from "@/components/player/NoUndoNotice";
 import PromptBar, { createPromptBarHandle, type PromptBarHandle } from "@/components/player/PromptBar";
 import RatingPanel, { type ScoreSubmitOutcome } from "@/components/player/RatingPanel";
 import { selectMyItems } from "@/components/player/my-items";
+import TeamShowcase from "@/components/TeamShowcase";
 import { PeoplesChoiceBanner, StandingsList, WinnerBanner, teamLabel } from "@/components/Standings";
 import {
   createGameSocket,
@@ -327,6 +328,12 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
   // (ledger empty) — NoUndoNotice itself also checks the localStorage ack.
   const noUndoNeeded = build && Object.keys(snapshot?.myItems ?? {}).length === 0;
 
+  // Montage-poster showcase (SCORING onward): the AI poster hero (or the
+  // composed card while generating / on fallback) with the sticker card +
+  // prompts as subs. When active it OWNS the card surfaces — the standalone
+  // CardCanvas + montage block below is suppressed. BUILD stays unchanged.
+  const showcaseActive = locked && !!team;
+
   // The countdown ticks during BUILD and SCORING (the two timed phases that
   // matter to players; REVEAL's 30s auto-expiry is presenter/GM business).
   const timed = build || snapshot?.phase === PHASE.SCORING;
@@ -449,6 +456,14 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
             ) : null}
           </section>
 
+          {/* Montage-poster showcase (SCORING onward): MAIN = the AI poster
+              (or the composed card while generating / on fallback) directly
+              under the team-name header; SUBS = sticker card + prompts row.
+              Owns both card surfaces — the standalone CardCanvas + montage
+              block below is suppressed while active. BUILD keeps the old
+              layout byte-identical. */}
+          {showcaseActive && team ? <TeamShowcase team={team} testId="player-showcase" /> : null}
+
           {build ? (
             <>
               <PromptBar
@@ -513,35 +528,41 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
             </section>
           )}
 
-          <CardCanvas
-            items={team.items}
-            layout={team.layout}
-            greeting={team.greeting.text}
-            cardRatioW={DEFAULT_CARD_RATIO_W}
-            cardRatioH={DEFAULT_CARD_RATIO_H}
-            myPlayerId={identity.playerId}
-            highlightItemId={highlightItemId}
-            onItemTap={handleHighlight}
-            ariaLabel={`your team's card — ${team.items.filter((i) => i.status === "ready").length} stickers placed`}
-          />
-
-          {/* Montage (poster) accumulator surface — mirrors gm/page.tsx: while
-              the poster pass is in flight show a small indicator next to the
-              composed card; when the poster lands (ready) show the image
-              (the composed card stays); fallback keeps the card unchanged. */}
-          {team.montageStatus === "generating" ? (
-            <p className="cc-montage-status" aria-live="polite">
-              Generating poster…
-            </p>
-          ) : team.montageStatus === "ready" && team.montageImageUrl ? (
-            <div className="cc-montage" aria-label={`poster for ${team.name}`}>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={team.montageImageUrl}
-                alt={`Finished poster for ${team.name}`}
-                className="cc-montage-img"
+          {!showcaseActive ? (
+            <>
+              <CardCanvas
+                items={team.items}
+                layout={team.layout}
+                greeting={team.greeting.text}
+                cardRatioW={DEFAULT_CARD_RATIO_W}
+                cardRatioH={DEFAULT_CARD_RATIO_H}
+                myPlayerId={identity.playerId}
+                highlightItemId={highlightItemId}
+                onItemTap={handleHighlight}
+                ariaLabel={`your team's card — ${team.items.filter((i) => i.status === "ready").length} stickers placed`}
               />
-            </div>
+
+              {/* Montage (poster) accumulator surface — mirrors gm/page.tsx:
+                  while the poster pass is in flight show a small indicator
+                  next to the composed card; when the poster lands (ready)
+                  show the image (the composed card stays); fallback keeps the
+                  card unchanged. Suppressed while the showcase owns these
+                  surfaces (SCORING onward). */}
+              {team.montageStatus === "generating" ? (
+                <p className="cc-montage-status" aria-live="polite">
+                  Generating poster…
+                </p>
+              ) : team.montageStatus === "ready" && team.montageImageUrl ? (
+                <div className="cc-montage" aria-label={`poster for ${team.name}`}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={team.montageImageUrl}
+                    alt={`Finished poster for ${team.name}`}
+                    className="cc-montage-img"
+                  />
+                </div>
+              ) : null}
+            </>
           ) : null}
 
           <MySubmissions items={myItems} onHighlight={handleHighlight} />

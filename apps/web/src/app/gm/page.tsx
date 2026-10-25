@@ -481,12 +481,16 @@ function RevealModal({
   teamId,
   teamName,
   gloss,
+  montageImageUrl,
   onClose,
 }: {
   code: string;
   teamId: string;
   teamName: string;
   gloss: boolean;
+  /** Team's AI-montage poster URL, when one exists. Preferred over the
+   *  composed render; the reveal-card endpoint stays the fallback. */
+  montageImageUrl?: string | null;
   onClose: () => void;
 }) {
   const closeRef = useRef<HTMLButtonElement | null>(null);
@@ -534,7 +538,9 @@ function RevealModal({
           label={teamName}
           testId="gm-3d-reveal"
           gloss={gloss}
-          textureUrl={`/api/games/${encodeURIComponent(code)}/reveal-card?teamId=${encodeURIComponent(teamId)}`}
+          textureUrl={montageImageUrl ?? `/api/games/${encodeURIComponent(code)}/reveal-card?teamId=${encodeURIComponent(teamId)}`}
+          kicker={gloss ? undefined : "Team card"}
+          trophy={gloss}
         />
       </div>
     </div>
@@ -1011,7 +1017,10 @@ function Console({ game }: { game: CreatedGame }) {
       ) : null}
 
       {/* 3D reveal modal (REVEAL/RESULTS): flip through every team's finished
-          card; the winner's card gets the gloss treatment. */}
+          card; the winner's card gets the gloss treatment + winner wording.
+          Non-winners show a neutral "Team card" kicker without the trophy.
+          The AI-montage poster is preferred as the texture; the composed
+          render (reveal-card endpoint) is the fallback. */}
       {modalTeamId && snapshot ? (
         <RevealModal
           code={game.code}
@@ -1020,6 +1029,11 @@ function Console({ game }: { game: CreatedGame }) {
             snapshot.teams.find((t) => t.id === modalTeamId)?.name ?? "Team"
           }
           gloss={modalTeamId === snapshot.winnerTeamId}
+          montageImageUrl={(() => {
+            const merged = teams.find((t) => t.id === modalTeamId);
+            const live = snapshot.teams.find((t) => t.id === modalTeamId);
+            return merged?.montageImageUrl ?? live?.montageImageUrl ?? null;
+          })()}
           onClose={() => setModalTeamId(null)}
         />
       ) : null}

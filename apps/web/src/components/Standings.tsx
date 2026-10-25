@@ -17,16 +17,22 @@ import type { ClientStanding } from "@/lib/store";
 
 export function WinnerBanner({
   label,
+  kicker = "The winner is…",
+  trophy = true,
   testId = "winner-banner",
 }: {
   /** Winning team's display name/label. */
   label: string;
+  /** Kicker line above the name ("The winner is…" by default). */
+  kicker?: string;
+  /** Whether the 🏆 trophy prefix is shown (true by default). */
+  trophy?: boolean;
   testId?: string;
 }) {
   return (
     <section className="cc-card cc-winner-banner" role="status" aria-label="the winner" data-testid={testId}>
-      <p className="cc-winner-kicker">The winner is…</p>
-      <p className="cc-winner-name">🏆 {label}</p>
+      <p className="cc-winner-kicker">{kicker}</p>
+      <p className="cc-winner-name">{trophy ? `🏆 ${label}` : label}</p>
     </section>
   );
 }

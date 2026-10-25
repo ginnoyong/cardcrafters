@@ -20,4 +20,7 @@ dist/
 Thumbs.db
 npm-debug.log*
 
-# prisma generated client is inside node_modules (default output), nothing extraapps/web/public/static/montages/
+# prisma generated client is inside node_modules (default output), nothing extra
+
+# runtime-generated montage posters (per-game artifacts, never commit)
+apps/web/public/static/montages/

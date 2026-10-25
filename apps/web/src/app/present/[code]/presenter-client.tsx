@@ -47,6 +47,7 @@ import {
   teamLabel,
 } from "@/components/Standings";
 import { Reveal3D } from "@/components/Reveal3D";
+import TeamShowcase from "@/components/TeamShowcase";
 import { GameStoreProvider, phaseLabel, useGameStore, type SyncFullEvent } from "@/lib/store";
 
 function useCountdown(phaseEndsAt: number | null, serverNow: number): number | null {
@@ -278,6 +279,30 @@ function PresenterBoard({ code }: { code: string }) {
     snapshot?.standings.find((s) => s.teamId === snapshot.peoplesChoiceTeamId)?.label ||
     "";
 
+  // One-at-a-time stage (SCORING onward): which team's showcase fills the
+  // screen. Wrap-around prev/next; the index clamps when the team count
+  // shrinks (a team leaves / round reset) so the stage never shows empty.
+  const teamCount = snapshot?.teams.length ?? 0;
+  const [stageIndex, setStageIndex] = useState(0);
+  const clampedStageIndex = teamCount > 0 ? Math.min(stageIndex, teamCount - 1) : 0;
+  const stageTeam = snapshot?.teams[clampedStageIndex] ?? null;
+  const showStage =
+    !!snapshot &&
+    !!stageTeam &&
+    [PHASE.SCORING, PHASE.JUDGING, PHASE.REVEAL, PHASE.RESULTS].includes(
+      snapshot.phase as (typeof PHASE)[keyof typeof PHASE],
+    );
+  const stepStage = useCallback(
+    (delta: number) => {
+      setStageIndex((i) => {
+        if (teamCount <= 0) return 0;
+        const base = Math.min(i, teamCount - 1);
+        return (base + delta + teamCount) % teamCount;
+      });
+    },
+    [teamCount],
+  );
+
   return (
     <main className="cc-main">
       <header className="cc-header">
@@ -310,10 +335,11 @@ function PresenterBoard({ code }: { code: string }) {
           />
         ))}
       </section>
-      {/* Live card grid: one read-only mini canvas per team, right under the
-          team overview cards (GREETINGS: greeting + empty canvas; BUILD:
-          live items + layout). */}
-      {snapshot && snapshot.teams.length > 0 ? (
+      {/* BUILD (and the pre-build LOBBY/GREETINGS phases): live card grid —
+          one read-only mini canvas per team, right under the team overview
+          cards (greeting + empty canvas; live items + layout). From SCORING
+          onward this grid is REPLACED by the one-at-a-time stage below. */}
+      {snapshot && snapshot.teams.length > 0 && !showStage ? (
         <section aria-label="live cards" className="cc-mini-grid">
           {snapshot.teams.map((team) => {
             const readyCount = team.items.filter((i) => i.status === "ready").length;
@@ -328,32 +354,52 @@ function PresenterBoard({ code }: { code: string }) {
                   greeting={team.greeting.text}
                   ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
                 />
-                {/* Montage (poster) accumulator surface — moved here from the
-                    team META card so the poster shows next to the team's live
-                    card: generating → small indicator line under the composed
-                    canvas; ready → the finished poster image (the composed
-                    CardCanvas stays the live build view); fallback/absent →
-                    unchanged. */}
-                {team.montageStatus === "generating" ? (
-                  <p className="cc-montage-status" aria-live="polite">
-                    Generating poster…
-                  </p>
-                ) : team.montageStatus === "ready" && team.montageImageUrl ? (
-                  <div className="cc-montage" aria-label={`poster for ${team.name}`}>
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={team.montageImageUrl}
-                      alt={`Finished poster for ${team.name}`}
-                      className="cc-montage-img"
-                    />
-                  </div>
-                ) : null}
                 <p className="cc-hint" aria-live="polite">
                   {readyCount} sticker{readyCount === 1 ? "" : "s"} on the card
                 </p>
               </div>
             );
           })}
+        </section>
+      ) : null}
+
+      {/* SCORING onward: one-at-a-time stage — a single team's showcase fills
+          the screen (same main/sub layout as the player view), with ←/→
+          wrap-around cycle buttons; the meta TeamCard grid (QR/roster) stays
+          above. The montage surfaces live inside TeamShowcase now (poster
+          hero / generating indicator), so the per-mini montage blocks are
+          gone. */}
+      {showStage && stageTeam ? (
+        <section aria-label="team showcase stage" className="cc-present-stage" data-testid="presenter-stage">
+          <div className="cc-present-stage-header">
+            <h2>
+              {stageTeam.name} <span className="cc-muted">({stageTeam.label})</span>
+            </h2>
+            <span className="cc-badge">
+              {clampedStageIndex + 1} of {teamCount}
+            </span>
+            <div className="cc-present-stage-actions">
+              <button
+                type="button"
+                className="cc-btn"
+                data-testid="presenter-prev"
+                aria-label={`Previous team (${((clampedStageIndex - 1 + teamCount) % teamCount) + 1} of ${teamCount})`}
+                onClick={() => stepStage(-1)}
+              >
+                ← Prev
+              </button>
+              <button
+                type="button"
+                className="cc-btn"
+                data-testid="presenter-next"
+                aria-label={`Next team (${((clampedStageIndex + 1) % teamCount) + 1} of ${teamCount})`}
+                onClick={() => stepStage(1)}
+              >
+                Next →
+              </button>
+            </div>
+          </div>
+          <TeamShowcase team={stageTeam} testId={`presenter-showcase-${stageTeam.id}`} />
         </section>
       ) : null}
 

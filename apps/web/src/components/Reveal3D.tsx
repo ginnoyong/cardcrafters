@@ -48,6 +48,8 @@ export function Reveal3D({
   testId = "winner-banner",
   gloss = false,
   textureUrl,
+  kicker = "The winner is…",
+  trophy = true,
 }: {
   /** Game code — resolves the reveal-card texture endpoint. */
   code: string;
@@ -59,6 +61,10 @@ export function Reveal3D({
   gloss?: boolean;
   /** Card texture URL (defaults to the game's reveal-card endpoint). */
   textureUrl?: string;
+  /** Kicker line above the name ("The winner is…" by default). */
+  kicker?: string;
+  /** Whether the 🏆 trophy prefix is shown (true by default). */
+  trophy?: boolean;
 }) {
   const [mode, setMode] = useState<Mode>("pending");
   /** Why we fell back to the static banner (null until a fallback fires). */
@@ -136,7 +142,7 @@ export function Reveal3D({
     // "pending" (first frame) + every fallback → the static banner.
     return (
       <div data-reveal-mode="static" data-reveal-reason={fallback ?? undefined}>
-        <WinnerBanner label={label} testId={testId} />
+        <WinnerBanner label={label} kicker={kicker} trophy={trophy} testId={testId} />
       </div>
     );
   }
@@ -150,8 +156,8 @@ export function Reveal3D({
       data-reveal-mode="3d"
       data-reveal-reason={fallback ?? undefined}
     >
-      <p className="cc-winner-kicker">The winner is…</p>
-      <p className="cc-winner-name">🏆 {label}</p>
+      <p className="cc-winner-kicker">{kicker}</p>
+      <p className="cc-winner-name">{trophy ? `🏆 ${label}` : label}</p>
       <div className="cc-reveal3d-stage" ref={stageRef} aria-hidden="true">
         {/* The <canvas> is created by the Three.js renderer. */}
       </div>
