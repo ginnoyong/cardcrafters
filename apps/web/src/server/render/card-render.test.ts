@@ -16,13 +16,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
+import { createCanvas } from "@napi-rs/canvas";
 import sharp from "sharp";
 
 import { DEFAULT_CARD_CONFIG, type MontageGrading, type StyleDerivation } from "@cardcrafters/shared";
 
 import { drawMockSticker } from "../ai/mock-provider";
 import { BASE_COVERAGE, REF_SIZE, cardBoxNormalized, baseFit, greetingZonePx } from "../../lib/canvas-geometry";
-import { DEFAULT_CARD_WIDTH_PX, deriveGradingFromStyle, renderCardPng } from "./card-render";
+import { DEFAULT_CARD_WIDTH_PX, composeGreetingOnPoster, deriveGradingFromStyle, renderCardPng } from "./card-render";
 
 const RATIO_W = DEFAULT_CARD_CONFIG.cardRatioW;
 const RATIO_H = DEFAULT_CARD_CONFIG.cardRatioH;
@@ -367,5 +368,70 @@ describe("deriveGradingFromStyle", () => {
       contrast: 1,
       vignette: 0.15,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// composeGreetingOnPoster (poster greeting compositing)
+// ---------------------------------------------------------------------------
+
+/** Synthetic flat-color poster PNG (the stand-in "raw AI output"). */
+function flatPoster(w: number, h: number, color = "#2244cc"): Buffer {
+  const canvas = createCanvas(w, h);
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, w, h);
+  return canvas.toBuffer("image/png");
+}
+
+describe("composeGreetingOnPoster", () => {
+  it("draws the greeting into a soft lower-third band; dimensions preserved; output decodes", async () => {
+    const poster = flatPoster(200, 280);
+    const out = await composeGreetingOnPoster(poster, "Cheers to you, Linda!");
+
+    // Composited output differs from the raw input bytes…
+    expect(out.equals(poster)).toBe(false);
+    // …decodes as a PNG at the poster's NATIVE dimensions.
+    const meta = await sharp(out).metadata();
+    expect(meta.format).toBe("png");
+    expect(meta.width).toBe(200);
+    expect(meta.height).toBe(280);
+
+    // Pixel probe: the lower third (y ≥ 280·2/3 ≈ 187) carries the soft band
+    // (no longer the flat poster color), while the artwork stage above is
+    // untouched (no grading supplied → pixel-identity).
+    const raw = await sharp(out).ensureAlpha().raw().toBuffer();
+    const flat: [number, number, number, number] = [34, 68, 204, 255];
+    expect(pixelAt(raw, 100, 30, 200)).toEqual(flat);
+    expect(pixelAt(raw, 100, 250, 200)).not.toEqual(flat);
+    // And the band is a light paper-tone blend, not dark text spill-over.
+    const band = pixelAt(raw, 100, 250, 200);
+    expect(band[0]!).toBeGreaterThan(150);
+  });
+
+  it("empty/whitespace greeting with no grading → byte-identical output", async () => {
+    const poster = flatPoster(200, 280);
+    const out = await composeGreetingOnPoster(poster, "   \n\t");
+    expect(out.equals(poster)).toBe(true);
+  });
+
+  it("whitespace-only greeting still applies grading when given", async () => {
+    const poster = flatPoster(120, 120);
+    const out = await composeGreetingOnPoster(poster, "  ", {
+      grading: { temperature: 0.8, saturation: 1, contrast: 1, vignette: 0 },
+    });
+    expect(out.equals(poster)).toBe(false);
+    // The warm temperature tint washes the whole card (α ≈ 0.18·0.8).
+    const raw = await sharp(out).ensureAlpha().raw().toBuffer();
+    const px = pixelAt(raw, 60, 30, 120);
+    // Warm tint #ff9a3c at α 0.144 over #2244cc → red clearly rises.
+    expect(px[0]!).toBeGreaterThan(60);
+    expect(px[2]!).toBeLessThan(204);
+  });
+
+  it("undecodable poster bytes → throws (the caller falls back to the raw bytes)", async () => {
+    await expect(
+      composeGreetingOnPoster(Buffer.from("definitely not a png"), "Hi!"),
+    ).rejects.toThrow();
   });
 });

@@ -16,11 +16,13 @@
  *    final gen there.
  */
 
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createCanvas } from "@napi-rs/canvas";
+import sharp from "sharp";
 
 import { DEFAULT_CARD_CONFIG } from "@cardcrafters/shared";
 
@@ -65,6 +67,8 @@ interface FakeAiOpts {
   budgetError?: Error;
   /** Hold montage_image on a deferred until releaseImage() is called. */
   holdImage?: boolean;
+  /** montage_image returns this base64 instead of the 1×1 placeholder. */
+  imageBase64?: string;
 }
 
 /** Controllable fake implementing the accumulator's MontageAi surface. */
@@ -89,7 +93,11 @@ function createFakeAi(opts: FakeAiOpts = {}): {
       // montage_image (the only other task the accumulator calls).
       if (opts.imageError) throw opts.imageError;
       if (opts.holdImage) await imageGate;
-      return { data: null, imageBase64: FAKE_PNG_B64, imageMime: "image/png" };
+      return {
+        data: null,
+        imageBase64: opts.imageBase64 ?? FAKE_PNG_B64,
+        imageMime: "image/png",
+      };
     },
   };
   return { ai, calls, releaseImage };
@@ -156,6 +164,22 @@ function stagedInput(subject: string, nickname = "Alex"): StageMontageInput {
 
 /** Fresh temp storage dir per test (cleaned up in afterEach). */
 const tempDirs: string[] = [];
+
+/** A stand-in "AI poster": 64×64 flat-color PNG drawn on a real canvas —
+ *  big enough that the composited lower-third band is pixel-probeable. */
+function fakePosterPng(color = "#2244cc"): Buffer {
+  const canvas = createCanvas(64, 64);
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, 64, 64);
+  return canvas.toBuffer("image/png");
+}
+
+/** RGBA pixel at (x, y) from a raw decode. */
+function pixelAt(raw: Buffer, x: number, y: number, width: number): [number, number, number, number] {
+  const i = (y * width + x) * 4;
+  return [raw[i]!, raw[i + 1]!, raw[i + 2]!, raw[i + 3]!];
+}
 afterEach(async () => {
   while (tempDirs.length > 0) {
     await rm(tempDirs.pop()!, { recursive: true, force: true });
@@ -388,6 +412,104 @@ describe("montage accumulator (staging-driven)", () => {
       status: "ready",
       imageUrl: row?.imageUrl,
     });
+  });
+
+  it("(g) real mode composites the greeting onto the poster — the raw AI output is never persisted as-is", async () => {
+    const s = await setup();
+    tempDirs.push(s.storageDir);
+    // The card's greeting — the playtest bug was that montage posters shipped
+    // without it because the raw generated image was served as-is.
+    await s.repo.createGreeting({
+      teamId: s.teamId,
+      round: s.round,
+      text: "Cheers to you, Linda!",
+    });
+    const raw = fakePosterPng();
+    const fake = createFakeAi({ imageBase64: raw.toString("base64") });
+    const deps = depsOf(s, fake.ai);
+
+    await finalizeMontageAll(deps, s.gameId);
+
+    const row = await s.repo.getMontageState(s.teamId, s.round);
+    expect(row?.status).toBe("READY");
+    expect(row?.lastError).toBeNull();
+    const file = path.join(s.storageDir, s.gameId, s.teamId, path.basename(row!.imageUrl!));
+    const persisted = await readFile(file);
+    // Compositing ran: the persisted bytes differ from the raw AI output…
+    expect(persisted.equals(raw)).toBe(false);
+    // …and decode as a PNG at the poster's native dimensions.
+    const meta = await sharp(persisted).metadata();
+    expect(meta.format).toBe("png");
+    expect(meta.width).toBe(64);
+    expect(meta.height).toBe(64);
+    // Pixel probe: the lower-third band center is no longer the flat poster
+    // color (translucent paper band + dark greeting text drawn over it),
+    // while the upper artwork stage is untouched (the neutral style-derived
+    // grading is pixel-identity away from the corners).
+    const rawPx = await sharp(persisted).ensureAlpha().raw().toBuffer();
+    expect(pixelAt(rawPx, 32, 8, 64)).toEqual([34, 68, 204, 255]);
+    expect(pixelAt(rawPx, 32, 54, 64)).not.toEqual([34, 68, 204, 255]);
+  });
+
+  it("(g2) mock mode does NOT double-composite — the compositing seam is never called", async () => {
+    const s = await setup();
+    tempDirs.push(s.storageDir);
+    const ai = await createAiRouter({
+      repo: s.repo,
+      env: { AI_MODE: "mock", MOCK_AI_DELAY_MS: "0", NODE_ENV: "test" } as unknown as NodeJS.ProcessEnv,
+    });
+    const deps = depsOf(s, ai, true);
+    // The mock poster already bakes the greeting lower-third — the seam must
+    // never run in mock mode (compositing again would double-draw the text).
+    let composeCalls = 0;
+    deps.composeGreeting = async (poster) => {
+      composeCalls++;
+      return poster;
+    };
+
+    await finalizeMontageAll(deps, s.gameId);
+
+    expect(composeCalls).toBe(0);
+    const row = await s.repo.getMontageState(s.teamId, s.round);
+    expect(row?.status).toBe("READY");
+    expect(row?.lastError).toBeNull();
+    // The procedural mock poster persists as-is (native 800×1120, decodes).
+    const files = await readdir(path.join(s.storageDir, s.gameId, s.teamId));
+    expect(files).toHaveLength(1);
+    const persisted = await readFile(path.join(s.storageDir, s.gameId, s.teamId, files[0]!));
+    const meta = await sharp(persisted).metadata();
+    expect(meta.format).toBe("png");
+    expect(meta.width).toBe(800);
+    expect(meta.height).toBe(1120);
+  });
+
+  it("(g3) compositing failure → the RAW poster is persisted and the pass still completes READY (degraded, no lastError)", async () => {
+    const s = await setup();
+    tempDirs.push(s.storageDir);
+    await s.repo.createGreeting({
+      teamId: s.teamId,
+      round: s.round,
+      text: "Cheers to you, Linda!",
+    });
+    const raw = fakePosterPng();
+    const fake = createFakeAi({ imageBase64: raw.toString("base64") });
+    const deps = depsOf(s, fake.ai);
+    deps.composeGreeting = async () => {
+      throw new Error("canvas decode exploded");
+    };
+
+    await finalizeMontageAll(deps, s.gameId);
+
+    const row = await s.repo.getMontageState(s.teamId, s.round);
+    // Degraded-but-ready: the poster SUCCEEDED — only the text overlay
+    // failed — so the row is READY with NO lastError (not FALLBACK).
+    expect(row?.status).toBe("READY");
+    expect(row?.lastError).toBeNull();
+    expect(row?.fallbackUsed).toBe(false);
+    // The raw AI bytes are persisted byte-identically (a poster without the
+    // greeting text beats no poster).
+    const file = path.join(s.storageDir, s.gameId, s.teamId, path.basename(row!.imageUrl!));
+    expect((await readFile(file)).equals(raw)).toBe(true);
   });
 
   it("(e2) persists promptText === the EXACT montageImagePrompt output (poster prompt + style hint)", async () => {

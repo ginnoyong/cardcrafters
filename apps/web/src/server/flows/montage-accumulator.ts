@@ -11,8 +11,10 @@
  *      sized READY items only when nothing was ever staged — legacy/seeded
  *      cards), patches GENERATING + emits `montage:generating` BEFORE any AI
  *      work, runs montage_prompt → montage_image under the per-pass timeout
- *      (deps.timeoutMs, default 90s), persists the bytes exactly like
- *      item-image.ts and sets status READY + imageSeq = the SNAPSHOT seq
+ *      (deps.timeoutMs, default 90s), composites the team's greeting text
+ *      onto the poster (real mode ONLY — the mock poster already bakes the
+ *      greeting; on compositing failure the raw poster is persisted, READY),
+ *      persists the bytes exactly like item-image.ts and sets status READY + imageSeq = the SNAPSHOT seq
  *      (NOT the round) + promptText = the EXACT montageImagePrompt output.
  *   3. TRAILING EDGE — staging that lands DURING a pass is picked up by the
  *      next loop iteration (seq > imageSeq again), so the poster converges
@@ -60,6 +62,7 @@ import type { Repository, MontageInput } from "../repo/repository";
 import { AiBudgetExceededError } from "../ai/errors";
 import type { MontageAi } from "../layout/montage";
 import type { LayoutEmit } from "../layout/engine";
+import { composeGreetingOnPoster, deriveGradingFromStyle } from "../render/card-render";
 
 const here = path.dirname(fileURLToPath(import.meta.url)); // .../src/server/flows
 
@@ -83,6 +86,10 @@ export interface MontageAccumulatorDeps {
   storageDir?: string;
   /** Per-gen-pass AI timeout (Promise.race). Default: 90s. */
   timeoutMs?: number;
+  /** Greeting-on-poster compositing seam (tests): defaults to
+   *  composeGreetingOnPoster (render/card-render). Inject a failing or
+   *  observing fn to exercise the compositing fallback / skip paths. */
+  composeGreeting?: typeof composeGreetingOnPoster;
 }
 
 /** What the prompt pipeline stages per ACCEPTED submission. */
@@ -367,16 +374,50 @@ async function runGenPass(
       throw new Error("montage_image returned no image bytes");
     }
     const { imageBase64, imageMime } = imageRes;
+    const rawBytes = Buffer.from(imageBase64, "base64");
+
+    // GREETING COMPOSITING — the montage_prompt template deliberately tells
+    // the image model to leave the lower third open and NOT render the
+    // greeting ("Greeting text (to leave room for, do NOT render it in the
+    // image)"), so the REAL path must composite the greeting onto the poster
+    // before persisting — the raw AI output must never be served as-is (the
+    // playtest bug: montage posters shipped without the card's message).
+    // MOCK MODE SKIPS compositing: the mock provider's procedural poster
+    // already bakes the greeting lower-third (mockMontageImageResult), so
+    // compositing again would double-draw the text.
+    // Degraded-but-ready: if compositing throws (decode failure, canvas
+    // error) the RAW poster bytes are persisted anyway — a poster without
+    // the greeting text beats no poster — and the pass still completes READY
+    // (lastError stays null; only the compositing failure is logged).
+    let posterBytes: Buffer = rawBytes;
+    if (!deps.mockMode) {
+      try {
+        const composeGreeting = deps.composeGreeting ?? composeGreetingOnPoster;
+        posterBytes = await composeGreeting(rawBytes, greeting?.text ?? "", {
+          grading: deriveGradingFromStyle(style, teamId),
+        });
+      } catch (err) {
+        posterBytes = rawBytes;
+        console.warn(
+          `[montage-accumulator] game ${gameId} team ${teamId} greeting compositing failed — persisting the raw poster:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
 
     // (d) Persist image bytes — the SAME storage pattern as item-image.ts:
     // PNG under the public/static storage root, subdir per game/team,
     // served at the matching /static/ URL (no user text in the path).
     const storageDir = deps.storageDir ?? DEFAULT_MONTAGE_DIR;
-    const ext = imageMime === "image/jpeg" ? "jpg" : "png";
+    // A successfully composited poster is a fresh PNG encode at native size
+    // (composeGreetingOnPoster normalizes through sharp); the unchanged
+    // fallback (mock mode / compositing failure) keeps the mime-derived ext.
+    const ext =
+      posterBytes !== rawBytes ? "png" : imageMime === "image/jpeg" ? "jpg" : "png";
     const fileName = `montage-${teamId}-${round}-${Date.now()}.${ext}`;
     const dir = path.join(storageDir, gameId, teamId);
     await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, fileName), Buffer.from(imageBase64, "base64"));
+    await writeFile(path.join(dir, fileName), posterBytes);
     const imageUrl = `/static/montages/${gameId}/${teamId}/${fileName}`;
 
     await repo.upsertMontageState(teamId, round, {
