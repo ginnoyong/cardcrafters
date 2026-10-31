@@ -303,6 +303,19 @@ function PresenterBoard({
   // focused team's neighbour, so the next step continues from the team
   // actually on screen instead of wherever stageIndex was left.
   const [focusTeamId, setFocusTeamId] = useState<string | null>(initialFocusTeamId ?? null);
+
+  // Review L3: a deep-linked team latch must not survive a phase change —
+  // otherwise the GM picking a winner while a View tab is latched pins that
+  // team through REVEAL/RESULTS and the next round. Clear on phase change.
+  const latchPhaseRef = useRef<string | null>(null);
+  useEffect(() => {
+    const phase = snapshot?.phase ?? null;
+    if (latchPhaseRef.current !== null && latchPhaseRef.current !== phase && focusTeamId) {
+      setFocusTeamId(null);
+    }
+    latchPhaseRef.current = phase;
+  }, [snapshot?.phase, focusTeamId]);
+
   const clampedStageIndex = teamCount > 0 ? Math.min(stageIndex, teamCount - 1) : 0;
   const focusedIndex = focusTeamId
     ? (snapshot?.teams.findIndex((t) => t.id === focusTeamId) ?? -1)
@@ -420,7 +433,7 @@ function PresenterBoard({
                 type="button"
                 className="cc-btn"
                 data-testid="presenter-prev"
-                aria-label={`Previous team (${((clampedStageIndex - 1 + teamCount) % teamCount) + 1} of ${teamCount})`}
+                aria-label={`Previous team (${(((latched ? focusedIndex : clampedStageIndex) - 1 + teamCount) % teamCount) + 1} of ${teamCount})`}
                 onClick={() => stepStage(-1)}
               >
                 ← Prev
@@ -429,7 +442,7 @@ function PresenterBoard({
                 type="button"
                 className="cc-btn"
                 data-testid="presenter-next"
-                aria-label={`Next team (${((clampedStageIndex + 1) % teamCount) + 1} of ${teamCount})`}
+                aria-label={`Next team (${(((latched ? focusedIndex : clampedStageIndex) + 1) % teamCount) + 1} of ${teamCount})`}
                 onClick={() => stepStage(1)}
               >
                 Next →
@@ -453,8 +466,11 @@ function PresenterBoard({
                   className="cc-btn"
                   data-testid="presenter-judge-return"
                   onClick={() => {
-                    if (window.history.length > 1) window.history.back();
-                    else window.location.assign("/gm");
+                    // history.length is unreliable for a fresh _blank tab
+                    // (Chromium reports 2 for the initial about:blank entry,
+                    // so back() can land on a blank page). The coded GM URL
+                    // is the deterministic path back.
+                    window.location.assign(`/gm?code=${encodeURIComponent(code)}`);
                   }}
                 >
                   Return

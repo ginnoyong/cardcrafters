@@ -835,8 +835,13 @@ function Console({ game }: { game: CreatedGame }) {
               <div key={team.id} className="cc-team" aria-label={`team ${team.label} judging card`}>
                 <div className="cc-card">
                   <TeamJudgeCard
-                    team={snapshot?.teams.find((t) => t.id === team.id) ?? {
-                      id: team.id,
+                    team={snapshot?.teams.find((t) => t.id === team.id) ?? (() => {
+                      // Review L1: this fires only when the store's sync
+                      // dropped a team the REST summary still has — a real
+                      // desync. Warn once per render cycle so it can't hide.
+                      console.warn(`[gm] snapshot missing team ${team.id} — rendering placeholder judge card`);
+                      return {
+                        id: team.id,
                       name: team.name,
                       label: team.label,
                       memberCount: team.members.length,
@@ -850,7 +855,8 @@ function Console({ game }: { game: CreatedGame }) {
                       montageStatus: team.montageStatus ?? null,
                       montageImageUrl: team.montageImageUrl ?? null,
                       montagePromptText: team.montagePromptText ?? null,
-                    }}
+                      };
+                    })()}
                     cardLabel={scoringLabelByTeam.get(team.id) ?? null}
                     tally={tallyByTeamId.get(team.id) ?? null}
                     testId={`gm-judge-${team.id}`}
