@@ -344,7 +344,6 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
   // card surfaces, served as server-rendered scoring-card PNGs), and the
   // standalone CardCanvas + montage block covers the scoring-wait gap. When
   // active it OWNS the card surfaces — the standalone block is suppressed.
-  // BUILD stays unchanged.
   const showcaseActive = locked && !!team && snapshot?.phase !== PHASE.SCORING;
   const ownCardUrl =
     snapshot?.scoring?.yourTeamCardId
@@ -477,7 +476,10 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
 
       {(build || locked) && snapshot && team ? (
         <>
-          <section className="cc-card" aria-label="your team">
+          {/* BUILD: 2-col header box — team name + theme subtitle on the
+              left, the phase/timer badge on the right (see .cc-build-head).
+              Other phases keep the plain stacked card. */}
+          <section className={`cc-card${build ? " cc-build-head" : ""}`} aria-label="your team">
             <h2>{team.name}</h2>
             <p className="cc-badge">
               {phaseLabel(snapshot.phase)} · round {snapshot.round}
@@ -501,16 +503,23 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
 
           {build ? (
             <>
-              <PromptBar
-                disabled={!connected}
-                onSubmitted={() => {
-                  /* owner-ledger registration already happened on the ack path */
-                }}
-                onSubmitStart={handleSubmitStart}
-                wiring={promptWiring}
-              />
+              {/* BUILD: 2-col row — the prompt bar (left half) next to the
+                  team activity feed (right half, internal scroll via .cc-feed). */}
+              <div className="cc-build-inputrow">
+                <div className="cc-build-inputcol">
+                  <PromptBar
+                    disabled={!connected}
+                    onSubmitted={() => {
+                      /* owner-ledger registration already happened on the ack path */
+                    }}
+                    onSubmitStart={handleSubmitStart}
+                    wiring={promptWiring}
+                  />
 
-              {noUndoNeeded ? <NoUndoNotice /> : null}
+                  {noUndoNeeded ? <NoUndoNotice /> : null}
+                </div>
+                <ActivityFeed entries={team.activity} />
+              </div>
             </>
           ) : snapshot.phase === PHASE.SCORING && snapshot.scoring ? (
             // SCORING: "Our card" (own-card poster-first flip view + team
@@ -607,7 +616,42 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
             </section>
           )}
 
-          {!showcaseActive && !scoringActive ? (
+          {build ? (
+            // BUILD: 1fr/2fr row — the live sticker card on the left third,
+            // the AI poster slot on the right two thirds (generating
+            // indicator / finished poster / subtle fallback hint).
+            <div className="cc-build-cards">
+              <CardCanvas
+                items={team.items}
+                layout={team.layout}
+                greeting={team.greeting.text}
+                cardRatioW={DEFAULT_CARD_RATIO_W}
+                cardRatioH={DEFAULT_CARD_RATIO_H}
+                myPlayerId={identity.playerId}
+                highlightItemId={highlightItemId}
+                onItemTap={handleHighlight}
+                ariaLabel={`your team's card — ${team.items.filter((i) => i.status === "ready").length} stickers placed`}
+              />
+              <div className="cc-build-poster">
+                {team.montageStatus === "generating" ? (
+                  <p className="cc-montage-status" aria-live="polite">
+                    Generating poster…
+                  </p>
+                ) : team.montageStatus === "ready" && team.montageImageUrl ? (
+                  <div className="cc-montage" aria-label={`poster for ${team.name}`}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={team.montageImageUrl}
+                      alt={`Finished poster for ${team.name}`}
+                      className="cc-montage-img"
+                    />
+                  </div>
+                ) : (
+                  <p className="cc-hint">Poster coming soon…</p>
+                )}
+              </div>
+            </div>
+          ) : !showcaseActive && !scoringActive ? (
             <>
               <CardCanvas
                 items={team.items}
@@ -646,9 +690,10 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
 
           <MySubmissions items={myItems} onHighlight={handleHighlight} />
 
-          {/* Suppressed during SCORING — the "Our card" section renders the
-              activity feed in its right column instead. */}
-          {!scoringActive ? <ActivityFeed entries={team.activity} /> : null}
+          {/* Suppressed during BUILD (the feed sits next to the prompt bar)
+              and during SCORING — the "Our card" section renders the activity
+              feed in its right column instead. */}
+          {!scoringActive && !build ? <ActivityFeed entries={team.activity} /> : null}
         </>
       ) : (
         <>

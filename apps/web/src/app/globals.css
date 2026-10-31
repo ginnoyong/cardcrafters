@@ -510,6 +510,54 @@ label {
   box-shadow: 0 2px 8px rgb(0 0 0 / 0.25);
 }
 
+/* BUILD-phase layout (player build screen). Header box: team name + theme
+   subtitle in the left column, the phase/timer badge in the right column
+   (.cc-card is already a grid — two columns auto-place name/badge on row 1
+   and the theme line under the name). Input row: the prompt bar on the left
+   half, the team activity feed on the right half (its .cc-feed list already
+   scrolls; capped at 12rem inside the half-width box). Cards row: the live
+   sticker card at 1/3, the AI poster slot at 2/3. */
+.cc-build-head {
+  grid-template-columns: 1fr auto;
+  align-items: start;
+}
+
+.cc-build-head .cc-badge {
+  align-self: center;
+  text-align: right;
+}
+
+.cc-build-inputrow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+.cc-build-inputrow .cc-feed {
+  max-height: 12rem;
+}
+
+.cc-build-cards {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (max-width: 720px) {
+  .cc-build-head,
+  .cc-build-inputrow,
+  .cc-build-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .cc-build-head .cc-badge {
+    justify-self: start;
+    text-align: left;
+  }
+}
+
 /* Team showcase (montage-poster hero layout — player SCORING+ screen and the
    presenter's one-at-a-time stage): MAIN hero (poster image, or the composed
    CardCanvas while generating / on fallback) above a 2-column SUB row with
