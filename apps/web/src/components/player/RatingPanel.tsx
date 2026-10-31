@@ -4,10 +4,14 @@
  * RatingPanel — the player's SCORING surface.
  *
  * Binding decisions (see phase spec):
- *  - ONE anonymous card at a time, browsed with prev/next ("Card B · 2 / 3");
+ *  - ONE card at a time, browsed with prev/next ("Card B · 2 / 3"); cards are
+ *    labeled with their real team name (decision 2a), but never the teamId
+ *    mapping (that stays server-side);
  *  - the player's OWN team's card is skipped entirely (own-card guard) —
  *    it never appears in the rateable list;
  *  - each card shows its LIVE anonymous average + vote count (scores:update);
+ *  - poster-first preview: the card image defaults to the team's AI poster
+ *    (variant=poster) and can be flipped to the sticker card;
  *  - TEN large buttons, 1–10;
  *  - a tap shows a brief confirm ("Rate Card B: 7?") — confirming submits the
  *    rating as FINAL (no undo, no re-rating) and auto-advances to the next
@@ -49,6 +53,9 @@ export interface RatingPanelProps {
    *  on layout/scoring changes — the montage pass re-renders the card at
    *  BUILD→SCORING). */
   cardVersion?: number;
+  /** Phase countdown label ("4:37") shown beside the heading; null/undefined
+   *  when no timer is running. */
+  remainingLabel?: string | null;
   testId?: string;
 }
 
@@ -63,6 +70,7 @@ export default function RatingPanel({
   gameCode,
   sessionToken,
   cardVersion,
+  remainingLabel,
   testId = "rating-panel",
 }: RatingPanelProps) {
   // Rateable cards: everything EXCEPT our own team's card (own-card guard —
@@ -101,22 +109,26 @@ export default function RatingPanel({
   // instead of a broken-image glyph.
   const [imgLoaded, setImgLoaded] = useState(false);
   const [imgFailed, setImgFailed] = useState(false);
+  // Poster-first flip: the preview defaults to the team's AI poster and can
+  // be flipped to the sticker card. Resets when the card changes.
+  const [variant, setVariant] = useState<"poster" | "sticker">("poster");
   useEffect(() => {
     setImgLoaded(false);
     setImgFailed(false);
+    setVariant("poster");
   }, [card?.cardId, cardVersion]); // cardVersion bump → fresh render, re-fade
-
-  // Done = every rateable card has a FINAL rating.
-  const allRated = rateable.length > 0 && rateable.every((c) => myScores[c.cardId] !== undefined);
 
   if (rateable.length === 0) {
     return (
       <section className="cc-card" aria-label="rate the cards" data-testid={testId}>
-        <h3>Rate the cards</h3>
+        <h3>Rate other teams' cards</h3>
         <p className="cc-hint">No cards to rate this round.</p>
       </section>
     );
   }
+
+  // Done = every rateable card has a FINAL rating.
+  const allRated = rateable.length > 0 && rateable.every((c) => myScores[c.cardId] !== undefined);
 
   if (allRated) {
     return (
@@ -126,13 +138,22 @@ export default function RatingPanel({
           Your scores are in. The host will pick the winner next.
         </p>
         {ownCard ? (
-          <p className="cc-hint">Your own team's card ({ownCard.label}) can't be rated by you.</p>
+          <p className="cc-hint">
+            Your own team's card ({ownCard.teamName ?? ownCard.label}) can't be rated by you.
+          </p>
         ) : null}
       </section>
     );
   }
 
   if (!card) return null;
+
+  // Real team name (decision 2a) — falls back to the anonymous label only if
+  // the payload somehow lacks a teamName.
+  const cardName = card.teamName ?? card.label;
+  const imageUrl =
+    `/api/games/${gameCode}/scoring-card/${card.cardId}?token=${sessionToken}&v=${cardVersion ?? 0}` +
+    (variant === "poster" ? "&variant=poster" : "");
 
   const go = (delta: number): void => {
     setPending(null);
@@ -164,6 +185,14 @@ export default function RatingPanel({
 
   return (
     <section className="cc-card cc-rating" aria-label="rate the cards" data-testid={testId}>
+      <div className="cc-rating-title-row">
+        <h3>Rate other teams' cards</h3>
+        {remainingLabel ? (
+          <span className="cc-timer-sm" role="timer" aria-label="time remaining">
+            ⏱ {remainingLabel}
+          </span>
+        ) : null}
+      </div>
       <div className="cc-rating-head">
         {rateable.length > 1 ? (
           <button
@@ -177,7 +206,7 @@ export default function RatingPanel({
           </button>
         ) : null}
         <h3>
-          {card.label}{" "}
+          {cardName}{" "}
           <span className="cc-muted">
             · {index + 1} / {rateable.length}
           </span>
@@ -195,23 +224,39 @@ export default function RatingPanel({
         ) : null}
       </div>
 
-      {/* Finished-card preview (server renders the team's actual card; the
-          anonymous cardId keeps the team mapping hidden). */}
+      {/* Finished-card preview (server renders the team's actual card):
+          poster-first — tap the image or the flip button to switch between
+          the AI poster and the sticker card. */}
       {!imgFailed ? (
-        <img
-          src={`/api/games/${gameCode}/scoring-card/${card.cardId}?token=${sessionToken}&v=${cardVersion ?? 0}`}
-          key={`${card.cardId}:${cardVersion ?? 0}`}
-          data-testid="rating-card-image"
-          alt={`The card you are rating: ${card.label}`}
-          className={`cc-rating-image${imgLoaded ? " is-loaded" : ""}`}
-          onLoad={() => setImgLoaded(true)}
-          onError={() => setImgFailed(true)}
-        />
+        <>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={imageUrl}
+            key={`${card.cardId}:${cardVersion ?? 0}:${variant}`}
+            data-testid="rating-card-image"
+            alt={`The card you are rating: ${cardName}`}
+            className={`cc-rating-image${imgLoaded ? " is-loaded" : ""}`}
+            role="button"
+            aria-label={variant === "poster" ? "show sticker card" : "show poster"}
+            onClick={() => setVariant((v) => (v === "poster" ? "sticker" : "poster"))}
+            onLoad={() => setImgLoaded(true)}
+            onError={() => setImgFailed(true)}
+          />
+          <button
+            type="button"
+            className="cc-btn cc-flip-btn"
+            data-testid="rating-card-flip"
+            disabled={submitting}
+            onClick={() => setVariant((v) => (v === "poster" ? "sticker" : "poster"))}
+          >
+            {variant === "poster" ? "Show sticker card" : "Show poster"}
+          </button>
+        </>
       ) : (
         <p className="cc-hint">Card preview unavailable.</p>
       )}
 
-      {/* Live anonymous average + vote count (never whose card it is). */}
+      {/* Live running average + vote count. */}
       <p className="cc-hint" aria-live="polite">
         {tally
           ? `Score so far: ${tally.avg} from ${tally.count} vote${tally.count === 1 ? "" : "s"}`
@@ -225,7 +270,7 @@ export default function RatingPanel({
       ) : pending !== null ? (
         <div className="cc-rating-confirm" role="group" aria-label="confirm your rating">
           <p>
-            Rate {card.label}: <strong>{pending}</strong>? This can't be changed after.
+            Rate {cardName}: <strong>{pending}</strong>? This can't be changed after.
           </p>
           <div className="cc-btn-row">
             <button
@@ -257,14 +302,14 @@ export default function RatingPanel({
       {/* TEN large buttons, 1–10 (hidden once this card is finally rated —
           ratings are FINAL, no undo). */}
       {mine === undefined ? (
-        <div className="cc-rating-buttons" role="group" aria-label={`rate ${card.label} from 1 to 10`}>
+        <div className="cc-rating-buttons" role="group" aria-label={`rate ${cardName} from 1 to 10`}>
           {Array.from({ length: 10 }, (_, i) => i + 1).map((value) => (
             <button
               key={value}
               type="button"
               className={`cc-btn cc-btn-rate${pending === value ? " is-pending" : ""}`}
               disabled={submitting}
-              aria-label={`rate ${card.label} ${value}`}
+              aria-label={`rate ${cardName} ${value}`}
               onClick={() => {
                 setError(null);
                 setPending(value);

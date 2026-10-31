@@ -204,13 +204,15 @@ export interface SyncFullPayload extends Record<string, unknown> {
    * Scoring-order snapshot for the current round — audience-dependent:
    *  - GM: `cards` carry the card→team mapping plus ratedX (scores cast so
    *    far) and ratedY (total expected = activePlayers × (teams − 1));
-   *  - players: ANONYMOUS cards + their own team's cardId;
-   *  - presenter: ANONYMOUS cards only (no teamId, no yourTeamCardId).
+   *  - players: team-NAMED cards (teamName, per user decision 2a — but still
+   *    no teamId) + their own team's cardId;
+   *  - presenter: ANONYMOUS cards only (no teamName, no teamId, no
+   *    yourTeamCardId).
    * Absent when no scoring order exists for the current round.
    */
   scoring?: {
     round: number;
-    cards: Array<{ cardId: string; label: string; teamId?: string }>;
+    cards: Array<{ cardId: string; label: string; teamName?: string; teamId?: string }>;
     yourTeamCardId?: string;
     ratedX?: number;
     ratedY?: number;
@@ -343,10 +345,16 @@ export async function buildSyncFull(
         ratedY: activePlayers * Math.max(0, teams.length - 1),
       };
     } else if (identity?.role === "player") {
-      // Players: anonymous cards + which card is THEIR OWN team's.
+      // Players: team-named cards (teamName mirrors beginScoring's player
+      // copy — anonymity dropped per user decision 2a; teamId still never
+      // leaves the server) + which card is THEIR OWN team's.
       scoring = {
         round,
-        cards: order.cards.map((c) => ({ cardId: c.cardId, label: c.label })),
+        cards: order.cards.map((c) => ({
+          cardId: c.cardId,
+          label: c.label,
+          teamName: c.teamName,
+        })),
         yourTeamCardId: order.cards.find((c) => c.teamId === identity.teamId)?.cardId,
       };
       // myScores are cardId-keyed for the client — the targetTeamId→cardId

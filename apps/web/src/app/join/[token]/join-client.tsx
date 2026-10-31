@@ -243,10 +243,11 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
         dispatch({ type: "itemFailed", payload }),
       ),
       // -------------------------------------------------------------------
-      // Scoring-phase events. scoring:started carries THIS round's anonymous
-      // card order + our own team's cardId (own-card guard); scores:update
-      // carries the live anonymous running averages; winnerAnnounced carries
-      // the GM's pick + public standings (REVEAL/RESULTS).
+      // Scoring-phase events. scoring:started carries THIS round's card order
+      // (labeled with real team names; teamId stays server-side) + our own
+      // team's cardId (own-card guard); scores:update carries the live
+      // anonymous running averages; winnerAnnounced carries the GM's pick +
+      // public standings (REVEAL/RESULTS).
       // -------------------------------------------------------------------
       onEvent<Record<string, unknown>>(socket, "scoring:started", (payload) =>
         dispatch({ type: "scoringStarted", payload }),
@@ -297,9 +298,10 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
     [PHASE.SCORING, PHASE.JUDGING, PHASE.REVEAL, PHASE.RESULTS].includes(
       snapshot.phase as (typeof PHASE)[keyof typeof PHASE],
     );
-  // Scoring-phase surfaces: RatingPanel needs the anonymous card order (it
+  // Scoring-phase surfaces: RatingPanel needs the team-named card order (it
   // rides on scoring:started AND sync:full, so it is present even after a
-  // refresh); JUDGING keeps the rated summary + a "waiting" notice; REVEAL
+  // refresh; the cardId↔teamId mapping itself stays server-side); JUDGING
+  // keeps the rated summary + a "waiting" notice; REVEAL
   // /RESULTS show the winner + standings. The SCORING guard is inlined at
   // the JSX use site (see below) so TypeScript narrows snapshot.scoring.
   const judging = snapshot?.phase === PHASE.JUDGING;
@@ -319,7 +321,7 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
       ? Object.entries(snapshot.myScores)
           .map(([cardId, value]) => {
             const card = snapshot.scoring?.cards.find((c) => c.cardId === cardId);
-            return `${card?.label ?? "a card"}: ${value}`;
+            return `${card?.teamName ?? card?.label ?? "a card"}: ${value}`;
           })
           .join(" · ")
       : null;
@@ -328,11 +330,43 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
   // (ledger empty) — NoUndoNotice itself also checks the localStorage ack.
   const noUndoNeeded = build && Object.keys(snapshot?.myItems ?? {}).length === 0;
 
-  // Montage-poster showcase (SCORING onward): the AI poster hero (or the
-  // composed card while generating / on fallback) with the sticker card +
-  // prompts as subs. When active it OWNS the card surfaces — the standalone
-  // CardCanvas + montage block below is suppressed. BUILD stays unchanged.
-  const showcaseActive = locked && !!team;
+  // SCORING own-team flip view ("Our card" section): poster-first — the AI
+  // poster when the montage pass is READY, otherwise the composed card served
+  // as the poster variant; the sticker side is always the plain composed
+  // render (same URL without the poster variant). Same flip pattern as
+  // RatingPanel.
+
+  const scoringActive = snapshot?.phase === PHASE.SCORING && !!snapshot.scoring && !!team;
+  // Montage-poster showcase (post-SCORING: JUDGING/REVEAL/RESULTS): the AI
+  // poster hero (or the composed card while generating / on fallback) with
+  // the sticker card + prompts as subs. Gated OFF for the whole SCORING
+  // phase — the "Our card" flip section below supersedes it there (the same
+  // card surfaces, served as server-rendered scoring-card PNGs), and the
+  // standalone CardCanvas + montage block covers the scoring-wait gap. When
+  // active it OWNS the card surfaces — the standalone block is suppressed.
+  // BUILD stays unchanged.
+  const showcaseActive = locked && !!team && snapshot?.phase !== PHASE.SCORING;
+  const ownCardUrl =
+    snapshot?.scoring?.yourTeamCardId
+      ? `/api/games/${identity.code}/scoring-card/${snapshot.scoring.yourTeamCardId}?token=${identity.sessionToken}&v=${snapshot.cardVersion ?? 0}`
+      : null;
+  const ownPosterUrl =
+    team?.montageStatus === "ready" && team?.montageImageUrl
+      ? team.montageImageUrl
+      : ownCardUrl
+        ? `${ownCardUrl}&variant=poster`
+        : null;
+  const ownStickerUrl = ownCardUrl;
+
+  const [ownVariant, setOwnVariant] = useState<"poster" | "sticker">("poster");
+  const [ownImgLoaded, setOwnImgLoaded] = useState(false);
+  const [ownImgFailed, setOwnImgFailed] = useState(false);
+  // Reset the flip + fade state whenever the own card surface changes.
+  useEffect(() => {
+    setOwnVariant("poster");
+    setOwnImgLoaded(false);
+    setOwnImgFailed(false);
+  }, [snapshot?.scoring?.yourTeamCardId, snapshot?.cardVersion]);
 
   // The countdown ticks during BUILD and SCORING (the two timed phases that
   // matter to players; REVEAL's 30s auto-expiry is presenter/GM business).
@@ -456,12 +490,13 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
             ) : null}
           </section>
 
-          {/* Montage-poster showcase (SCORING onward): MAIN = the AI poster
-              (or the composed card while generating / on fallback) directly
-              under the team-name header; SUBS = sticker card + prompts row.
-              Owns both card surfaces — the standalone CardCanvas + montage
-              block below is suppressed while active. BUILD keeps the old
-              layout byte-identical. */}
+          {/* Montage-poster showcase (post-SCORING: JUDGING/REVEAL/RESULTS):
+              MAIN = the AI poster (or the composed card while generating /
+              on fallback) directly under the team-name header; SUBS =
+              sticker card + prompts row. Owns both card surfaces — the
+              standalone CardCanvas + montage block below is suppressed while
+              active. SCORING uses the "Our card" flip section instead;
+              BUILD keeps the old layout byte-identical. */}
           {showcaseActive && team ? <TeamShowcase team={team} testId="player-showcase" /> : null}
 
           {build ? (
@@ -478,19 +513,63 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
               {noUndoNeeded ? <NoUndoNotice /> : null}
             </>
           ) : snapshot.phase === PHASE.SCORING && snapshot.scoring ? (
-            // SCORING: the rating surface (browse cards, skip our own, 1–10
-            // FINAL ratings, live averages). The finished card stays visible
-            // above.
-            <RatingPanel
-              scoring={snapshot.scoring}
-              scores={snapshot.scores}
-              myScores={snapshot.myScores}
-              onSubmit={handleSubmitScore}
-              gameCode={identity.code}
-              sessionToken={identity.sessionToken}
-              cardVersion={snapshot.cardVersion}
-              testId="player-rating-panel"
-            />
+            // SCORING: "Our card" (own-card poster-first flip view + team
+            // activity feed side by side) above the rating surface (browse
+            // cards, skip our own, 1–10 FINAL ratings, live averages).
+            <>
+              <section className="cc-card" aria-label="our card" data-testid="our-card">
+                <h3>Our card</h3>
+                <p className="cc-hint">{team.name}</p>
+                {ownPosterUrl && ownStickerUrl ? (
+                  <div className="cc-our-card-grid">
+                    <div className="cc-our-card-image">
+                      {!ownImgFailed ? (
+                        <>
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={ownVariant === "poster" ? ownPosterUrl : ownStickerUrl}
+                            key={`${snapshot.scoring.yourTeamCardId}:${snapshot.cardVersion ?? 0}:${ownVariant}`}
+                            data-testid="our-card-image"
+                            alt={`Our team's card (${ownVariant === "poster" ? "poster" : "sticker"})`}
+                            className={`cc-rating-image${ownImgLoaded ? " is-loaded" : ""}`}
+                            role="button"
+                            aria-label={ownVariant === "poster" ? "show sticker card" : "show poster"}
+                            onClick={() => setOwnVariant((v) => (v === "poster" ? "sticker" : "poster"))}
+                            onLoad={() => setOwnImgLoaded(true)}
+                            onError={() => setOwnImgFailed(true)}
+                          />
+                          <button
+                            type="button"
+                            className="cc-btn cc-flip-btn"
+                            data-testid="our-card-flip"
+                            onClick={() => setOwnVariant((v) => (v === "poster" ? "sticker" : "poster"))}
+                          >
+                            {ownVariant === "poster" ? "Show sticker card" : "Show poster"}
+                          </button>
+                        </>
+                      ) : (
+                        <p className="cc-hint">Card preview unavailable.</p>
+                      )}
+                    </div>
+                    <div className="cc-our-card-activity">
+                      <h3>Team activity</h3>
+                      <ActivityFeed entries={team.activity} />
+                    </div>
+                  </div>
+                ) : null}
+              </section>
+              <RatingPanel
+                scoring={snapshot.scoring}
+                scores={snapshot.scores}
+                myScores={snapshot.myScores}
+                onSubmit={handleSubmitScore}
+                gameCode={identity.code}
+                sessionToken={identity.sessionToken}
+                cardVersion={snapshot.cardVersion}
+                remainingLabel={remainingLabel}
+                testId="player-rating-panel"
+              />
+            </>
           ) : judging ? (
             // JUDGING: ratings are locked — keep the rated summary + the
             // waiting notice; the card view above persists.
@@ -528,7 +607,7 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
             </section>
           )}
 
-          {!showcaseActive ? (
+          {!showcaseActive && !scoringActive ? (
             <>
               <CardCanvas
                 items={team.items}
@@ -567,7 +646,9 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
 
           <MySubmissions items={myItems} onHighlight={handleHighlight} />
 
-          <ActivityFeed entries={team.activity} />
+          {/* Suppressed during SCORING — the "Our card" section renders the
+              activity feed in its right column instead. */}
+          {!scoringActive ? <ActivityFeed entries={team.activity} /> : null}
         </>
       ) : (
         <>

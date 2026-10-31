@@ -172,15 +172,24 @@ export interface ScoreRow {
 }
 
 /**
- * One ANONYMOUS card in the scoring order. `cardId`/`label` are what players
- * see ("Card A"…); `teamId` is the server/GM-side mapping and is STRIPPED
- * from every player-facing payload (see buildSyncFull + flows/scoring.ts).
+ * One card in the scoring order. `cardId` is the opaque scoring id
+ * ("card-a"…) and `label` the public display string ("Card A"…).
+ *
+ * Anonymity status (Dispatch 2, user decision 2a):
+ *  - `teamName` IS sent to players — the player scoring UI shows real team
+ *    names while rating; the presenter copy stays ANONYMOUS (cardId+label
+ *    only, never teamName/teamId);
+ *  - `teamId` remains the server/GM-side mapping and is STILL STRIPPED from
+ *    every player-facing payload (see buildSyncFull + flows/scoring.ts).
  */
 export interface ScoringCard {
   /** Opaque anonymous id ("card-a", "card-b", …) — never the team id. */
   cardId: string;
   /** Public display label ("Card A", "Card B", …). */
   label: string;
+  /** The card's real team name — SENT TO PLAYERS (anonymity dropped for the
+   *  scoring UI per user decision 2a). */
+  teamName: string;
   /** The card's team — GM/presenter/server ONLY, never sent to players. */
   teamId: string;
 }

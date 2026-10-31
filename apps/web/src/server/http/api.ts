@@ -25,9 +25,12 @@
 
 import type { CardConfig } from "@cardcrafters/shared";
 import { DEFAULT_CARD_CONFIG, MAX_TEAMS, MAX_TIMER_SECONDS } from "@cardcrafters/shared";
+import { readFile, stat } from "node:fs/promises";
+import nodePath from "node:path";
 import { z } from "zod";
 
 import type { AiRouter } from "../ai/router";
+import { DEFAULT_MONTAGE_DIR } from "../flows/montage-accumulator";
 import { generateGreetingsForGame } from "../flows/greetings";
 import type { GameHub, RoomEmitter } from "../game/hub";
 import { deriveGradingFromStyle, renderCardPng, type RenderableItem } from "../render/card-render";
@@ -327,11 +330,15 @@ export async function handleApiRequest(
     res.end(png);
     return true;
   }
-  // GET /api/games/:code/scoring-card/:cardId?token= — one anonymous scoring
-  // card's finished PNG for the player who is rating it. Auth = a valid
-  // player session token (the card→team mapping stays server-side, but the
-  // player needs the image to rate meaningfully). Only served during
+  // GET /api/games/:code/scoring-card/:cardId?token=[&variant=poster] — one
+  // scoring card's finished image for the player who is rating it. Auth = a
+  // valid player session token (the card→team mapping stays server-side, but
+  // the player needs the image to rate meaningfully). Only served during
   // SCORING/JUDGING; cache-control: no-store keeps the phase gate honest.
+  // variant=poster serves the team's AI montage poster when it is READY (the
+  // poster-first scoring UI); anything else falls back to the composed
+  // renderTeamCardPng render. All auth/phase/round/cardId guards run BEFORE
+  // the variant handling.
   const scoringCardMatch = /^\/api\/games\/([A-Za-z0-9]+)\/scoring-card\/([A-Za-z0-9-]+)$/.exec(
     path,
   );
@@ -360,6 +367,35 @@ export async function handleApiRequest(
       return true;
     }
     const card = order.cards.find((c) => c.cardId === cardId)!;
+    // variant=poster (poster-first scoring UI): serve the team's AI montage
+    // poster when the accumulator has persisted a READY row. The imageUrl
+    // ("/static/montages/{gameId}/{teamId}/{file}") maps 1:1 onto the
+    // montage storage root ({DEFAULT_MONTAGE_DIR}/{gameId}/{teamId}/{file}),
+    // so the fs path is reconstructed by joining the round's gameId + the
+    // card's teamId + the URL basename. Any miss (no row / not READY / no
+    // imageUrl / file gone) falls through to the composed render.
+    if (url.searchParams.get("variant") === "poster") {
+      const montage = await repo.getMontageState(card.teamId, state.round);
+      if (montage && montage.status === "READY" && montage.imageUrl) {
+        try {
+          const fsPath = nodePath.join(
+            DEFAULT_MONTAGE_DIR,
+            game.id,
+            card.teamId,
+            nodePath.basename(montage.imageUrl),
+          );
+          await stat(fsPath); // throws if the file is gone → composed fallback
+          const ext = nodePath.extname(fsPath).toLowerCase();
+          const contentType = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : "image/png";
+          const image = await readFile(fsPath);
+          res.writeHead(200, { "content-type": contentType, "cache-control": "no-store" });
+          res.end(image);
+          return true;
+        } catch {
+          // Poster file unreadable — fall back to the composed render below.
+        }
+      }
+    }
     let png: Buffer;
     try {
       png = await renderTeamCardPng(repo, game, card.teamId, { runtimeRound: state.round });

@@ -10,11 +10,53 @@ import { selectMyItems } from "../components/player/my-items";
 import {
   ACTIVITY_FEED_MAX,
   normalizeSyncFull,
+  parseScoringCards,
   storeReducer,
   type GameSnapshot,
   type MyItemEvent,
   type SyncFullEvent,
 } from "./store";
+
+describe("parseScoringCards — teamName passthrough (decision 2a)", () => {
+  it("keeps a valid non-empty teamName; drops non-string and empty ones", () => {
+    const parsed = parseScoringCards([
+      { cardId: "card-1", label: "Card A", teamName: "Llama Legends" },
+      { cardId: "card-2", label: "Card B", teamName: "" },
+      { cardId: "card-3", label: "Card C", teamName: 42 },
+      { cardId: "card-4", label: "Card D" },
+    ]);
+    expect(parsed).toEqual([
+      { cardId: "card-1", label: "Card A", teamName: "Llama Legends" },
+      { cardId: "card-2", label: "Card B" },
+      { cardId: "card-3", label: "Card C" },
+      { cardId: "card-4", label: "Card D" },
+    ]);
+  });
+
+  it("presenter copies (no teamName/teamId) parse to plain anonymous cards", () => {
+    expect(parseScoringCards([
+      { cardId: "card-1", label: "Card A" },
+      { cardId: "card-2", label: "Card B" },
+    ])).toEqual([
+      { cardId: "card-1", label: "Card A" },
+      { cardId: "card-2", label: "Card B" },
+    ]);
+  });
+
+  it("GM copies keep teamId alongside teamName (card↔team mapping)", () => {
+    expect(parseScoringCards([
+      { cardId: "card-1", label: "Card A", teamName: "Team A", teamId: TEAM_A },
+    ])).toEqual([{ cardId: "card-1", label: "Card A", teamName: "Team A", teamId: TEAM_A }]);
+  });
+
+  it("malformed payloads → null (caller keeps previous state); empty array → []", () => {
+    expect(parseScoringCards(null)).toBeNull();
+    expect(parseScoringCards("nope")).toBeNull();
+    expect(parseScoringCards([])).toEqual([]);
+    expect(parseScoringCards([{ cardId: "card-1" }])).toBeNull(); // label missing
+    expect(parseScoringCards([{ label: "Card A" }])).toBeNull(); // cardId missing
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Fixtures

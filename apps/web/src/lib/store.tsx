@@ -165,16 +165,21 @@ export function parseCritique(raw: unknown): ClientCritique | null {
   };
 }
 
-/** One ANONYMOUS card in the round's scoring order ("Card A"…).
- *  `teamId` is present ONLY on GM snapshots (the card↔team mapping is
- *  server/GM-side — player and presenter payloads carry cardId+label only). */
+/** One card in the round's scoring order ("Card A"…).
+ *  `teamName` rides on player + GM copies (player-side anonymity dropped per
+ *  user decision 2a — the scoring UI shows real team names; presenter copies
+ *  stay anonymous and carry neither teamName nor teamId). `teamId` is present
+ *  ONLY on GM snapshots (the card↔team mapping is server/GM-side). */
 export interface ClientScoringCard {
   cardId: string;
   label: string;
+  /** Real team name — present on player + GM payloads (decision 2a). */
+  teamName?: string;
   teamId?: string;
 }
 
-/** The SCORING phase slice: the round's anonymous card order. */
+/** The SCORING phase slice: the round's team-named card order for players
+ *  (decision 2a); presenter snapshots stay anonymous card orders. */
 export interface ClientScoring {
   round: number;
   cards: ClientScoringCard[];
@@ -215,8 +220,9 @@ export interface GameSnapshot {
   scoresLocked: boolean;
   serverNow: number;
   teams: ClientTeam[];
-  /** SCORING: the round's anonymous card order (+ GM team mapping when the
-   *  snapshot is the GM's). Null before scoring starts / after a new round. */
+  /** SCORING: the round's team-named card order for players (decision 2a;
+   *  GM copies also carry the teamId mapping; presenter copies stay
+   *  anonymous). Null before scoring starts / after a new round. */
   scoring: ClientScoring | null;
   /** Live anonymous running averages (scores:update), keyed by cardId. */
   scores: Record<string, ClientScoreTally>;
@@ -259,7 +265,7 @@ export interface SyncFullEvent
   seq?: number;
   ts?: number;
   /** Raw scoring section (GM: teamId mapping + ratedX/ratedY; players:
-   *  anonymous cards + yourTeamCardId; presenter: anonymous cards only). */
+   *  team-named cards + yourTeamCardId; presenter: anonymous cards only). */
   scoring?: unknown;
   /** Raw per-card tallies broadcast on scores:update. */
   scores?: unknown;
@@ -388,8 +394,9 @@ function trimActivity(entries: ClientActivityEntry[]): ClientActivityEntry[] {
 /**
  * Parse a scoring:started / sync:full `cards` array into ClientScoringCard[]
  * (null when the payload is malformed so callers keep their previous state).
- * `teamId` is kept ONLY when present (GM copies) — player/presenter payloads
- * never carry it and the parsed shape mirrors that exactly.
+ * `teamName` is kept when present and non-empty (player + GM copies per user
+ * decision 2a); `teamId` is kept ONLY when present (GM copies) — player and
+ * presenter payloads never carry it and the parsed shape mirrors that exactly.
  */
 export function parseScoringCards(raw: unknown): ClientScoringCard[] | null {
   if (!Array.isArray(raw)) return null;
@@ -401,6 +408,7 @@ export function parseScoringCards(raw: unknown): ClientScoringCard[] | null {
     cards.push({
       cardId: e.cardId,
       label: e.label,
+      ...(typeof e.teamName === "string" && e.teamName ? { teamName: e.teamName } : {}),
       ...(typeof e.teamId === "string" ? { teamId: e.teamId } : {}),
     });
   }
@@ -574,7 +582,7 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
             }))
           : base.teams,
         // Round-scoped scoring state is cleared on a round BUMP exactly like
-        // items/layout — a new round means a new anonymous card order, fresh
+        // items/layout — a new round means a fresh team-named card order,
         // tallies, and no winner yet (prev rounds' results never leak in).
         ...(bump
           ? {

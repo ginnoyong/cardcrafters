@@ -824,10 +824,11 @@ describe("reconnect state preservation (refresh regression)", () => {
 
 
 // ---------------------------------------------------------------------------
-// Scoring phase end-to-end (anonymous 1-10 ratings → judging → results).
-// Exercises the WS surface: scoring:started (audience-scoped anonymity),
-// score:submit acks + guards, live anonymous scores:update, sync:full
-// scoring/myScores shapes, then judging:winner → reveal:ack → RESULTS.
+// Scoring phase end-to-end (team-named 1-10 ratings → judging → results).
+// Exercises the WS surface: scoring:started (players get teamName, never
+// teamId; presenter copies stay anonymous), score:submit acks + guards, live
+// anonymous scores:update, sync:full scoring/myScores shapes, then
+// judging:winner → reveal:ack → RESULTS.
 // ---------------------------------------------------------------------------
 
 describe("scoring phase end-to-end", () => {
@@ -945,14 +946,17 @@ describe("scoring phase end-to-end", () => {
     expect(stop.ok).toBe(true);
     expect(stop.phase).toBe("SCORING");
 
-    // Player copy: ANONYMOUS cards + which card is their own team's — never
-    // a teamId (the card↔team mapping must not reach players).
+    // Player copy: team-NAMED cards (real teamName per decision 2a) + which
+    // card is their own team's — never a teamId (the card↔team mapping must
+    // not reach players).
     const alexCopy = await alexStarted;
     const samCopy = await samStarted;
     expect(alexCopy.cards).toHaveLength(3);
     expect(alexCopy.cards.map((c) => c.label)).toEqual(["Card A", "Card B", "Card C"]);
     for (const c of alexCopy.cards) {
       expect(typeof c.cardId).toBe("string");
+      expect(typeof c.teamName).toBe("string");
+      expect((c.teamName as string).length).toBeGreaterThan(0);
       expect(c).not.toHaveProperty("teamId");
     }
     expect(typeof alexCopy.yourTeamCardId).toBe("string");
@@ -1079,8 +1083,9 @@ describe("scoring phase end-to-end", () => {
     expect(again.ok).toBe(false);
     expect(again.reason ?? again.code).toBe("already_rated");
 
-    // Player resync: sync:full carries the ANONYMOUS scoring shape +
-    // cardId-keyed myScores (teamId mapping resolved SERVER-side).
+    // Player resync: sync:full carries the team-NAMED scoring shape (real
+    // teamName, never teamId) + cardId-keyed myScores (teamId mapping
+    // resolved SERVER-side).
     const resynced = new Promise<SyncFullEvent>((resolve) => alex.once("sync:full", resolve));
     await emitAck(alex, "sync:resync", {});
     const raw = await resynced;
@@ -1091,7 +1096,11 @@ describe("scoring phase end-to-end", () => {
     };
     expect(scoring.round).toBe(1);
     expect(scoring.cards).toHaveLength(3);
-    for (const c of scoring.cards) expect(c).not.toHaveProperty("teamId");
+    for (const c of scoring.cards) {
+      expect(typeof c.teamName).toBe("string");
+      expect((c.teamName as string).length).toBeGreaterThan(0);
+      expect(c).not.toHaveProperty("teamId");
+    }
     expect(scoring.yourTeamCardId).toBe(alexCopy.yourTeamCardId);
     expect(raw.myScores).toEqual([{ cardId: cardB, value: 7 }]);
 
@@ -1111,10 +1120,11 @@ describe("scoring phase end-to-end", () => {
       new Set(gmCopy.cards.map((c) => c.teamId)),
     );
 
-    // The client reducer accepts the new shapes (players see anonymous cards
-    // + their own card; the mapping stays server-side).
+    // The client reducer accepts the new shapes (players see team-named
+    // cards + their own card; the teamId mapping stays server-side).
     const snap = normalizeSyncFull(raw, {}, alexAck.identity.playerId);
     expect(snap.scoring?.cards.every((c) => !("teamId" in c))).toBe(true);
+    expect(snap.scoring?.cards.every((c) => typeof c.teamName === "string" && c.teamName.length > 0)).toBe(true);
     expect(snap.scoring?.yourTeamCardId).toBe(alexCopy.yourTeamCardId);
     expect(snap.myScores[cardB]).toBe(7);
 

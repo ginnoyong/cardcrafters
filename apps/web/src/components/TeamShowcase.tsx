@@ -1,8 +1,10 @@
 "use client";
 
 /**
- * TeamShowcase — the shared montage-poster showcase layout (player SCORING+
- * screen and the presenter's one-at-a-time stage).
+ * TeamShowcase — the shared montage-poster showcase layout (the player's
+ * post-SCORING screen: JUDGING/REVEAL/RESULTS — during SCORING the player's
+ * "Our card" flip section supersedes it — and the presenter's one-at-a-time
+ * stage).
  *
  * Layout (top → bottom):
  *   .cc-showcase-main  MAIN poster hero:

@@ -860,6 +860,59 @@ no animations requiring sound. */
   gap: 0.75rem;
 }
 
+/* Title row: "Rate other teams' cards" + the phase countdown timer. */
+.cc-rating-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.cc-rating-title-row h3 {
+  margin: 0;
+  flex: 1;
+}
+
+.cc-timer-sm {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--accent-strong);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Poster/sticker flip control — small button matching cc-btn-small. */
+.cc-flip-btn {
+  min-height: 32px;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.8rem;
+  align-self: center;
+}
+
+/* "Our card" SCORING section: own-card flip view (left) + team activity
+   feed (right); collapses to one column on phones. */
+.cc-our-card-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+.cc-our-card-image {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.cc-our-card-image .cc-rating-image {
+  cursor: pointer;
+}
+
+@media (max-width: 720px) {
+  .cc-our-card-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Finished-card preview from /scoring-card — fades in once loaded. */
 .cc-rating-image {
   width: 100%;

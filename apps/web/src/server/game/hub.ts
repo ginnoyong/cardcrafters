@@ -132,9 +132,11 @@ function pickTeamNames(count: number, random: () => number = Math.random): strin
  * reproduces the exact same order — the shuffled order is also persisted on
  * Game.scoringOrder as the single source of truth.
  *
- * `cardId`s are opaque anonymous ids ("card-a"…) and `label`s the public
- * display strings ("Card A"…); the `teamId` mapping is GM/server-only and
- * must be STRIPPED from every player-facing payload.
+ * `cardId`s are opaque ids ("card-a"…), `label`s the public display strings
+ * ("Card A"…) and `teamName` the card's REAL team name — teamName IS sent to
+ * players (player-side anonymity dropped per user decision 2a); the `teamId`
+ * mapping is still GM/server-only and must be STRIPPED from every
+ * player-facing payload, and presenter copies stay anonymous (cardId+label).
  */
 export function buildScoringOrder(
   gameId: string,
@@ -152,6 +154,7 @@ export function buildScoringOrder(
     cards: pool.map((team, i) => ({
       cardId: `card-${TEAM_LABELS[i]?.toLowerCase() ?? String(i)}`,
       label: `Card ${TEAM_LABELS[i] ?? i + 1}`,
+      teamName: team.name,
       teamId: team.id,
     })),
   };
@@ -472,11 +475,12 @@ export class GameHub {
         // is the ONE owner of item rows + item events.
         return;
       case "beginScoring": {
-        // BUILD → SCORING entry: build the round's anonymous scoring order,
-        // persist it on Game.scoringOrder (source of truth for sync:full,
-        // score submission and the standings), then announce scoring per
-        // audience — players see ANONYMOUS cards + their own card id, the GM
-        // sees the team mapping, the presenter sees anonymous cards only.
+        // BUILD → SCORING entry: build the round's scoring order, persist it
+        // on Game.scoringOrder (source of truth for sync:full, score
+        // submission and the standings), then announce scoring per audience —
+        // players see team-NAMED cards + their own card id (player anonymity
+        // dropped per user decision 2a), the GM sees the team mapping, and
+        // the presenter still sees anonymous cards only.
         // (a) GM-only heads-up: the final polish window begins.
         this.emitToRooms(gameId, state.round, "montage:started", {}, [gmRoom(gameId)]);
         // (b) Fail-open hook: scoring MUST still start even if the polish pass fails.
@@ -488,13 +492,19 @@ export class GameHub {
         for (const team of teams) {
           const members = await this.repo.listTeamPlayers(team.id);
           const yourTeamCardId = order.cards.find((c) => c.teamId === team.id)?.cardId ?? null;
-          const anonymousCards = order.cards.map((c) => ({ cardId: c.cardId, label: c.label }));
+          // Player cards carry the real teamName (UI decision 2a) but NEVER
+          // the teamId mapping.
+          const playerCards = order.cards.map((c) => ({
+            cardId: c.cardId,
+            label: c.label,
+            teamName: c.teamName,
+          }));
           for (const p of members) {
             this.emitToRooms(
               gameId,
               state.round,
               "scoring:started",
-              { cards: anonymousCards, yourTeamCardId },
+              { cards: playerCards, yourTeamCardId },
               [playerRoom(gameId, p.id)],
             );
           }

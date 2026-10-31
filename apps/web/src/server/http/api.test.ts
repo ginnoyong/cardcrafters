@@ -24,6 +24,7 @@ import { drawMockSticker } from "../ai/mock-provider";
 import { createServer, type CardCraftersServer } from "../../../server";
 import { waitForGreetings } from "../flows/greetings";
 import { DEFAULT_ITEMS_DIR } from "../flows/item-image";
+import { DEFAULT_MONTAGE_DIR } from "../flows/montage-accumulator";
 import { REF_SIZE, cardBoxNormalized, baseFit } from "../../lib/canvas-geometry";
 import { DEFAULT_CARD_WIDTH_PX, deriveGradingFromStyle, renderCardPng } from "../render/card-render";
 import type { GameRow } from "../repo/repository";
@@ -57,6 +58,8 @@ async function writeSticker(storageDir: string, itemId: string, prompt: string, 
 
 let srv: CardCraftersServer;
 let port: number;
+/** Game dirs seeded under DEFAULT_MONTAGE_DIR by montage tests (afterEach rm). */
+const seededMontageGameIds: string[] = [];
 
 beforeEach(async () => {
   // Force the in-memory image queue even when the dev .env exports REDIS_URL
@@ -82,6 +85,12 @@ afterEach(async () => {
   } catch {
     // dir may not exist — nothing to clean.
   }
+  // Clean up any montage poster dirs seeded under the default montage root
+  // (same pattern as the items dir above, whole per-game subtree).
+  for (const gameId of seededMontageGameIds) {
+    await rm(path.join(DEFAULT_MONTAGE_DIR, gameId), { recursive: true, force: true });
+  }
+  seededMontageGameIds.length = 0;
 });
 
 function base(path: string): string {
@@ -652,5 +661,103 @@ describe("GET /api/games/:code/scoring-card/:cardId?token= (player rating card P
     //    byte-identical to the local finalPass render of the same state.
     const [finalPassRender] = await localFinalPassAndCrispRender(game, teamId);
     expect(Buffer.compare(fetched, finalPassRender)).toBe(0);
+  });
+
+  /**
+   * Seed a READY montage row (repo) + a distinctive PNG on disk under the
+   * per-game montage storage root ({DEFAULT_MONTAGE_DIR}/{gameId}/{teamId})
+   * — the same 1:1 imageUrl→fs mapping the accumulator persists (solid blue
+   * pixels, so the served poster bytes can never collide with the composed
+   * card render). The dir is registered for afterEach cleanup.
+   */
+  async function seedReadyMontage(gameId: string, teamId: string, round: number) {
+    const bytes = await sharp({
+      create: { width: 64, height: 64, channels: 3, background: { r: 20, g: 80, b: 200 } },
+    })
+      .png()
+      .toBuffer();
+    const fileName = `montage-seed-${round}.png`;
+    const dir = path.join(DEFAULT_MONTAGE_DIR, gameId, teamId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, fileName), bytes);
+    seededMontageGameIds.push(gameId);
+    await srv.repo.upsertMontageState(teamId, round, {
+      patch: {
+        status: "READY",
+        imageUrl: `/static/montages/${gameId}/${teamId}/${fileName}`,
+      },
+    });
+    return { bytes };
+  }
+
+  it("?variant=poster READY montage row → serves the persisted poster file, NOT the composed render", async () => {
+    const { code, gameId, sessionToken, firstCardId } = await createGameInScoring();
+    const game = (await srv.repo.getGame(gameId))!;
+    const card = game.scoringOrder!.cards.find((c) => c.cardId === firstCardId)!;
+    const { bytes } = await seedReadyMontage(gameId, card.teamId, game.round);
+
+    // Poster variant → the READY montage file, byte-identical to what the
+    // accumulator persisted (imageUrl basename maps onto the storage root).
+    const res = await fetch(
+      base(`/api/games/${code}/scoring-card/${firstCardId}?token=${sessionToken}&variant=poster`),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    expect(res.headers.get("cache-control")).toContain("no-store");
+    const fetched = Buffer.from(await res.arrayBuffer());
+    expect(Buffer.compare(fetched, bytes)).toBe(0);
+
+    // Default variant (no ?variant) → the composed render, distinct from the
+    // poster bytes (the poster never leaks into the sticker side).
+    const composed = await fetch(
+      base(`/api/games/${code}/scoring-card/${firstCardId}?token=${sessionToken}`),
+    );
+    expect(composed.status).toBe(200);
+    const composedBytes = Buffer.from(await composed.arrayBuffer());
+    expect(Buffer.compare(composedBytes, bytes)).not.toBe(0);
+  });
+
+  it("?variant=poster fallback (no row / FALLBACK row / READY row, file gone) → composed render identical to default", async () => {
+    const { code, gameId, sessionToken, firstCardId } = await createGameInScoring();
+    const game = (await srv.repo.getGame(gameId))!;
+    const card = game.scoringOrder!.cards.find((c) => c.cardId === firstCardId)!;
+    const posterUrl = base(
+      `/api/games/${code}/scoring-card/${firstCardId}?token=${sessionToken}&variant=poster`,
+    );
+
+    // The composed-render baseline (default variant, same card).
+    const defaultRes = await fetch(
+      base(`/api/games/${code}/scoring-card/${firstCardId}?token=${sessionToken}`),
+    );
+    expect(defaultRes.status).toBe(200);
+    const defaultBytes = Buffer.from(await defaultRes.arrayBuffer());
+
+    // (a) No montage row at all → composed fallback.
+    const resNoRow = await fetch(posterUrl);
+    expect(resNoRow.status).toBe(200);
+    expect(resNoRow.headers.get("content-type")).toBe("image/png");
+    expect(Buffer.compare(Buffer.from(await resNoRow.arrayBuffer()), defaultBytes)).toBe(0);
+
+    // (b) FALLBACK row (the accumulator's fail-open state, imageUrl null)
+    //     → composed fallback.
+    await srv.repo.upsertMontageState(card.teamId, game.round, {
+      patch: { status: "FALLBACK", fallbackUsed: true, imageUrl: null },
+    });
+    const resFallback = await fetch(posterUrl);
+    expect(resFallback.status).toBe(200);
+    expect(Buffer.compare(Buffer.from(await resFallback.arrayBuffer()), defaultBytes)).toBe(0);
+
+    // (c) READY row whose file never landed on disk → composed fallback
+    //     (the fs stat on the reconstructed path throws).
+    await srv.repo.upsertMontageState(card.teamId, game.round, {
+      patch: {
+        status: "READY",
+        fallbackUsed: false,
+        imageUrl: `/static/montages/${gameId}/${card.teamId}/montage-gone.png`,
+      },
+    });
+    const resGone = await fetch(posterUrl);
+    expect(resGone.status).toBe(200);
+    expect(Buffer.compare(Buffer.from(await resGone.arrayBuffer()), defaultBytes)).toBe(0);
   });
 });
