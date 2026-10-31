@@ -62,31 +62,6 @@ const COOL_TINT = "#3c9aff";
  *  radius the vignette overlay is fully transparent, then ramps to black at
  *  the corners. */
 const VIGNETTE_INNER_FRACTION = 0.55;
-// -- Poster greeting compositing (composeGreetingOnPoster) -----------------
-/** Soft readability band height as a fraction of the poster height: the
- *  montage_prompt template tells the image model to leave the LOWER THIRD
- *  open ("do NOT render it in the image"), so the composited band covers the
- *  same proportion. */
-const POSTER_BAND_FRACTION = 1 / 3;
-/** Band opacity — the same translucent paper tone family the sticker cards
- *  use for their greeting zone (PAPER_COLOR at alpha). */
-const POSTER_BAND_ALPHA = 0.85;
-/** Horizontal inset of the rounded band rect (fraction of poster width). */
-const POSTER_BAND_INSET_FRACTION = 0.04;
-/** Rounded-corner radius of the band rect (fraction of poster width). */
-const POSTER_BAND_RADIUS_FRACTION = 0.025;
-/** Text max-width margin (fraction of poster width, per side) inside the
- *  band — a little wider than the band inset so text never hugs the curve. */
-const POSTER_TEXT_INSET_FRACTION = 0.08;
-/** Greeting font sizing for the poster band, mirroring the mock's baked
- *  lower-third text (mockMontageImageResult): start at 56/800 ≈ 0.07 of the
- *  width, shrink 4/800 per step until the wrapped block fits, floor 18/800. */
-const POSTER_FONT_START_FRACTION = 0.07;
-const POSTER_FONT_MIN_FRACTION = 0.0225;
-const POSTER_FONT_STEP_FRACTION = 0.005;
-/** Vertical padding fraction the wrapped text block must fit inside the
- *  band (mock: bandH − 40 of an 1120-tall poster ≈ bandH × 0.9). */
-const POSTER_TEXT_MAX_BAND_FRACTION = 0.9;
 /** Neutral grading when no style pack exists (identity-ish: untouched color,
  *  the same faint edge darkening every montage card gets). */
 const NEUTRAL_GRADING: MontageGrading = {
@@ -287,47 +262,30 @@ export async function renderCardPng(
   return canvas.encode("png");
 }
 
-/** Options for {@link composeGreetingOnPoster}. */
-export interface ComposeGreetingOnPosterOptions {
-  /** Montage grading applied AFTER the band + text (style-pack derived —
-   *  see deriveGradingFromStyle). Default null (no grading). */
-  grading?: MontageGrading | null;
-}
-
 /**
- * Composite the greeting onto a full-bleed montage POSTER (AI-generated).
+ * Apply the style-derived montage GRADING to a full-bleed montage POSTER.
  *
- * Why this exists: the montage_prompt template deliberately tells the image
- * model to leave the lower third of the poster open and to NOT render the
- * greeting ("Greeting text (to leave room for, do NOT render it in the
- * image)") — the raw generated image therefore ships without the card's
- * message unless something draws it. This helper is that something: it loads
- * the poster at its NATIVE size, draws a soft translucent paper-tone band
- * across the lower third (the same tone family as the sticker card's
- * greeting zone), then draws the greeting centered in that band using the
- * same font conventions as renderCardPng's greeting text (Georgia serif,
- * dark #3a3230, centered) with the mock poster's auto-shrink-to-fit sizing
- * (start 0.07 × width, shrink until the wrapped block fits the band).
+ * Why this exists: both the real and the mock poster path run the SAME
+ * grading pass (montage-accumulator) so every poster carries the style
+ * pack's color cast/vignette treatment — visual parity between the AI
+ * posters and the procedural mock one. The greeting itself now arrives
+ * INSIDE the artwork (the montage_prompt template tells the image model to
+ * render it verbatim as the lower-third title treatment; the mock poster
+ * bakes it too), so there is no client-side band/text compositing step —
+ * this helper only normalizes + grades.
  *
- * Guards (fail-safe, never fail the poster):
- *  - empty/whitespace greeting → the poster is returned UNCHANGED
- *    (byte-identical) unless grading is supplied, in which case the poster
- *    is re-encoded through the grading pass only;
- *  - undecodable poster bytes → throws (the caller falls back to persisting
- *    the raw bytes).
+ * The poster is loaded at its NATIVE size, the grading is applied exactly
+ * as renderCardPng's finalPass does, and the output is always a fresh PNG
+ * encode at the poster's native dimensions (input bytes are normalized
+ * through sharp first, so any decodable format works as input).
  *
- * The output is always a fresh PNG encode at the poster's native dimensions
- * (input bytes are normalized through sharp first, so any decodable format
- * works as input).
+ * Guards: undecodable poster bytes → throws (the caller falls back to
+ * persisting the raw bytes — a degraded-but-ready non-fatal path).
  */
-export async function composeGreetingOnPoster(
+export async function gradePoster(
   posterPng: Buffer,
-  greeting: string,
-  opts: ComposeGreetingOnPosterOptions = {},
+  grading: MontageGrading,
 ): Promise<Buffer> {
-  const text = greeting.trim();
-  if (!text && !opts.grading) return posterPng;
-
   // Normalize through sharp so any decodable input (png/jpeg/webp) becomes a
   // PNG @napi-rs/canvas can draw (same normalization as loadStickerImage).
   const png = await sharp(posterPng).png().toBuffer();
@@ -338,53 +296,9 @@ export async function composeGreetingOnPoster(
   const ctx = canvas.getContext("2d");
   ctx.drawImage(img, 0, 0);
 
-  if (text) {
-    const bandH = Math.max(1, Math.round(height * POSTER_BAND_FRACTION));
-    const bandY = height - bandH;
-    const inset = Math.round(width * POSTER_BAND_INSET_FRACTION);
-    const radius = Math.round(width * POSTER_BAND_RADIUS_FRACTION);
-
-    // Soft readability band: translucent rounded rect in the lower third,
-    // paper tone (PAPER_COLOR family) so dark greeting text reads over any
-    // artwork — the poster equivalent of the sticker card's paper band.
-    ctx.save();
-    ctx.fillStyle = `rgba(250, 245, 236, ${POSTER_BAND_ALPHA})`;
-    ctx.beginPath();
-    ctx.roundRect(inset, bandY, width - 2 * inset, bandH, radius);
-    ctx.fill();
-    ctx.restore();
-
-    // Greeting text: renderCardPng's conventions (Georgia serif, dark
-    // #3a3230, centered) with the mock's auto-shrink-to-fit sizing loop.
-    ctx.fillStyle = "#3a3230";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    const maxTextWidth = width - 2 * Math.round(width * POSTER_TEXT_INSET_FRACTION);
-    const minSize = Math.max(8, Math.round(width * POSTER_FONT_MIN_FRACTION));
-    const step = Math.max(1, Math.round(width * POSTER_FONT_STEP_FRACTION));
-    let fontSize = Math.max(8, Math.round(width * POSTER_FONT_START_FRACTION));
-    let lines: string[];
-    for (;;) {
-      ctx.font = `${fontSize}px Georgia, "Times New Roman", serif`;
-      lines = wrapText(ctx, text, maxTextWidth);
-      if (
-        lines.length * fontSize * 1.25 <= bandH * POSTER_TEXT_MAX_BAND_FRACTION ||
-        fontSize <= minSize
-      ) {
-        break;
-      }
-      fontSize -= step;
-    }
-    const lineH = fontSize * 1.25;
-    const startY = bandY + bandH / 2 - ((lines.length - 1) * lineH) / 2;
-    lines.forEach((line, i) => {
-      ctx.fillText(line, width / 2, startY + i * lineH, maxTextWidth);
-    });
-  }
-
-  // Grading LAST — the same order as renderCardPng's finalPass (grade the
-  // finished composite, text included, so the whole poster reads as one).
-  if (opts.grading) applyGrading(canvas, ctx, opts.grading);
+  // Grading — the same order as renderCardPng's finalPass (grade the
+  // finished artwork so the whole poster reads as one).
+  applyGrading(canvas, ctx, grading);
 
   return canvas.encode("png");
 }

@@ -23,7 +23,7 @@ import { DEFAULT_CARD_CONFIG, type MontageGrading, type StyleDerivation } from "
 
 import { drawMockSticker } from "../ai/mock-provider";
 import { BASE_COVERAGE, REF_SIZE, cardBoxNormalized, baseFit, greetingZonePx } from "../../lib/canvas-geometry";
-import { DEFAULT_CARD_WIDTH_PX, composeGreetingOnPoster, deriveGradingFromStyle, renderCardPng } from "./card-render";
+import { DEFAULT_CARD_WIDTH_PX, deriveGradingFromStyle, gradePoster, renderCardPng } from "./card-render";
 
 const RATIO_W = DEFAULT_CARD_CONFIG.cardRatioW;
 const RATIO_H = DEFAULT_CARD_CONFIG.cardRatioH;
@@ -372,7 +372,7 @@ describe("deriveGradingFromStyle", () => {
 });
 
 // ---------------------------------------------------------------------------
-// composeGreetingOnPoster (poster greeting compositing)
+// gradePoster (poster grading — runs in BOTH accumulator modes)
 // ---------------------------------------------------------------------------
 
 /** Synthetic flat-color poster PNG (the stand-in "raw AI output"). */
@@ -384,12 +384,19 @@ function flatPoster(w: number, h: number, color = "#2244cc"): Buffer {
   return canvas.toBuffer("image/png");
 }
 
-describe("composeGreetingOnPoster", () => {
-  it("draws the greeting into a soft lower-third band; dimensions preserved; output decodes", async () => {
-    const poster = flatPoster(200, 280);
-    const out = await composeGreetingOnPoster(poster, "Cheers to you, Linda!");
+describe("gradePoster", () => {
+  const NEUTRAL = { temperature: 0, saturation: 1, contrast: 1, vignette: 0 };
 
-    // Composited output differs from the raw input bytes…
+  it("non-neutral grading washes the poster; output decodes as a PNG at the native dimensions", async () => {
+    const poster = flatPoster(200, 280);
+    const out = await gradePoster(poster, {
+      temperature: 0.8,
+      saturation: 1,
+      contrast: 1,
+      vignette: 0,
+    });
+
+    // Graded output differs from the raw input bytes…
     expect(out.equals(poster)).toBe(false);
     // …decodes as a PNG at the poster's NATIVE dimensions.
     const meta = await sharp(out).metadata();
@@ -397,41 +404,30 @@ describe("composeGreetingOnPoster", () => {
     expect(meta.width).toBe(200);
     expect(meta.height).toBe(280);
 
-    // Pixel probe: the lower third (y ≥ 280·2/3 ≈ 187) carries the soft band
-    // (no longer the flat poster color), while the artwork stage above is
-    // untouched (no grading supplied → pixel-identity).
+    // Pixel probe: the warm temperature tint washes the whole poster
+    // (α ≈ 0.18·0.8) — warm tint #ff9a3c over #2244cc → red clearly rises.
     const raw = await sharp(out).ensureAlpha().raw().toBuffer();
-    const flat: [number, number, number, number] = [34, 68, 204, 255];
-    expect(pixelAt(raw, 100, 30, 200)).toEqual(flat);
-    expect(pixelAt(raw, 100, 250, 200)).not.toEqual(flat);
-    // And the band is a light paper-tone blend, not dark text spill-over.
-    const band = pixelAt(raw, 100, 250, 200);
-    expect(band[0]!).toBeGreaterThan(150);
-  });
-
-  it("empty/whitespace greeting with no grading → byte-identical output", async () => {
-    const poster = flatPoster(200, 280);
-    const out = await composeGreetingOnPoster(poster, "   \n\t");
-    expect(out.equals(poster)).toBe(true);
-  });
-
-  it("whitespace-only greeting still applies grading when given", async () => {
-    const poster = flatPoster(120, 120);
-    const out = await composeGreetingOnPoster(poster, "  ", {
-      grading: { temperature: 0.8, saturation: 1, contrast: 1, vignette: 0 },
-    });
-    expect(out.equals(poster)).toBe(false);
-    // The warm temperature tint washes the whole card (α ≈ 0.18·0.8).
-    const raw = await sharp(out).ensureAlpha().raw().toBuffer();
-    const px = pixelAt(raw, 60, 30, 120);
-    // Warm tint #ff9a3c at α 0.144 over #2244cc → red clearly rises.
+    const px = pixelAt(raw, 100, 30, 200);
     expect(px[0]!).toBeGreaterThan(60);
     expect(px[2]!).toBeLessThan(204);
   });
 
+  it("explicitly neutral grading {0,1,1,0} is pixel-identity — re-encoded PNG at the native dimensions with unchanged content", async () => {
+    const poster = flatPoster(120, 120);
+    const out = await gradePoster(poster, NEUTRAL);
+    const meta = await sharp(out).metadata();
+    expect(meta.format).toBe("png");
+    expect(meta.width).toBe(120);
+    expect(meta.height).toBe(120);
+    // Zero tint + identity filter + vignette 0 → every pixel survives
+    // unchanged (the fresh encode only re-serializes the identical pixels).
+    const raw = await sharp(out).ensureAlpha().raw().toBuffer();
+    expect(pixelAt(raw, 60, 30, 120)).toEqual([34, 68, 204, 255]);
+  });
+
   it("undecodable poster bytes → throws (the caller falls back to the raw bytes)", async () => {
     await expect(
-      composeGreetingOnPoster(Buffer.from("definitely not a png"), "Hi!"),
+      gradePoster(Buffer.from("definitely not a png"), NEUTRAL),
     ).rejects.toThrow();
   });
 });

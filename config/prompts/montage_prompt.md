@@ -22,16 +22,20 @@ The poster must:
   (e.g. "a paper crane banking over the festival square"), never as a flat
   comma-separated inventory; never use sticker, die-cut, or
   transparent-background wording in the prompt.
-- Leave clean open space in the lower third of the image so the greeting text
-  can be overlaid there later.
+- Render the greeting text AS PART OF THE ARTWORK, in the lower third of the
+  image, styled like a movie-poster title treatment: integrated into the
+  composition, clearly legible, and matching the scene's palette and mood.
+  The greeting's phrasing must be kept VERBATIM — do not reword, translate,
+  or omit any part of it.
 - Match the round theme's mood and be suitable for a family-friendly greeting
-  card (no violence, no scary imagery, no text baked into the artwork).
+  card (no violence, no scary imagery; the ONLY text in the artwork is the
+  greeting, rendered exactly as given).
 - Be one continuous paragraph of at most 800 characters, written as a direct
   image-model prompt (art style, lighting, color mood, composition order).
 
 ---
 Round theme: {{theme}}
-Greeting text (to leave room for, do NOT render it in the image): {{greeting}}
+Greeting text (render this verbatim as the poster's title treatment in the lower third): {{greeting}}
 Sticker subjects to include (all of them, named in the prompt): {{subjects}}
 
 Respond with ONLY this JSON (no markdown fences, no commentary):

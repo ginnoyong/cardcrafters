@@ -11,11 +11,14 @@
  *      sized READY items only when nothing was ever staged — legacy/seeded
  *      cards), patches GENERATING + emits `montage:generating` BEFORE any AI
  *      work, runs montage_prompt → montage_image under the per-pass timeout
- *      (deps.timeoutMs, default 90s), composites the team's greeting text
- *      onto the poster (real mode; mock mode runs a GRADING-ONLY re-encode —
- *      the mock poster already bakes the greeting; on compositing failure the
- *      raw poster is persisted READY with a non-fatal lastError marker),
- *      persists the bytes exactly like item-image.ts and sets status READY + imageSeq = the SNAPSHOT seq
+ *      (deps.timeoutMs, default 90s; the greeting rides BOTH inputs — the
+ *      poster prompt renders it as part of the artwork per the montage_prompt
+ *      template, and the image task receives it directly), applies the
+ *      style-derived grading to the poster (gradePoster — BOTH modes; the
+ *      mock poster already bakes the greeting, real mode gets it from the
+ *      image model itself; on grading failure the raw poster is persisted
+ *      READY with a non-fatal lastError marker), persists the bytes exactly
+ *      like item-image.ts and sets status READY + imageSeq = the SNAPSHOT seq
  *      (NOT the round) + promptText = the EXACT montageImagePrompt output.
  *   3. TRAILING EDGE — staging that lands DURING a pass is picked up by the
  *      next loop iteration (seq > imageSeq again), so the poster converges
@@ -56,14 +59,14 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { montagePromptSchema } from "@cardcrafters/shared";
+import { montagePromptSchema, type MontageGrading } from "@cardcrafters/shared";
 
 import { montageImagePrompt } from "../ai/openrouter-provider";
 import type { Repository, MontageInput } from "../repo/repository";
 import { AiBudgetExceededError } from "../ai/errors";
 import type { MontageAi } from "../layout/montage";
 import type { LayoutEmit } from "../layout/engine";
-import { composeGreetingOnPoster, deriveGradingFromStyle } from "../render/card-render";
+import { gradePoster, deriveGradingFromStyle } from "../render/card-render";
 
 const here = path.dirname(fileURLToPath(import.meta.url)); // .../src/server/flows
 
@@ -87,10 +90,10 @@ export interface MontageAccumulatorDeps {
   storageDir?: string;
   /** Per-gen-pass AI timeout (Promise.race). Default: 90s. */
   timeoutMs?: number;
-  /** Greeting-on-poster compositing seam (tests): defaults to
-   *  composeGreetingOnPoster (render/card-render). Inject a failing or
-   *  observing fn to exercise the compositing fallback / skip paths. */
-  composeGreeting?: typeof composeGreetingOnPoster;
+  /** Poster grading seam (tests): defaults to gradePoster
+   *  (render/card-render). Inject a failing or observing fn to exercise the
+   *  grading fallback / skip paths. */
+  gradePoster?: (posterPng: Buffer, grading: MontageGrading) => Promise<Buffer>;
 }
 
 /** What the prompt pipeline stages per ACCEPTED submission. */
@@ -377,55 +380,44 @@ async function runGenPass(
     const { imageBase64, imageMime } = imageRes;
     const rawBytes = Buffer.from(imageBase64, "base64");
 
-    // GREETING COMPOSITING — the montage_prompt template deliberately tells
-    // the image model to leave the lower third open and NOT render the
-    // greeting ("Greeting text (to leave room for, do NOT render it in the
-    // image)"), so the REAL path must composite the greeting onto the poster
-    // before persisting — the raw AI output must never be served as-is (the
-    // playtest bug: montage posters shipped without the card's message).
-    // MOCK MODE runs a GRADING-ONLY re-encode: the mock provider's procedural
-    // poster already bakes the greeting lower-third (mockMontageImageResult),
-    // so compositing the text again would double-draw it — an empty/whitespace
-    // greeting makes composeGreetingOnPoster skip the band + text — but the
-    // style-derived grading STILL applies, so mock posters carry the same
-    // vignette/temperature cast as real posters (visual parity; without this
-    // a mock demo poster would look flat next to a graded real one).
-    // Degraded-but-ready: if compositing throws (decode failure, canvas
-    // error) the RAW poster bytes are persisted anyway — a poster without
-    // the greeting text beats no poster — and the pass still completes READY
-    // with a NON-FATAL lastError marker ("poster saved without greeting
-    // overlay: …") so the GM can see why the poster has no greeting (surfaced
-    // via sync:full, which includes lastError for GM rows regardless of
-    // status). The marker is non-fatal: the state is READY, not FALLBACK.
+    // POSTER GRADING — BOTH modes run the style-derived grading pass so real
+    // and mock posters carry the same color cast/vignette treatment (the
+    // greeting itself now arrives INSIDE the artwork: the montage_prompt
+    // template tells the image model to render it verbatim as the lower-third
+    // title treatment, and the mock's procedural poster bakes it too — no
+    // client-side compositing step anymore).
+    // Degraded-but-ready: if grading throws (decode failure, canvas error)
+    // the RAW poster bytes are persisted anyway — an ungraded poster beats
+    // no poster — and the pass still completes READY with a NON-FATAL
+    // lastError marker ("poster saved without grading: …") so the GM can see
+    // why the poster looks ungraded (surfaced via sync:full, which includes
+    // lastError for GM rows regardless of status). The marker is non-fatal:
+    // the state is READY, not FALLBACK.
     let posterBytes: Buffer = rawBytes;
-    let composeErrorMessage: string | null = null;
+    let gradeErrorMessage: string | null = null;
     try {
-      const composeGreeting = deps.composeGreeting ?? composeGreetingOnPoster;
-      posterBytes = await composeGreeting(
-        rawBytes,
-        deps.mockMode ? "" : (greeting?.text ?? ""),
-        { grading: deriveGradingFromStyle(style, teamId) },
-      );
+      const grade = deps.gradePoster ?? gradePoster;
+      posterBytes = await grade(rawBytes, deriveGradingFromStyle(style, teamId));
     } catch (err) {
       posterBytes = rawBytes;
-      composeErrorMessage = err instanceof Error ? err.message : String(err);
+      gradeErrorMessage = err instanceof Error ? err.message : String(err);
       console.warn(
-        `[montage-accumulator] game ${gameId} team ${teamId} round ${round} greeting compositing failed — persisting the raw poster READY without the greeting overlay:`,
+        `[montage-accumulator] game ${gameId} team ${teamId} round ${round} poster grading failed — persisting the raw poster READY without grading:`,
         err instanceof Error ? (err.stack ?? err.message) : err,
       );
     }
     const lastErrorMessage =
-      composeErrorMessage === null
+      gradeErrorMessage === null
         ? null
-        : `poster saved without greeting overlay: ${composeErrorMessage}`;
+        : `poster saved without grading: ${gradeErrorMessage}`;
 
     // (d) Persist image bytes — the SAME storage pattern as item-image.ts:
     // PNG under the public/static storage root, subdir per game/team,
     // served at the matching /static/ URL (no user text in the path).
     const storageDir = deps.storageDir ?? DEFAULT_MONTAGE_DIR;
-    // A successfully composited poster is a fresh PNG encode at native size
-    // (composeGreetingOnPoster normalizes through sharp); the unchanged
-    // fallback (mock mode / compositing failure) keeps the mime-derived ext.
+    // A successfully graded poster is a fresh PNG encode at native size
+    // (gradePoster normalizes through sharp); the unchanged fallback (grading
+    // failure) keeps the mime-derived ext.
     const ext =
       posterBytes !== rawBytes ? "png" : imageMime === "image/jpeg" ? "jpg" : "png";
     const fileName = `montage-${teamId}-${round}-${Date.now()}.${ext}`;
@@ -445,11 +437,11 @@ async function runGenPass(
         // The SNAPSHOT seq this pass was generated from — NOT the round — so
         // any staging that lands later (seq++) re-arms exactly one pass.
         imageSeq: snapshot.seq,
-        // Non-fatal compositing marker on the degraded-but-ready path (READY
-        // + lastError): the GM sees WHY the poster has no greeting overlay
-        // via sync:full (GM rows include lastError regardless of status) —
-        // without it a degraded READY row is indistinguishable from a fully
-        // composited one. A clean pass clears it back to null.
+        // Non-fatal grading marker on the degraded-but-ready path (READY
+        // + lastError): the GM sees WHY the poster shipped without the
+        // grading pass via sync:full (GM rows include lastError regardless of
+        // status) — without it a degraded READY row is indistinguishable
+        // from a fully graded one. A clean pass clears it back to null.
         lastError: lastErrorMessage,
         fallbackUsed: false,
       },
@@ -462,10 +454,9 @@ async function runGenPass(
         status: "ready",
         imageUrl,
         promptText: attemptedPromptText,
-        // The same non-fatal marker rides the ready payload (clients' store
-        // clears montageError on the ready branch — the GM's visible cue is
-        // the persisted lastError via sync:full, not this field).
-        ...(lastErrorMessage !== null ? { error: lastErrorMessage } : {}),
+        // (No error field on the ready payload — the GM's visible cue for a
+        // degraded-but-ready poster is the persisted lastError via
+        // sync:full; the store clears montageError on the ready branch.)
       },
       { gameId, teamId },
     );

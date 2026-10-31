@@ -21,10 +21,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createCanvas } from "@napi-rs/canvas";
 import sharp from "sharp";
 
 import { DEFAULT_CARD_CONFIG } from "@cardcrafters/shared";
+
+import { deriveGradingFromStyle, gradePoster } from "../render/card-render";
 
 import { AiBudgetExceededError } from "../ai/errors";
 import { montageImagePrompt } from "../ai/openrouter-provider";
@@ -69,6 +70,10 @@ interface FakeAiOpts {
   holdImage?: boolean;
   /** montage_image returns this base64 instead of the 1×1 placeholder. */
   imageBase64?: string;
+  /** montage_prompt returns a poster prompt EMBEDDING the input greeting
+   *  (models the hardened montage_prompt template, which renders the
+   *  greeting verbatim as the poster's title treatment). */
+  greetingPrompt?: boolean;
 }
 
 /** Controllable fake implementing the accumulator's MontageAi surface. */
@@ -88,7 +93,13 @@ function createFakeAi(opts: FakeAiOpts = {}): {
       if (opts.budgetError) throw opts.budgetError;
       if (task === "montage_prompt") {
         if (opts.promptError) throw opts.promptError;
-        return { data: { prompt: "a joyful balloon poster" } };
+        return {
+          data: {
+            prompt: opts.greetingPrompt
+              ? `a joyful balloon poster whose lower-third title treatment reads: ${String(input.greeting ?? "")}`
+              : "a joyful balloon poster",
+          },
+        };
       }
       // montage_image (the only other task the accumulator calls).
       if (opts.imageError) throw opts.imageError;
@@ -165,21 +176,6 @@ function stagedInput(subject: string, nickname = "Alex"): StageMontageInput {
 /** Fresh temp storage dir per test (cleaned up in afterEach). */
 const tempDirs: string[] = [];
 
-/** A stand-in "AI poster": 64×64 flat-color PNG drawn on a real canvas —
- *  big enough that the composited lower-third band is pixel-probeable. */
-function fakePosterPng(color = "#2244cc"): Buffer {
-  const canvas = createCanvas(64, 64);
-  const ctx = canvas.getContext("2d");
-  ctx.fillStyle = color;
-  ctx.fillRect(0, 0, 64, 64);
-  return canvas.toBuffer("image/png");
-}
-
-/** RGBA pixel at (x, y) from a raw decode. */
-function pixelAt(raw: Buffer, x: number, y: number, width: number): [number, number, number, number] {
-  const i = (y * width + x) * 4;
-  return [raw[i]!, raw[i + 1]!, raw[i + 2]!, raw[i + 3]!];
-}
 afterEach(async () => {
   while (tempDirs.length > 0) {
     await rm(tempDirs.pop()!, { recursive: true, force: true });
@@ -414,44 +410,85 @@ describe("montage accumulator (staging-driven)", () => {
     });
   });
 
-  it("(g) real mode composites the greeting onto the poster — the raw AI output is never persisted as-is", async () => {
-    const s = await setup();
-    tempDirs.push(s.storageDir);
-    // The card's greeting — the playtest bug was that montage posters shipped
-    // without it because the raw generated image was served as-is.
-    await s.repo.createGreeting({
-      teamId: s.teamId,
-      round: s.round,
-      text: "Cheers to you, Linda!",
+  it("(g2) the grading seam runs ONCE per mode (real + mock) with the style-derived grading; persisted bytes decode at native size", async () => {
+    // MOCK MODE — the procedural mock poster already bakes the greeting
+    // (mockMontageImageResult), so the accumulator must NOT composite any
+    // text; it only grades. Mock and real now share the same single
+    // gradePoster seam (poster bytes + grading — no greeting parameter).
+    const sMock = await setup();
+    tempDirs.push(sMock.storageDir);
+    const ai = await createAiRouter({
+      repo: sMock.repo,
+      env: { AI_MODE: "mock", MOCK_AI_DELAY_MS: "0", NODE_ENV: "test" } as unknown as NodeJS.ProcessEnv,
     });
-    const raw = fakePosterPng();
-    const fake = createFakeAi({ imageBase64: raw.toString("base64") });
-    const deps = depsOf(s, fake.ai);
+    const depsMock = depsOf(sMock, ai, true);
+    // A style pack proves the grading is DERIVED FROM THE STYLE (not a fixed
+    // neutral constant): the observed grading must equal deriveGradingFromStyle
+    // over the same (style, teamId) pair — deterministic per team.
+    const style = {
+      styleName: "Crayon Pop",
+      palette: ["#ff5a5f", "#ffd166"],
+      lineWeight: "bold" as const,
+      mood: "joyful",
+      imagePromptSuffix: "flat vector sticker illustration, white outline",
+    };
+    await sMock.repo.updateGame(sMock.gameId, { style });
+    const gradeCalls: Array<{ poster: Buffer; grading: unknown }> = [];
+    depsMock.gradePoster = async (poster, grading) => {
+      gradeCalls.push({ poster, grading });
+      return gradePoster(poster, grading);
+    };
 
-    await finalizeMontageAll(deps, s.gameId);
+    await finalizeMontageAll(depsMock, sMock.gameId);
 
-    const row = await s.repo.getMontageState(s.teamId, s.round);
-    expect(row?.status).toBe("READY");
-    expect(row?.lastError).toBeNull();
-    const file = path.join(s.storageDir, s.gameId, s.teamId, path.basename(row!.imageUrl!));
-    const persisted = await readFile(file);
-    // Compositing ran: the persisted bytes differ from the raw AI output…
-    expect(persisted.equals(raw)).toBe(false);
-    // …and decode as a PNG at the poster's native dimensions.
-    const meta = await sharp(persisted).metadata();
-    expect(meta.format).toBe("png");
-    expect(meta.width).toBe(64);
-    expect(meta.height).toBe(64);
-    // Pixel probe: the lower-third band center is no longer the flat poster
-    // color (translucent paper band + dark greeting text drawn over it),
-    // while the upper artwork stage is untouched (the neutral style-derived
-    // grading is pixel-identity away from the corners).
-    const rawPx = await sharp(persisted).ensureAlpha().raw().toBuffer();
-    expect(pixelAt(rawPx, 32, 8, 64)).toEqual([34, 68, 204, 255]);
-    expect(pixelAt(rawPx, 32, 54, 64)).not.toEqual([34, 68, 204, 255]);
+    expect(gradeCalls).toHaveLength(1);
+    expect(gradeCalls[0]!.grading).toEqual(deriveGradingFromStyle(style, sMock.teamId));
+    const rowMock = await sMock.repo.getMontageState(sMock.teamId, sMock.round);
+    expect(rowMock?.status).toBe("READY");
+    expect(rowMock?.lastError).toBeNull();
+    // The graded poster persists at the mock's native 800×1120 and decodes.
+    const mockFiles = await readdir(path.join(sMock.storageDir, sMock.gameId, sMock.teamId));
+    expect(mockFiles).toHaveLength(1);
+    const persistedMock = await readFile(
+      path.join(sMock.storageDir, sMock.gameId, sMock.teamId, mockFiles[0]!),
+    );
+    const metaMock = await sharp(persistedMock).metadata();
+    expect(metaMock.format).toBe("png");
+    expect(metaMock.width).toBe(800);
+    expect(metaMock.height).toBe(1120);
+
+    // REAL MODE — the same seam, once, with the neutral style-derived grading
+    // (no style pack → the {0,1,1, vignette 0.15} default).
+    const sReal = await setup();
+    tempDirs.push(sReal.storageDir);
+    const fake = createFakeAi();
+    const depsReal = depsOf(sReal, fake.ai);
+    const realCalls: Array<{ grading: unknown }> = [];
+    depsReal.gradePoster = async (poster, grading) => {
+      realCalls.push({ grading });
+      return gradePoster(poster, grading);
+    };
+
+    await finalizeMontageAll(depsReal, sReal.gameId);
+
+    expect(realCalls).toHaveLength(1);
+    expect(realCalls[0]!.grading).toEqual(deriveGradingFromStyle(null, sReal.teamId));
+    const rowReal = await sReal.repo.getMontageState(sReal.teamId, sReal.round);
+    expect(rowReal?.status).toBe("READY");
+    expect(rowReal?.lastError).toBeNull();
+    const realFiles = await readdir(path.join(sReal.storageDir, sReal.gameId, sReal.teamId));
+    expect(realFiles).toHaveLength(1);
+    const persistedReal = await readFile(
+      path.join(sReal.storageDir, sReal.gameId, sReal.teamId, realFiles[0]!),
+    );
+    const metaReal = await sharp(persistedReal).metadata();
+    expect(metaReal.format).toBe("png");
+    // The fake's 1×1 placeholder poster persists at its native size.
+    expect(metaReal.width).toBe(1);
+    expect(metaReal.height).toBe(1);
   });
 
-  it("(g2) mock mode runs a GRADING-ONLY re-encode — the seam is called with an EMPTY greeting (no double-draw) but grading applied", async () => {
+  it("(g2b) mock mode WITHOUT the seam override — the real gradePoster re-encodes with grading (graded bytes differ from the raw mock poster, no greeting seam anywhere)", async () => {
     const s = await setup();
     tempDirs.push(s.storageDir);
     const ai = await createAiRouter({
@@ -459,65 +496,41 @@ describe("montage accumulator (staging-driven)", () => {
       env: { AI_MODE: "mock", MOCK_AI_DELAY_MS: "0", NODE_ENV: "test" } as unknown as NodeJS.ProcessEnv,
     });
     const deps = depsOf(s, ai, true);
-    // The mock poster already bakes the greeting lower-third — compositing
-    // the TEXT again would double-draw it. Mock mode must therefore call the
-    // seam with an EMPTY greeting (composeGreetingOnPoster skips band + text
-    // for empty/whitespace greetings) — but STILL with the style-derived
-    // grading so mock posters carry the same vignette/temperature cast as
-    // real posters (visual parity).
-    const composeArgs: Array<{ greeting: string; grading: unknown }> = [];
-    deps.composeGreeting = async (poster, greeting, opts) => {
-      composeArgs.push({ greeting, grading: opts?.grading ?? null });
-      return poster;
+    // Recording shim around the REAL gradePoster: capture the raw procedural
+    // mock poster bytes the accumulator hands in, then let the real grading
+    // run so the persisted bytes are genuinely graded.
+    const rawMockPosters: Buffer[] = [];
+    deps.gradePoster = async (poster, grading) => {
+      rawMockPosters.push(poster);
+      return gradePoster(poster, grading);
     };
 
     await finalizeMontageAll(deps, s.gameId);
 
-    // Exactly one compositing call — with an EMPTY greeting (no text/band
-    // double-draw) and a grading cast present (mock posters get graded too).
-    expect(composeArgs).toHaveLength(1);
-    expect(composeArgs[0]!.greeting.trim()).toBe("");
-    expect(composeArgs[0]!.grading).not.toBeNull();
     const row = await s.repo.getMontageState(s.teamId, s.round);
     expect(row?.status).toBe("READY");
-    expect(row?.lastError).toBeNull();
-    // The poster persists at the mock's native 800×1120 and decodes.
-    const files = await readdir(path.join(s.storageDir, s.gameId, s.teamId));
-    expect(files).toHaveLength(1);
-    const persisted = await readFile(path.join(s.storageDir, s.gameId, s.teamId, files[0]!));
-    const meta = await sharp(persisted).metadata();
-    expect(meta.format).toBe("png");
-    expect(meta.width).toBe(800);
-    expect(meta.height).toBe(1120);
-  });
-
-  it("(g2b) mock mode WITHOUT the seam override — the real compositing re-encodes with grading (graded bytes differ from the raw mock poster)", async () => {
-    const s = await setup();
-    tempDirs.push(s.storageDir);
-    const ai = await createAiRouter({
-      repo: s.repo,
-      env: { AI_MODE: "mock", MOCK_AI_DELAY_MS: "0", NODE_ENV: "test" } as unknown as NodeJS.ProcessEnv,
-    });
-    const deps = depsOf(s, ai, true);
-
-    await finalizeMontageAll(deps, s.gameId);
-
-    const row = await s.repo.getMontageState(s.teamId, s.round);
-    expect(row?.status).toBe("READY");
+    // No greeting references in the failure channel — grading is the only
+    // post-processing step left, and it succeeded here.
     expect(row?.lastError).toBeNull();
     const files = await readdir(path.join(s.storageDir, s.gameId, s.teamId));
     expect(files).toHaveLength(1);
     expect(files[0]!.endsWith(".png")).toBe(true);
     const persisted = await readFile(path.join(s.storageDir, s.gameId, s.teamId, files[0]!));
-    // The neutral style-derived grading still re-encodes (vignette 0.15),
-    // so the persisted bytes differ from the raw procedural mock poster.
+    // The neutral style-derived grading re-encodes (vignette 0.15), so the
+    // persisted bytes differ from the RAW procedural mock poster captured at
+    // the seam (the greeting-baked artwork is graded, not skipped).
+    expect(rawMockPosters).toHaveLength(1);
+    expect(persisted.equals(rawMockPosters[0]!)).toBe(false);
     const meta = await sharp(persisted).metadata();
     expect(meta.format).toBe("png");
     expect(meta.width).toBe(800);
     expect(meta.height).toBe(1120);
   });
 
-  it("(g3) compositing failure → the RAW poster is persisted READY with a non-fatal lastError marker + the ready payload carries the error", async () => {
+  it("(g4) greeting bleed-in: the greeting rides BOTH AI inputs, the image prompt embeds it, and the mock prompt ships it end-to-end", async () => {
+    // Phase 1 — fake AI: the greeting reaches BOTH tasks verbatim, and the
+    // montage_image input's prompt (what the image model actually receives)
+    // embeds the greeting as the title treatment.
     const s = await setup();
     tempDirs.push(s.storageDir);
     await s.repo.createGreeting({
@@ -525,50 +538,45 @@ describe("montage accumulator (staging-driven)", () => {
       round: s.round,
       text: "Cheers to you, Linda!",
     });
-    const raw = fakePosterPng();
-    const fake = createFakeAi({ imageBase64: raw.toString("base64") });
+    const fake = createFakeAi({ greetingPrompt: true });
     const deps = depsOf(s, fake.ai);
-    deps.composeGreeting = async () => {
-      throw new Error("canvas decode exploded");
-    };
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     await finalizeMontageAll(deps, s.gameId);
 
-    const row = await s.repo.getMontageState(s.teamId, s.round);
-    // Degraded-but-ready: the poster SUCCEEDED — only the text overlay
-    // failed — so the row is READY (not FALLBACK) with a NON-FATAL lastError
-    // marker the GM can see via sync:full (why the poster has no greeting).
-    expect(row?.status).toBe("READY");
-    expect(row?.lastError).toBe(
-      "poster saved without greeting overlay: canvas decode exploded",
-    );
-    expect(row?.fallbackUsed).toBe(false);
-    // The raw AI bytes are persisted byte-identically (a poster without the
-    // greeting text beats no poster).
-    const file = path.join(s.storageDir, s.gameId, s.teamId, path.basename(row!.imageUrl!));
-    expect((await readFile(file)).equals(raw)).toBe(true);
-    // The failure log is enriched with the round + the error stack (read the
-    // spy BEFORE mockRestore — in vitest restore also resets mock.calls).
-    const warnCalls = warnSpy.mock.calls.filter((args) =>
-      args.some((a) => typeof a === "string" && a.includes("greeting compositing failed")),
-    );
-    expect(warnCalls).toHaveLength(1);
-    const warnText = warnCalls[0]!.map(String).join(" ");
-    expect(warnText).toContain(`round ${s.round}`);
-    expect(warnText).toContain("canvas decode exploded");
-    warnSpy.mockRestore();
-    // The ready payload carries the same non-fatal marker as `error` (the
-    // store's ready branch clears montageError — the GM's visible cue is the
-    // persisted lastError via sync:full — but the payload stays informative).
-    const updates = s.events.filter((e) => e.event === "montage:updated");
-    expect(updates).toHaveLength(1);
-    expect(updates[0]!.payload).toMatchObject({
-      round: s.round,
-      teamId: s.teamId,
-      status: "ready",
-      error: "poster saved without greeting overlay: canvas decode exploded",
+    const promptCall = fake.calls.find((c) => c.task === "montage_prompt");
+    const imageCall = fake.calls.find((c) => c.task === "montage_image");
+    expect(promptCall).toBeDefined();
+    expect(imageCall).toBeDefined();
+    expect(promptCall!.input.greeting).toBe("Cheers to you, Linda!");
+    // The montage_image input derives from the montage_prompt output — which
+    // (per the hardened template) renders the greeting verbatim as the
+    // poster's title treatment — so the image model sees the greeting inside
+    // the poster prompt it is asked to paint.
+    expect(String(imageCall!.input.prompt)).toContain("Cheers to you, Linda!");
+    // The image task ALSO carries the greeting as a direct input field.
+    expect(imageCall!.input.greeting).toBe("Cheers to you, Linda!");
+
+    // Phase 2 — real mock router: the mock montage_prompt's canned string
+    // CONTAINS the greeting text, proving the whole chain (accumulator →
+    // router → mock provider → schema-validated prompt) carries it.
+    const sMock = await setup();
+    tempDirs.push(sMock.storageDir);
+    await sMock.repo.createGreeting({
+      teamId: sMock.teamId,
+      round: sMock.round,
+      text: "Cheers to you, Linda!",
     });
+    const ai = await createAiRouter({
+      repo: sMock.repo,
+      env: { AI_MODE: "mock", MOCK_AI_DELAY_MS: "0", NODE_ENV: "test" } as unknown as NodeJS.ProcessEnv,
+    });
+    const depsMock = depsOf(sMock, ai, true);
+
+    await finalizeMontageAll(depsMock, sMock.gameId);
+
+    const row = await sMock.repo.getMontageState(sMock.teamId, sMock.round);
+    expect(row?.status).toBe("READY");
+    expect(row?.promptText).toContain("Cheers to you, Linda!");
   });
 
   it("(e2) persists promptText === the EXACT montageImagePrompt output (poster prompt + style hint)", async () => {

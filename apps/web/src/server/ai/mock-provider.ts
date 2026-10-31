@@ -1039,9 +1039,10 @@ const MONTAGE_FLAVOR_ADJECTIVES: readonly string[] = [
 /**
  * Canned deterministic montage prompt: avalanche-hash-seeded flavor adjective
  * + theme + greeting text + subjects joined, phrased as ONE vivid poster
- * image prompt (single cohesive full-bleed illustration, space reserved for
- * the greeting text, family-friendly). Validated against montagePromptSchema
- * by compute()'s schema table — the same belt-and-braces as other tasks.
+ * image prompt (single cohesive full-bleed illustration with the greeting
+ * BAKED IN as the lower-third title treatment, family-friendly). Validated
+ * against montagePromptSchema by compute()'s schema table — the same
+ * belt-and-braces as other tasks.
  */
 function mockMontagePrompt(input: Record<string, unknown>): unknown {
   const theme = String(input.theme ?? "").trim() || "a happy occasion";
@@ -1064,14 +1065,14 @@ function mockMontagePrompt(input: Record<string, unknown>): unknown {
   const subjectList =
     subjects.length > 0 ? subjects.join(", ") : "a charming ensemble of themed icons";
   const greetingNote = greeting
-    ? ` Leave generous clean space across the lower third for the greeting text "${greeting}".`
-    : " Leave generous clean space across the lower third for the greeting text.";
+    ? ` Render the greeting "${greeting}" verbatim as the poster's title treatment across the lower third.`
+    : " Render the greeting verbatim as the poster's title treatment across the lower third.";
 
   const prompt =
     `${flavor} full-bleed movie-poster illustration for a ${theme} greeting card: ` +
     `a single cohesive composition featuring ${subjectList}, arranged as an ensemble ` +
     `cast with one clear focal hero. Bold cinematic poster style, rich painterly ` +
-    `shading, joyful lighting.${greetingNote} Family-friendly; no text rendered in the artwork.`;
+    `shading, joyful lighting.${greetingNote} Family-friendly; the ONLY text in the artwork is the greeting, rendered exactly as given.`;
 
   // montagePromptSchema caps at 800 chars — hard-truncate defensively so a
   // very long subject list can never make the mock itself schema-invalid.
