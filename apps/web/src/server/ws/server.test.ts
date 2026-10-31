@@ -235,3 +235,68 @@ describe("buildSyncFull — critique audience scoping (GM only)", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Montage promptText audience scoping: the persisted poster prompt rides the
+// sync snapshot for the GM in every phase, and for the PRESENTER from JUDGING
+// onward (the JUDGING big screen renders the shared TeamJudgeCard whose
+// "View prompt" accordion reads montagePromptText). Players never receive it
+// in a snapshot; lastError stays GM-only in every phase.
+// ---------------------------------------------------------------------------
+
+describe("buildSyncFull — montage promptText presenter visibility (JUDGING+)", () => {
+  it("presenter snapshot in JUDGING carries montage.promptText; player never does", async () => {
+    const s = await setup();
+    await s.repo.upsertMontageState(s.teamId, 1, {
+      patch: {
+        status: "READY",
+        imageUrl: "/static/montages/g1/t1/poster.png",
+        promptText: "a glossy poster of a red balloon dog",
+        lastError: "poster grading failed twice",
+      },
+    });
+
+    // Pre-JUDGING (BUILD): the presenter's montage section stays lean —
+    // status/imageUrl only, no promptText, no lastError.
+    const before = await buildSyncFull(s.hub, s.repo, s.gameId, presenterIdentity(s));
+    const beforeMontage = before.teams[0]!.montage as { promptText?: string; lastError?: string } | null;
+    expect(beforeMontage).not.toBeNull();
+    expect(beforeMontage!.promptText).toBeUndefined();
+    expect(beforeMontage!.lastError).toBeUndefined();
+
+    // Drive BUILD → SCORING → JUDGING.
+    for (const event of [
+      { type: "gm:stopBuild", now: 1_700_000_001_000 },
+      { type: "gm:stopScoring", now: 1_700_000_002_000 },
+    ] as const) {
+      const result = await s.hub.applyEvent(s.gameId, event);
+      expect(result.ok).toBe(true);
+    }
+
+    // Presenter from JUDGING onward: promptText rides the snapshot (the
+    // TeamJudgeCard "View prompt" toggle reads it) — but lastError stays
+    // GM-only.
+    const presenter = await buildSyncFull(s.hub, s.repo, s.gameId, presenterIdentity(s));
+    expect(presenter.phase).toBe("JUDGING");
+    expect(presenter.teams[0]!.montage).toMatchObject({
+      status: "ready",
+      imageUrl: "/static/montages/g1/t1/poster.png",
+      promptText: "a glossy poster of a red balloon dog",
+    });
+    expect((presenter.teams[0]!.montage as { lastError?: string }).lastError).toBeUndefined();
+
+    // GM unchanged: promptText AND lastError both ride along.
+    const gm = await buildSyncFull(s.hub, s.repo, s.gameId, gmIdentity(s));
+    expect(gm.teams[0]!.montage).toMatchObject({
+      promptText: "a glossy poster of a red balloon dog",
+      lastError: "poster grading failed twice",
+    });
+
+    // Player: still lean in JUDGING (fail-closed for every non-GM/presenter
+    // role).
+    const player = await buildSyncFull(s.hub, s.repo, s.gameId, playerIdentity(s));
+    const playerMontage = player.teams[0]!.montage as { promptText?: string } | null;
+    expect(playerMontage).not.toBeNull();
+    expect(playerMontage!.promptText).toBeUndefined();
+  });
+});

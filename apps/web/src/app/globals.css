@@ -561,6 +561,70 @@ label {
   }
 }
 
+/* GM judging boxes (Dispatch 1: replaces the cc-judging table in JUDGING):
+   one .cc-judge-card per team — header + greeting, a 2-column body (poster/
+   sticker flip visual on the left, scrollable sticker-prompt list on the
+   right) and the judge actions row (score chip / View / Pick winner) along
+   the bottom. Reuses .cc-team-name / .cc-greeting / .cc-montage-img /
+   .cc-prompt-view / .cc-showcase-prompts / .cc-btn untouched. */
+.cc-judge-card {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.cc-judge-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 0.9rem;
+  align-items: start;
+}
+
+.cc-judge-visual {
+  min-width: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+
+/* When the poster is ready the visual is a button-like flip control. */
+.cc-judge-visual.is-flippable {
+  cursor: pointer;
+}
+
+.cc-judge-prompts {
+  min-width: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  display: grid;
+  gap: 0.4rem;
+  align-content: start;
+}
+
+.cc-judge-prompts h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.cc-judge-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.cc-judge-score {
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .cc-judge-body {
+    grid-template-columns: 1fr;
+  }
+
+  .cc-judge-prompts {
+    max-height: 200px;
+  }
+}
+
 /* Presenter one-at-a-time stage (SCORING onward): one team's showcase fills
    the viewport below the header/meta rows; the cycle buttons ride the stage
    header. Reuses .cc-btn / .cc-btn-row for the buttons. */

@@ -47,6 +47,7 @@ import {
   teamLabel,
 } from "@/components/Standings";
 import { Reveal3D } from "@/components/Reveal3D";
+import TeamJudgeCard from "@/components/TeamJudgeCard";
 import TeamShowcase from "@/components/TeamShowcase";
 import { GameStoreProvider, phaseLabel, useGameStore, type SyncFullEvent } from "@/lib/store";
 
@@ -133,7 +134,15 @@ function TeamCard({
   );
 }
 
-function PresenterBoard({ code }: { code: string }) {
+function PresenterBoard({
+  code,
+  focusTeamId: initialFocusTeamId,
+}: {
+  code: string;
+  /** Deep-link focus (GM judging "View" → /present/<code>?team=<id>): the
+   *  stage latches onto this team once the snapshot lands. */
+  focusTeamId?: string;
+}) {
   const { snapshot, dispatch } = useGameStore();
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -284,8 +293,22 @@ function PresenterBoard({ code }: { code: string }) {
   // shrinks (a team leaves / round reset) so the stage never shows empty.
   const teamCount = snapshot?.teams.length ?? 0;
   const [stageIndex, setStageIndex] = useState(0);
+  // Focus latch (?team=<id> deep link from the GM judging "View" link): once
+  // the snapshot lands and the focused team exists, the stage renders THAT
+  // team regardless of stageIndex — latched, i.e. it stays put while
+  // phase-driven re-renders would otherwise keep stageIndex's pick on
+  // screen. The latch only engages while the team exists (a round reset can
+  // drop it → plain stageIndex logic resumes). Cycling hands control back to
+  // stageIndex: stepStage clears the latch and jumps stageIndex to the
+  // focused team's neighbour, so the next step continues from the team
+  // actually on screen instead of wherever stageIndex was left.
+  const [focusTeamId, setFocusTeamId] = useState<string | null>(initialFocusTeamId ?? null);
   const clampedStageIndex = teamCount > 0 ? Math.min(stageIndex, teamCount - 1) : 0;
-  const stageTeam = snapshot?.teams[clampedStageIndex] ?? null;
+  const focusedIndex = focusTeamId
+    ? (snapshot?.teams.findIndex((t) => t.id === focusTeamId) ?? -1)
+    : -1;
+  const latched = focusedIndex >= 0;
+  const stageTeam = snapshot?.teams[latched ? focusedIndex : clampedStageIndex] ?? null;
   const showStage =
     !!snapshot &&
     !!stageTeam &&
@@ -294,13 +317,24 @@ function PresenterBoard({ code }: { code: string }) {
     );
   const stepStage = useCallback(
     (delta: number) => {
+      // Latch hand-off (see focusTeamId above): clear the latch and jump
+      // stageIndex relative to the focused team. If the focused team is gone
+      // (round reset), just clear the latch and let the plain cycle run.
+      if (focusTeamId) {
+        const idx = snapshot?.teams.findIndex((t) => t.id === focusTeamId) ?? -1;
+        setFocusTeamId(null);
+        if (idx >= 0) {
+          if (teamCount > 0) setStageIndex((idx + delta + teamCount) % teamCount);
+          return;
+        }
+      }
       setStageIndex((i) => {
         if (teamCount <= 0) return 0;
         const base = Math.min(i, teamCount - 1);
         return (base + delta + teamCount) % teamCount;
       });
     },
-    [teamCount],
+    [teamCount, focusTeamId, snapshot],
   );
 
   return (
@@ -368,7 +402,10 @@ function PresenterBoard({ code }: { code: string }) {
           wrap-around cycle buttons; the meta TeamCard grid (QR/roster) stays
           above. The montage surfaces live inside TeamShowcase now (poster
           hero / generating indicator), so the per-mini montage blocks are
-          gone. */}
+          gone. In JUDGING the stage renders the shared TeamJudgeCard
+          (poster-first flip view + sticker prompts) with ONLY a Return
+          button — no score chip / Pick winner (presenter payloads carry no
+          scores and judging stays the GM's call). */}
       {showStage && stageTeam ? (
         <section aria-label="team showcase stage" className="cc-present-stage" data-testid="presenter-stage">
           <div className="cc-present-stage-header">
@@ -376,7 +413,7 @@ function PresenterBoard({ code }: { code: string }) {
               {stageTeam.name} <span className="cc-muted">({stageTeam.label})</span>
             </h2>
             <span className="cc-badge">
-              {clampedStageIndex + 1} of {teamCount}
+              {(latched ? focusedIndex : clampedStageIndex) + 1} of {teamCount}
             </span>
             <div className="cc-present-stage-actions">
               <button
@@ -399,7 +436,34 @@ function PresenterBoard({ code }: { code: string }) {
               </button>
             </div>
           </div>
-          <TeamShowcase team={stageTeam} testId={`presenter-showcase-${stageTeam.id}`} />
+          {snapshot.phase === PHASE.JUDGING ? (
+            /* JUDGING: the shared judge card (full-screen variant). No
+               cardLabel exists on presenter payloads (the JUDGING
+               phaseChanged carries no scoring order) — TeamJudgeCard falls
+               back to the team's label. tally=null: the presenter never
+               receives scores. */
+            <TeamJudgeCard
+              team={stageTeam}
+              cardLabel={null}
+              tally={null}
+              testId={`presenter-judge-${stageTeam.id}`}
+              actions={
+                <button
+                  type="button"
+                  className="cc-btn"
+                  data-testid="presenter-judge-return"
+                  onClick={() => {
+                    if (window.history.length > 1) window.history.back();
+                    else window.location.assign("/gm");
+                  }}
+                >
+                  Return
+                </button>
+              }
+            />
+          ) : (
+            <TeamShowcase team={stageTeam} testId={`presenter-showcase-${stageTeam.id}`} />
+          )}
         </section>
       ) : null}
 
@@ -489,10 +553,17 @@ function PresenterBoard({ code }: { code: string }) {
   );
 }
 
-export default function PresenterClient({ code }: { code: string }) {
+export default function PresenterClient({
+  code,
+  focusTeamId,
+}: {
+  code: string;
+  /** Deep-link focus (GM judging "View" → /present/<code>?team=<id>). */
+  focusTeamId?: string;
+}) {
   return (
     <GameStoreProvider>
-      <PresenterBoard code={code} />
+      <PresenterBoard code={code} focusTeamId={focusTeamId} />
     </GameStoreProvider>
   );
 }

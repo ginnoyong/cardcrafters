@@ -37,6 +37,7 @@ import QRCode from "qrcode";
 import { MAX_TEAMS, PHASE } from "@cardcrafters/shared";
 
 import { PeoplesChoiceBanner, StandingsList, WinnerBanner, teamLabel } from "@/components/Standings";
+import TeamJudgeCard, { JudgeScoreChip } from "@/components/TeamJudgeCard";
 import { minutesToSeconds } from "@/lib/timers";
 import {
   createGameSocket,
@@ -747,6 +748,14 @@ function Console({ game }: { game: CreatedGame }) {
   const scoringLabelByTeam = new Map(
     scoringCards.filter((c) => typeof c.teamId === "string").map((c) => [c.teamId!, c.label]),
   );
+  // Team→live-tally map for the JUDGING boxes (the score chip on each judge
+  // card): scoring.cards carry teamId on GM snapshots only; snapshot.scores
+  // is keyed by cardId, so resolve cardId→teamId through the cards list.
+  const tallyByTeamId = new Map(
+    scoringCards
+      .filter((c) => typeof c.teamId === "string")
+      .map((c) => [c.teamId!, snapshot?.scores[c.cardId] ?? null]),
+  );
   // Readiness: ratedX is live-computed from the tallies (every score:submit
   // lands as scores:update); the sync snapshot's ratedX/ratedY is the
   // refresh/resync fallback. ratedY = active players × (teams − 1).
@@ -777,6 +786,22 @@ function Console({ game }: { game: CreatedGame }) {
     snapshot?.standings.find((s) => s.teamId === snapshot.peoplesChoiceTeamId)?.label ||
     "";
   const resultsStage = phase === PHASE.REVEAL || phase === PHASE.RESULTS;
+  // JUDGING: the team grid renders judge boxes (poster-first flip card +
+  // score chip + View link + Pick winner) INSTEAD of the greeting/QR cards,
+  // the mini-preview grid is hidden and the old judging table is gone —
+  // the boxes carry everything the table used to.
+  const judging = phase === PHASE.JUDGING;
+  // Judge boxes render in judgingRows order (avg desc → count desc → label,
+  // same ordering as the old table); teams without a scoring row keep their
+  // original order AFTER the scored ones.
+  const judgingOrderedTeams: typeof teams = judging
+    ? [
+        ...judgingRows
+          .map((row) => teams.find((t) => t.id === row.teamId))
+          .filter((t): t is (typeof teams)[number] => t !== undefined),
+        ...teams.filter((t) => !scoringLabelByTeam.has(t.id)),
+      ]
+    : teams;
 
   return (
     <div>
@@ -799,9 +824,64 @@ function Console({ game }: { game: CreatedGame }) {
         </p>
       ) : null}
 
-      {/* Teams: vertical greeting/QR cards with the single-QR accordion. */}
+      {/* Teams: vertical greeting/QR cards with the single-QR accordion —
+          except in JUDGING, where the grid renders the sorted judge boxes
+          (poster-first flip card + score chip + View link + Pick winner)
+          in judgingRows order instead. Same cc-team/cc-card wrappers. */}
       <section aria-label="teams" className="cc-team-grid">
-        {teams.map((team) => {
+        {judgingOrderedTeams.map((team) => {
+          if (judging) {
+            return (
+              <div key={team.id} className="cc-team" aria-label={`team ${team.label} judging card`}>
+                <div className="cc-card">
+                  <TeamJudgeCard
+                    team={snapshot?.teams.find((t) => t.id === team.id) ?? {
+                      id: team.id,
+                      name: team.name,
+                      label: team.label,
+                      memberCount: team.members.length,
+                      members: team.members,
+                      itemCount: 0,
+                      greeting: { text: team.greetingText, status: null },
+                      items: [],
+                      layout: null,
+                      activity: [],
+                      critique: null,
+                      montageStatus: team.montageStatus ?? null,
+                      montageImageUrl: team.montageImageUrl ?? null,
+                      montagePromptText: team.montagePromptText ?? null,
+                    }}
+                    cardLabel={scoringLabelByTeam.get(team.id) ?? null}
+                    tally={tallyByTeamId.get(team.id) ?? null}
+                    testId={`gm-judge-${team.id}`}
+                    actions={
+                      <>
+                        <JudgeScoreChip tally={tallyByTeamId.get(team.id) ?? null} />
+                        <a
+                          className="cc-btn cc-btn-small"
+                          href={`/present/${game.code}?team=${team.id}`}
+                          target="_blank"
+                          rel="noopener"
+                          data-testid={`gm-judge-view-${team.id}`}
+                        >
+                          View
+                        </a>
+                        <button
+                          type="button"
+                          className="cc-btn cc-btn-small"
+                          data-testid={`gm-judge-pick-${team.id}`}
+                          aria-label={`pick ${team.name} as the winner`}
+                          onClick={() => void gmAction("judging:winner", { teamId: team.id })}
+                        >
+                          Pick winner
+                        </button>
+                      </>
+                    }
+                  />
+                </div>
+              </div>
+            );
+          }
           const joinUrl = `${window.location.origin}/join/${team.joinToken}`;
           const qrActive = qrTeamId === team.id;
           return (
@@ -906,48 +986,10 @@ function Console({ game }: { game: CreatedGame }) {
         </section>
       ) : null}
 
-      {/* JUDGING: the judging table below the vertical team cards — sorted
-          avg desc → count desc → label, with a Pick winner button per row
-          (judging:winner; the server bridges SCORING→JUDGING if needed). */}
-      {phase === PHASE.JUDGING && judgingRows.length > 0 ? (
-        <section className="cc-card cc-judging" aria-label="judging table" data-testid="gm-judging">
-          <h3>Pick the winner</h3>
-          <p className="cc-hint">
-            Sorted by the players' scores. Your pick wins the round; the crowd's favourite is announced too.
-          </p>
-          <table className="cc-judging-table">
-            <thead>
-              <tr>
-                <th scope="col">Card</th>
-                <th scope="col">Team</th>
-                <th scope="col">Score</th>
-                <th scope="col">Votes</th>
-                <th scope="col">Winner</th>
-              </tr>
-            </thead>
-            <tbody>
-              {judgingRows.map((row) => (
-                <tr key={row.cardId} data-testid={`gm-judging-row-${row.teamId}`}>
-                  <td>{row.cardLabel}</td>
-                  <td>{row.teamName || row.teamLabel}</td>
-                  <td>{row.avg !== null ? row.avg : "—"}</td>
-                  <td>{row.count}</td>
-                  <td>
-                    <button
-                      type="button"
-                      className="cc-btn cc-btn-primary cc-btn-small"
-                      aria-label={`pick ${row.teamName || row.teamLabel} as the winner`}
-                      onClick={() => void gmAction("judging:winner", { teamId: row.teamId })}
-                    >
-                      Pick winner
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-      ) : null}
+      {/* JUDGING: the old cc-judging table is GONE — the judge boxes in the
+          team grid above carry the score chip, the presenter View link and
+          the Pick winner button (judging:winner), sorted the same way
+          (avg desc → count desc → label). */}
 
       {/* REVEAL/RESULTS: the winner banner + People's Choice + standings.
           At REVEAL the banner itself is a button-like control that keeps the
@@ -993,10 +1035,11 @@ function Console({ game }: { game: CreatedGame }) {
       ) : null}
 
       {/* Live previews: one read-only mini canvas per team. GREETINGS: the
-          greeting + an empty canvas; BUILD: live items + layout. After the
+          greeting + an empty canvas; BUILD: live items + layout. HIDDEN in
+          JUDGING (the judge boxes' flip visual shows the cards). After the
           winner pick (REVEAL/RESULTS + winnerTeamId) each thumbnail opens the
           3D reveal modal for that team (winner = gloss rig). */}
-      {snapshot && snapshot.teams.length > 0 ? (
+      {!judging && snapshot && snapshot.teams.length > 0 ? (
         <section aria-label="live card previews" className="cc-mini-grid">
           {snapshot.teams.map((team) => {
             // Montage state rides the live snapshot; the Console's merged

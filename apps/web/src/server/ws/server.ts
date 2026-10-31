@@ -299,12 +299,20 @@ export async function buildSyncFull(
               ? { imageUrl: montage.imageUrl }
               : {}),
             // promptText (the EXACT image-model prompt, persisted by the
-            // accumulator) is INTERNAL craft detail — GM ONLY. Players and
-            // the presenter get the lean status/imageUrl payload; the GM's
-            // "View prompt" transparency toggle reads this field (live
-            // montage:updated events may still carry promptText, but the
-            // refresh-surviving snapshot keeps it out of non-GM payloads).
-            ...(identity?.role === "gm" && montage.promptText
+            // accumulator) is INTERNAL craft detail — GM ONLY… except the
+            // presenter from JUDGING onward: the JUDGING big screen renders
+            // the shared TeamJudgeCard with the "View prompt" transparency
+            // accordion, so the presenter's refresh-surviving snapshot must
+            // carry promptText too (no anonymity stakes — the judging stage
+            // is team-named). Players keep the lean status/imageUrl payload
+            // in every phase (live montage:updated events may still carry
+            // promptText, but the snapshot keeps it out of player payloads).
+            ...((identity?.role === "gm" ||
+              (identity?.role === "presenter" &&
+                [PHASE.JUDGING, PHASE.REVEAL, PHASE.RESULTS].includes(
+                  state.phase as (typeof PHASE)[keyof typeof PHASE],
+                ))) &&
+            montage.promptText
               ? { promptText: montage.promptText }
               : {}),
             // lastError (why the poster fell back) is GM-facing diagnosis,
