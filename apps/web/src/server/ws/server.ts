@@ -917,6 +917,13 @@ export function registerSocketHandlers(
         ackFail(ack, "forbidden", "GM only");
         return;
       }
+      // Greeting lock: edits are only meaningful before the card content is
+      // frozen — SCORING+ has baked greetings into posters and locked layouts.
+      const greetingPhase = (await hub.runtimeState(identity.gameId)).phase;
+      if (greetingPhase !== PHASE.LOBBY && greetingPhase !== PHASE.GREETINGS && greetingPhase !== PHASE.BUILD) {
+        ackFailReason(ack, "locked", `greetings are locked in ${greetingPhase}`, "locked");
+        return;
+      }
       const parsed = gmUpdateGreetingSchema.safeParse(raw);
       if (!parsed.success) {
         ackFail(ack, "invalid_payload", `invalid greeting payload: ${parsed.error.issues[0]?.message ?? "unknown"}`);
@@ -959,6 +966,12 @@ export function registerSocketHandlers(
       const identity = data.identity;
       if (!identity || identity.role !== "gm") {
         ackFail(ack, "forbidden", "GM only");
+        return;
+      }
+      // Same greeting lock as gm:updateGreeting (edits frozen post-BUILD).
+      const regenPhase = (await hub.runtimeState(identity.gameId)).phase;
+      if (regenPhase !== PHASE.LOBBY && regenPhase !== PHASE.GREETINGS && regenPhase !== PHASE.BUILD) {
+        ackFailReason(ack, "locked", `greetings are locked in ${regenPhase}`, "locked");
         return;
       }
       const parsed = gmRegenGreetingSchema.safeParse(raw);

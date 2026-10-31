@@ -786,14 +786,19 @@ function Console({ game }: { game: CreatedGame }) {
     snapshot?.standings.find((s) => s.teamId === snapshot.peoplesChoiceTeamId)?.label ||
     "";
   const resultsStage = phase === PHASE.REVEAL || phase === PHASE.RESULTS;
-  // JUDGING: the team grid renders judge boxes (poster-first flip card +
-  // score chip + View link + Pick winner) INSTEAD of the greeting/QR cards,
-  // the mini-preview grid is hidden and the old judging table is gone —
-  // the boxes carry everything the table used to.
+  // JUDGING/SCORING: the team grid renders judge boxes (poster-first flip
+  // card + actions) INSTEAD of the greeting/QR cards, and the mini-preview
+  // grid is hidden — the boxes carry the poster/sticker view in both phases.
   const judging = phase === PHASE.JUDGING;
+  // SCORING shows the SAME boxes MINUS the score chip and the Pick winner
+  // button (scores are still coming in — judging-only actions) and in the
+  // ORIGINAL teams order (no judgingRows sorting while numbers are in flux).
+  // Actions in SCORING = the presenter View link only; the cc-scoring-console
+  // below stays the GM's live progress view (chips + readiness + Go to judging).
+  const judgeBoxes = judging || phase === PHASE.SCORING;
   // Judge boxes render in judgingRows order (avg desc → count desc → label,
   // same ordering as the old table); teams without a scoring row keep their
-  // original order AFTER the scored ones.
+  // original order AFTER the scored ones. JUDGING only — SCORING never sorts.
   const judgingOrderedTeams: typeof teams = judging
     ? [
         ...judgingRows
@@ -825,14 +830,16 @@ function Console({ game }: { game: CreatedGame }) {
       ) : null}
 
       {/* Teams: vertical greeting/QR cards with the single-QR accordion —
-          except in JUDGING, where the grid renders the sorted judge boxes
-          (poster-first flip card + score chip + View link + Pick winner)
-          in judgingRows order instead. Same cc-team/cc-card wrappers. */}
+          except in JUDGING/SCORING, where the grid renders judge boxes
+          (poster-first flip card + View link) instead. JUDGING adds the
+          score chip + Pick winner and sorts by judgingRows; SCORING keeps
+          the original teams order (scores in flux). Same cc-team/cc-card
+          wrappers. */}
       <section aria-label="teams" className="cc-team-grid">
         {judgingOrderedTeams.map((team) => {
-          if (judging) {
+          if (judgeBoxes) {
             return (
-              <div key={team.id} className="cc-team" aria-label={`team ${team.label} judging card`}>
+              <div key={team.id} className="cc-team" aria-label={`team ${team.label} ${judging ? "judging" : "scoring"} card`}>
                 <div className="cc-card">
                   <TeamJudgeCard
                     team={snapshot?.teams.find((t) => t.id === team.id) ?? (() => {
@@ -860,9 +867,13 @@ function Console({ game }: { game: CreatedGame }) {
                     cardLabel={scoringLabelByTeam.get(team.id) ?? null}
                     tally={tallyByTeamId.get(team.id) ?? null}
                     testId={`gm-judge-${team.id}`}
+                    cardKind={judging ? "judging" : "scoring"}
                     actions={
                       <>
-                        <JudgeScoreChip tally={tallyByTeamId.get(team.id) ?? null} />
+                        {/* Score chip + Pick winner are JUDGING-only: in
+                            SCORING the scores are still coming in (the
+                            cc-scoring-console below is the progress view). */}
+                        {judging ? <JudgeScoreChip tally={tallyByTeamId.get(team.id) ?? null} /> : null}
                         <a
                           className="cc-btn cc-btn-small"
                           href={`/present/${game.code}?team=${team.id}`}
@@ -872,15 +883,17 @@ function Console({ game }: { game: CreatedGame }) {
                         >
                           View
                         </a>
-                        <button
-                          type="button"
-                          className="cc-btn cc-btn-small"
-                          data-testid={`gm-judge-pick-${team.id}`}
-                          aria-label={`pick ${team.name} as the winner`}
-                          onClick={() => void gmAction("judging:winner", { teamId: team.id })}
-                        >
-                          Pick winner
-                        </button>
+                        {judging ? (
+                          <button
+                            type="button"
+                            className="cc-btn cc-btn-small"
+                            data-testid={`gm-judge-pick-${team.id}`}
+                            aria-label={`pick ${team.name} as the winner`}
+                            onClick={() => void gmAction("judging:winner", { teamId: team.id })}
+                          >
+                            Pick winner
+                          </button>
+                        ) : null}
                       </>
                     }
                   />
@@ -959,7 +972,9 @@ function Console({ game }: { game: CreatedGame }) {
       ) : null}
 
       {/* SCORING: per-team live chips {team, avg, votes} + readiness + the
-          "Go to judging" control (gm:stopScoring locks the scores). */}
+          "Go to judging" control (gm:stopScoring locks the scores). The judge
+          boxes above carry NO scores in this phase — this console stays the
+          GM's live progress view. */}
       {phase === PHASE.SCORING && scoringChips.length > 0 ? (
         <section className="cc-card cc-scoring-console" aria-label="scoring progress" data-testid="gm-scoring">
           <h3>Rate the cards — live scores</h3>
@@ -1042,10 +1057,11 @@ function Console({ game }: { game: CreatedGame }) {
 
       {/* Live previews: one read-only mini canvas per team. GREETINGS: the
           greeting + an empty canvas; BUILD: live items + layout. HIDDEN in
-          JUDGING (the judge boxes' flip visual shows the cards). After the
+          JUDGING and SCORING (the judge boxes' flip visual carries the
+          poster/sticker now). After the
           winner pick (REVEAL/RESULTS + winnerTeamId) each thumbnail opens the
           3D reveal modal for that team (winner = gloss rig). */}
-      {!judging && snapshot && snapshot.teams.length > 0 ? (
+      {!judgeBoxes && snapshot && snapshot.teams.length > 0 ? (
         <section aria-label="live card previews" className="cc-mini-grid">
           {snapshot.teams.map((team) => {
             // Montage state rides the live snapshot; the Console's merged

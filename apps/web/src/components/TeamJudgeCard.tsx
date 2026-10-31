@@ -1,9 +1,10 @@
 "use client";
 
 /**
- * TeamJudgeCard — the GM's per-team JUDGING box: poster-first flip view with
- * the sticker prompts on the right and the judging actions (score chip +
- * View link + Pick winner) along the bottom. Mirrors TeamShowcase's structure
+ * TeamJudgeCard — the GM's per-team JUDGING/SCORING box: poster-first flip
+ * view with the sticker prompts on the right and the phase actions along the
+ * bottom (JUDGING: score chip + View link + Pick winner; SCORING: View link
+ * only). Mirrors TeamShowcase's structure
  * ("use client", dynamic CardCanvas with ssr:false) but swaps the static
  * two-sub layout for a 2-column judge body with a click-to-flip visual:
  *
@@ -61,6 +62,7 @@ export default function TeamJudgeCard({
   tally,
   actions,
   testId,
+  cardKind = "judging",
 }: {
   team: ClientTeam;
   /** The scoring card's label ("Card A", …) when one exists. */
@@ -70,6 +72,8 @@ export default function TeamJudgeCard({
   /** Bottom action row (score chip + View link + Pick winner button). */
   actions: ReactNode;
   testId?: string;
+  /** Honest accessible name: "judging" in JUDGING, "scoring" in SCORING. */
+  cardKind?: "judging" | "scoring";
 }) {
   // Flip state: false = the AI-montage poster (the card face), true = the
   // composed sticker CardCanvas. Only meaningful when the poster is ready.
@@ -89,7 +93,7 @@ export default function TeamJudgeCard({
     <section
       className="cc-judge-card"
       data-testid={testId}
-      aria-label={`${team.name} judging card`}
+      aria-label={`${team.name} ${cardKind} card`}
     >
       <h3 className="cc-team-name">
         {team.name} <span className="cc-muted">({cardLabel ?? team.label})</span>
