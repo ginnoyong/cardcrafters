@@ -83,6 +83,9 @@ export interface ItemRow {
   id: string;
   teamId: string;
   playerId: string;
+  /** Submitter's nickname (read-time join with the players table) — the GM
+   *  judging box renders `"{promptRaw}" — {nickname}` per sticker. */
+  nickname: string;
   round: number;
   promptRaw: string;
   subject: string | null;

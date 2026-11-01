@@ -289,6 +289,12 @@ describe("items", () => {
     const readyOnly = await repo.listItems(teamA.id, 1, ["READY"]);
     expect(readyOnly).toHaveLength(1);
     expect((await repo.listItems(teamA.id, 1, ["GENERATING"]))).toHaveLength(0);
+
+    // ItemRow.nickname: the submitter's name must ride with every row so the
+    // GM judging box renders real player names (never "?").
+    const all = await repo.listItems(teamA.id, 1);
+    expect(all.map((i) => i.nickname)).toEqual(["Sam"]);
+    expect(item.nickname).toBe("Sam");
   });
 });
 

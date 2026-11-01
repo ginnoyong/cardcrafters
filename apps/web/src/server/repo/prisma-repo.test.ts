@@ -233,6 +233,13 @@ describe.skipIf(!DB_OK)("PrismaRepo (postgres)", () => {
       expect(ready!.placedAt).toBe(5);
       expect(ready!.contentBox).toEqual({ x: 10, y: 20, w: 60, h: 80 });
       expect(await repo.listItems(team.id, 1, ["GENERATING"])).toHaveLength(0);
+
+      // ItemRow.nickname: read-time player join — every row (list + get +
+      // update) carries the submitter's nickname (GM judging box relies on it).
+      const rows = await repo.listItems(team.id, 1);
+      expect(rows.map((i) => i.nickname)).toEqual([`Sam-${testId}`]);
+      expect((await repo.getItem(item.id))!.nickname).toBe(`Sam-${testId}`);
+      expect((await repo.updateItem(item.id, { status: "READY" })).nickname).toBe(`Sam-${testId}`);
     });
   });
 

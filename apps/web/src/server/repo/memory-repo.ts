@@ -345,6 +345,10 @@ export class MemoryRepo implements Repository {
       id: randomUUID(),
       teamId: input.teamId,
       playerId: input.playerId,
+      // Nicknames are immutable after creation (no rename API), so storing
+      // the submitter's name at write time mirrors the prisma repo's
+      // read-time player join — ItemRow.nickname is always populated.
+      nickname: this.players.get(input.playerId)?.nickname ?? "?",
       round: input.round,
       promptRaw: input.promptRaw,
       subject: input.subject ?? null,

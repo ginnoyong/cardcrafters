@@ -904,7 +904,7 @@ function Console({ game }: { game: CreatedGame }) {
                         {judging ? (
                           <button
                             type="button"
-                            className="cc-btn cc-btn-small"
+                            className="cc-btn cc-btn-small cc-btn-primary"
                             data-testid={`gm-judge-pick-${team.id}`}
                             aria-label={`pick ${team.name} as the winner`}
                             onClick={() => void gmAction("judging:winner", { teamId: team.id })}

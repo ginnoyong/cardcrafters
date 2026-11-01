@@ -2,22 +2,24 @@
 
 /**
  * TeamJudgeCard — the GM's per-team JUDGING/SCORING box: poster-first flip
- * view with the sticker prompts on the right and the phase actions along the
- * bottom (JUDGING: score chip + View link + Pick winner; SCORING: View link
- * only). Mirrors TeamShowcase's structure
- * ("use client", dynamic CardCanvas with ssr:false) but swaps the static
- * two-sub layout for a 2-column judge body with a click-to-flip visual:
+ * view as the ONLY content column (full width) with the phase actions along
+ * the bottom (JUDGING: score chip + View link + Pick winner; SCORING: View
+ * link only). Mirrors TeamShowcase's structure
+ * ("use client", dynamic CardCanvas with ssr:false) with a click-to-flip
+ * visual:
  *
  *   .cc-judge-card
  *     .cc-team-name   team name + (card label)
  *     .cc-greeting    the team's greeting, quoted
- *     .cc-judge-body  LEFT  .cc-judge-visual  the visual — when the AI poster
- *                             is ready it is a button-like flip control
- *                             (poster ↔ composed sticker card); without a
- *                             poster it is a static CardCanvas hero.
- *                     RIGHT .cc-judge-prompts the sticker prompts list
- *                             (ONLY items actually on the card — status
- *                             "ready"), scrollable.
+ *     .cc-judge-visual  the visual — when the AI poster is ready it is a
+ *                       button-like flip control (poster ↔ composed sticker
+ *                       card); without a poster it is a static CardCanvas
+ *                       hero. Under it sits the prompt-transparency
+ *                       accordion, whose content follows the flip state:
+ *                       montage view → the AI-montage prompt; sticker view →
+ *                       the sticker prompts list (ONLY items actually on the
+ *                       card — status "ready", with real submitter
+ *                       nicknames).
  *     .cc-judge-actions  the caller's action node (score chip / View / Pick).
  *
  * Pure projection component: everything comes from the ClientTeam snapshot —
@@ -110,12 +112,12 @@ export default function TeamJudgeCard({
 
       <p className="cc-greeting">“{team.greeting.text}”</p>
 
-      <div className="cc-judge-body">
-        {/* LEFT: the visual. Poster-ready → button-like flip control
-            (click/Enter/Space, aria-pressed mirrors the flipped state);
-            otherwise the composed CardCanvas is the static hero (with a
-            "Generating poster…" indicator while the accumulator runs). */}
-        <div className={`cc-judge-visual${posterReady ? " is-flippable" : ""}`}>
+      {/* The visual: the ONLY content column (full width). Poster-ready →
+          button-like flip control (click/Enter/Space, aria-pressed mirrors
+          the flipped state); otherwise the composed CardCanvas is the static
+          hero (with a "Generating poster…" indicator while the accumulator
+          runs). */}
+      <div className={`cc-judge-visual${posterReady ? " is-flippable" : ""}`}>
           {posterReady ? (
             /* Button-like flip control (same role/buttonTabIndex/Enter/Space
                pattern as TeamMiniCanvas's 3D thumbnails): one toggle whose
@@ -185,46 +187,54 @@ export default function TeamJudgeCard({
             </>
           )}
 
-          {/* Prompt transparency: the EXACT image-model prompt the accumulator
-              sent for this team's poster, collapsible so it doesn't crowd the
-              box. Visible whenever a prompt is known. */}
-          {team.montagePromptText ? (
+          {/* Prompt transparency accordion: content FOLLOWS THE FLIP STATE —
+              montage view (default) shows the EXACT image-model prompt the
+              accumulator sent for this team's poster; sticker view shows the
+              sticker prompts list (only stickers actually on the card, with
+              real submitter nicknames). Collapsed by default so it doesn't
+              crowd the box; the label is dynamic so it names what the
+              expanded view will show. */}
+          {team.montagePromptText || readyItems.length > 0 ? (
             <>
               <button
                 type="button"
                 className="cc-btn cc-btn-small"
                 aria-expanded={showPrompt}
                 aria-controls={`judge-prompt-${team.id}`}
+                aria-label={`view prompts for ${team.name}`}
                 onClick={() => setShowPrompt((v) => !v)}
               >
-                {showPrompt ? "Hide prompt" : "View prompt"}
+                {showPrompt ? "Hide prompt" : flipped ? "View sticker prompts" : "View montage prompt"}
               </button>
               {showPrompt ? (
-                <pre id={`judge-prompt-${team.id}`} className="cc-prompt-view">
-                  {team.montagePromptText}
-                </pre>
+                flipped ? (
+                  <div id={`judge-prompt-${team.id}`} className="cc-judge-prompt-content">
+                    <h4 className="cc-judge-prompts-title">Sticker prompts</h4>
+                    {readyItems.length > 0 ? (
+                      <ul className="cc-showcase-prompts">
+                        {readyItems.map((item) => (
+                          <li key={item.id}>
+                            “{item.promptRaw}” — {item.nickname}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="cc-hint">No prompts yet.</p>
+                    )}
+                  </div>
+                ) : team.montagePromptText ? (
+                  <pre id={`judge-prompt-${team.id}`} className="cc-prompt-view">
+                    {team.montagePromptText}
+                  </pre>
+                ) : (
+                  <p id={`judge-prompt-${team.id}`} className="cc-hint">
+                    Montage prompt not available yet.
+                  </p>
+                )
               ) : null}
             </>
           ) : null}
         </div>
-
-        {/* RIGHT: the sticker prompts (scrollable) — only stickers actually
-            on the card. */}
-        <div className="cc-judge-prompts">
-          <h3>Sticker prompts</h3>
-          {readyItems.length > 0 ? (
-            <ul className="cc-showcase-prompts">
-              {readyItems.map((item) => (
-                <li key={item.id}>
-                  “{item.promptRaw}” — {item.nickname}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="cc-hint">No prompts yet.</p>
-          )}
-        </div>
-      </div>
 
       <div className="cc-judge-actions">{actions}</div>
     </section>

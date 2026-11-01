@@ -618,21 +618,15 @@ label {
 }
 
 /* GM judging boxes (Dispatch 1: replaces the cc-judging table in JUDGING):
-   one .cc-judge-card per team — header + greeting, a 2-column body (poster/
-   sticker flip visual on the left, scrollable sticker-prompt list on the
-   right) and the judge actions row (score chip / View / Pick winner) along
-   the bottom. Reuses .cc-team-name / .cc-greeting / .cc-montage-img /
-   .cc-prompt-view / .cc-showcase-prompts / .cc-btn untouched. */
+   one .cc-judge-card per team — header + greeting, the poster/sticker flip
+   visual as the ONLY content column (full width, with the prompt
+   transparency accordion under it whose content follows the flip state) and
+   the judge actions row (score chip / View / Pick winner) along the bottom.
+   Reuses .cc-team-name / .cc-greeting / .cc-montage-img / .cc-prompt-view /
+   .cc-showcase-prompts / .cc-btn untouched. */
 .cc-judge-card {
   display: grid;
   gap: 0.6rem;
-}
-
-.cc-judge-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
-  gap: 0.9rem;
-  align-items: start;
 }
 
 .cc-judge-visual {
@@ -646,8 +640,9 @@ label {
   cursor: pointer;
 }
 
-.cc-judge-prompts {
-  min-width: 0;
+/* Accordion content in sticker view: the sticker prompts list (scrollable,
+   same cap the old right column had). */
+.cc-judge-prompt-content {
   max-height: 320px;
   overflow-y: auto;
   display: grid;
@@ -655,7 +650,7 @@ label {
   align-content: start;
 }
 
-.cc-judge-prompts h3 {
+.cc-judge-prompts-title {
   margin: 0;
   font-size: 1rem;
 }
@@ -667,16 +662,23 @@ label {
   align-items: center;
 }
 
+/* Score chip: non-interactive pill matching .cc-btn-small's metrics (same
+   min-height/padding/radius/font-size) with a transparent bg + hairline
+   border so the actions row lines up as one consistent control strip. */
 .cc-judge-score {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.8rem;
   font-weight: 600;
+  border-radius: var(--radius);
+  border: 1px solid color-mix(in srgb, var(--text-muted) 60%, transparent);
+  background: transparent;
 }
 
 @media (max-width: 720px) {
-  .cc-judge-body {
-    grid-template-columns: 1fr;
-  }
-
-  .cc-judge-prompts {
+  .cc-judge-prompt-content {
     max-height: 200px;
   }
 }

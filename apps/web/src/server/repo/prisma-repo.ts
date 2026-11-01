@@ -59,6 +59,10 @@ import type {
 
 const ms = (d: Date | null | undefined): number | null => (d ? d.getTime() : null);
 
+/** Shared include: every ItemRow carries the submitter's nickname (read-time
+ *  join — the Item model stores playerId only, per the prisma schema). */
+const ITEM_PLAYER_INCLUDE = { player: { select: { nickname: true } } } as const;
+
 /** Map a Prisma unique-violation (or other known error) to RepoError. */
 function wrap(e: unknown): unknown {
   if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
@@ -466,7 +470,10 @@ export class PrismaRepo implements Repository {
 
   async getItem(id: string): Promise<ItemRow | null> {
     try {
-      const i = await this.prisma.item.findUnique({ where: { id } });
+      const i = await this.prisma.item.findUnique({
+        where: { id },
+        include: ITEM_PLAYER_INCLUDE,
+      });
       return i ? this.mapItem(i) : null;
     } catch (e) {
       throw wrap(e);
@@ -477,6 +484,7 @@ export class PrismaRepo implements Repository {
     try {
       const i = await this.prisma.item.update({
         where: { id },
+        include: ITEM_PLAYER_INCLUDE,
         data: {
           ...patch,
           contentBox:
@@ -504,6 +512,7 @@ export class PrismaRepo implements Repository {
         round,
         ...(statuses ? { status: { in: statuses } } : {}),
       },
+      include: ITEM_PLAYER_INCLUDE,
       orderBy: { createdAt: "asc" },
     });
     return items.map((i) => this.mapItem(i));
@@ -513,6 +522,7 @@ export class PrismaRepo implements Repository {
     id: string;
     teamId: string;
     playerId: string;
+    player?: { nickname: string } | null;
     round: number;
     promptRaw: string;
     subject: string | null;
@@ -530,6 +540,9 @@ export class PrismaRepo implements Repository {
       id: i.id,
       teamId: i.teamId,
       playerId: i.playerId,
+      // Read-time join (no schema change): the submitter's nickname rides
+      // with every row so the GM judging box can render real player names.
+      nickname: i.player?.nickname ?? "?",
       round: i.round,
       promptRaw: i.promptRaw,
       subject: i.subject,
