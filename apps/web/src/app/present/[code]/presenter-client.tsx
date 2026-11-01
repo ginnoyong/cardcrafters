@@ -1,8 +1,9 @@
 "use client";
 
 /**
- * Presenter view — team cards (name, player count, phase, countdown, join
- * QR) plus a LIVE card grid: one read-only CardCanvas mini per team, fed by
+ * Presenter view — team cards (name, label, phase, timer, greeting — no
+ * join QR: players join via the GM console, the QR is a GM-only concern)
+ * plus a LIVE card grid: one read-only CardCanvas mini per team, fed by
  * the store's build-phase events (item:pending / item:ready /
  * layout:updated — the presenter socket joins every team room).
  *
@@ -21,7 +22,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
-import QRCode from "qrcode";
 
 import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W, MAX_TEAM_MEMBERS, PHASE } from "@cardcrafters/shared";
 
@@ -81,7 +81,6 @@ function TeamCard({
   name,
   label,
   memberCount,
-  joinToken,
   phase,
   phaseEndsAt,
   serverNow,
@@ -90,27 +89,12 @@ function TeamCard({
   name: string;
   label: string;
   memberCount: number;
-  joinToken: string | null;
   phase: string;
   phaseEndsAt: number | null;
   serverNow: number;
   greetingText?: string;
 }) {
-  const [qr, setQr] = useState<string | null>(null);
   const remaining = useCountdown(phaseEndsAt, serverNow);
-
-  useEffect(() => {
-    if (!joinToken) return;
-    let alive = true;
-    QRCode.toDataURL(`${window.location.origin}/join/${joinToken}`, { width: 160, margin: 1 })
-      .then((url) => {
-        if (alive) setQr(url);
-      })
-      .catch(() => undefined);
-    return () => {
-      alive = false;
-    };
-  }, [joinToken]);
 
   return (
     <div className="cc-card cc-present-team" aria-label={`team ${label} card`}>
@@ -125,10 +109,6 @@ function TeamCard({
         <p className="cc-timer" aria-label="phase timer">
           ⏱ {fmt(remaining)}
         </p>
-      ) : null}
-      {qr ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={qr} alt={`QR code to join ${name}`} width={120} height={120} />
       ) : null}
     </div>
   );
@@ -146,7 +126,7 @@ function PresenterBoard({
   const { snapshot, dispatch } = useGameStore();
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [joinTokens, setJoinTokens] = useState<Record<string, string>>({});
+
   // Live socket ref — the REVEAL "Show results" button emits reveal:ack over
   // the SAME socket the board joined with.
   const socketRef = useRef<ReturnType<typeof createGameSocket> | null>(null);
@@ -259,23 +239,6 @@ function PresenterBoard({
     }
   }, []);
 
-  // The presenter snapshot has no join tokens — fetch them once (full=1 is
-  // the GM/QR convenience route).
-  useEffect(() => {
-    void (async () => {
-      try {
-        const res = await fetch(`/api/games/${encodeURIComponent(code)}?full=1`);
-        if (!res.ok) return;
-        const body = (await res.json()) as { teams: Array<{ id: string; joinToken: string }> };
-        const map: Record<string, string> = {};
-        for (const t of body.teams) map[t.id] = t.joinToken;
-        setJoinTokens(map);
-      } catch {
-        // QRs stay hidden; not critical for the presenter lobby
-      }
-    })();
-  }, [code]);
-
   // Results-stage labels: the live team list first (the presenter knows the
   // teams), the public standings' labels as the refresh fallback (a sync:full
   // resync carries winnerTeamId but never the standings rows).
@@ -374,7 +337,6 @@ function PresenterBoard({
             name={team.name}
             label={team.label}
             memberCount={team.members.length > 0 ? team.members.length : team.memberCount}
-            joinToken={joinTokens[team.id] ?? null}
             phase={snapshot?.phase ?? "LOBBY"}
             phaseEndsAt={snapshot?.phaseEndsAt ?? null}
             serverNow={snapshot?.serverNow ?? Date.now()}
@@ -412,7 +374,8 @@ function PresenterBoard({
 
       {/* SCORING onward: one-at-a-time stage — a single team's showcase fills
           the screen (same main/sub layout as the player view), with ←/→
-          wrap-around cycle buttons; the meta TeamCard grid (QR/roster) stays
+          wrap-around cycle buttons; the meta TeamCard grid (roster/timer)
+          stays
           above. The montage surfaces live inside TeamShowcase now (poster
           hero / generating indicator), so the per-mini montage blocks are
           gone. In JUDGING the stage renders the shared TeamJudgeCard
