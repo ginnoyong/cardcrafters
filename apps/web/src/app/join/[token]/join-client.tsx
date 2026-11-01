@@ -19,7 +19,7 @@
  *      item:rejected / item:failed owner-only).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import dynamic from "next/dynamic";
 
 import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W, PHASE } from "@cardcrafters/shared";
@@ -58,6 +58,18 @@ import {
 const SESSION_COOKIE = "cc_session";
 /** localStorage key for the last used nickname (prefill on a fresh join). */
 const NICKNAME_KEY = "cc_nickname";
+
+/** Inline style for poster/sticker boxes: lock the box to the game's card
+ *  ratio (aspect-ratio) and publish the ratio as custom props so the CSS
+ *  max-width calc can shrink the box when the 70vh cap clamps its height —
+ *  keeping it exactly as tall as the CardCanvas beside it. */
+function cardRatioStyle(w: number, h: number): CSSProperties {
+  return {
+    aspectRatio: `${w} / ${h}`,
+    "--card-ratio-w": w,
+    "--card-ratio-h": h,
+  } as CSSProperties;
+}
 
 function readSessionToken(): string | null {
   if (typeof document !== "undefined") {
@@ -499,7 +511,14 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
               standalone CardCanvas + montage block below is suppressed while
               active. SCORING uses the "Our card" flip section instead;
               BUILD keeps the old layout byte-identical. */}
-          {showcaseActive && team ? <TeamShowcase team={team} testId="player-showcase" /> : null}
+          {showcaseActive && team ? (
+            <TeamShowcase
+              team={team}
+              cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
+              cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
+              testId="player-showcase"
+            />
+          ) : null}
 
           {build ? (
             <>
@@ -535,18 +554,26 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                       {!ownImgFailed ? (
                         <>
                           {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={ownVariant === "poster" ? ownPosterUrl : ownStickerUrl}
-                            key={`${snapshot.scoring.yourTeamCardId}:${snapshot.cardVersion ?? 0}:${ownVariant}`}
-                            data-testid="our-card-image"
-                            alt={`Our team's card (${ownVariant === "poster" ? "poster" : "sticker"})`}
-                            className={`cc-rating-image${ownImgLoaded ? " is-loaded" : ""}`}
-                            role="button"
-                            aria-label={ownVariant === "poster" ? "show sticker card" : "show poster"}
-                            onClick={() => setOwnVariant((v) => (v === "poster" ? "sticker" : "poster"))}
-                            onLoad={() => setOwnImgLoaded(true)}
-                            onError={() => setOwnImgFailed(true)}
-                          />
+                          <div
+                            className="cc-rating-image-box"
+                            style={cardRatioStyle(
+                              snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W,
+                              snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H,
+                            )}
+                          >
+                            <img
+                              src={ownVariant === "poster" ? ownPosterUrl : ownStickerUrl}
+                              key={`${snapshot.scoring.yourTeamCardId}:${snapshot.cardVersion ?? 0}:${ownVariant}`}
+                              data-testid="our-card-image"
+                              alt={`Our team's card (${ownVariant === "poster" ? "poster" : "sticker"})`}
+                              className={`cc-rating-image${ownImgLoaded ? " is-loaded" : ""}`}
+                              role="button"
+                              aria-label={ownVariant === "poster" ? "show sticker card" : "show poster"}
+                              onClick={() => setOwnVariant((v) => (v === "poster" ? "sticker" : "poster"))}
+                              onLoad={() => setOwnImgLoaded(true)}
+                              onError={() => setOwnImgFailed(true)}
+                            />
+                          </div>
                           <button
                             type="button"
                             className="cc-btn cc-flip-btn"
@@ -576,6 +603,8 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                 sessionToken={identity.sessionToken}
                 cardVersion={snapshot.cardVersion}
                 remainingLabel={remainingLabel}
+                cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
+                cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
                 testId="player-rating-panel"
               />
             </>
@@ -625,8 +654,8 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                 items={team.items}
                 layout={team.layout}
                 greeting={team.greeting.text}
-                cardRatioW={DEFAULT_CARD_RATIO_W}
-                cardRatioH={DEFAULT_CARD_RATIO_H}
+                cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
+                cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
                 myPlayerId={identity.playerId}
                 highlightItemId={highlightItemId}
                 onItemTap={handleHighlight}
@@ -638,7 +667,14 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                     Generating poster…
                   </p>
                 ) : team.montageStatus === "ready" && team.montageImageUrl ? (
-                  <div className="cc-montage" aria-label={`poster for ${team.name}`}>
+                  <div
+                    className="cc-montage"
+                    style={cardRatioStyle(
+                      snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W,
+                      snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H,
+                    )}
+                    aria-label={`poster for ${team.name}`}
+                  >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={team.montageImageUrl}
@@ -657,8 +693,8 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                 items={team.items}
                 layout={team.layout}
                 greeting={team.greeting.text}
-                cardRatioW={DEFAULT_CARD_RATIO_W}
-                cardRatioH={DEFAULT_CARD_RATIO_H}
+                cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
+                cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
                 myPlayerId={identity.playerId}
                 highlightItemId={highlightItemId}
                 onItemTap={handleHighlight}
@@ -676,7 +712,14 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                   Generating poster…
                 </p>
               ) : team.montageStatus === "ready" && team.montageImageUrl ? (
-                <div className="cc-montage" aria-label={`poster for ${team.name}`}>
+                <div
+                  className="cc-montage"
+                  style={cardRatioStyle(
+                    snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W,
+                    snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H,
+                  )}
+                  aria-label={`poster for ${team.name}`}
+                >
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={team.montageImageUrl}

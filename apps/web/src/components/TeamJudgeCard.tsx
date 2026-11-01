@@ -25,8 +25,10 @@
  * like every other consumer: react-konva must never evaluate during SSR.
  */
 
-import { useState, type ReactNode } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import dynamic from "next/dynamic";
+
+import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W } from "@cardcrafters/shared";
 
 import type { ClientTeam } from "@/lib/store";
 
@@ -63,6 +65,8 @@ export default function TeamJudgeCard({
   actions,
   testId,
   cardKind = "judging",
+  cardRatioW = DEFAULT_CARD_RATIO_W,
+  cardRatioH = DEFAULT_CARD_RATIO_H,
 }: {
   team: ClientTeam;
   /** The scoring card's label ("Card A", …) when one exists. */
@@ -74,6 +78,11 @@ export default function TeamJudgeCard({
   testId?: string;
   /** Honest accessible name: "judging" in JUDGING, "scoring" in SCORING. */
   cardKind?: "judging" | "scoring";
+  /** Card aspect ratio (game config) — the montage poster box locks to the
+   *  SAME ratio as the CardCanvas sticker card so the flip never resizes
+   *  and poster/sticker faces render at identical dimensions. */
+  cardRatioW?: number;
+  cardRatioH?: number;
 }) {
   // Flip state: false = the AI-montage poster (the card face), true = the
   // composed sticker CardCanvas. Only meaningful when the poster is ready.
@@ -135,10 +144,20 @@ export default function TeamJudgeCard({
                   items={team.items}
                   layout={team.layout}
                   greeting={team.greeting.text}
+                  cardRatioW={cardRatioW}
+                  cardRatioH={cardRatioH}
                   ariaLabel={`${team.name} sticker card — ${readyCount} stickers placed`}
                 />
               ) : (
-                <div className="cc-montage" aria-label={`poster for ${team.name}`}>
+                <div
+                  className="cc-montage"
+                  style={{
+                    aspectRatio: `${cardRatioW} / ${cardRatioH}`,
+                    "--card-ratio-w": cardRatioW,
+                    "--card-ratio-h": cardRatioH,
+                  } as CSSProperties}
+                  aria-label={`poster for ${team.name}`}
+                >
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={team.montageImageUrl ?? ""}
@@ -154,6 +173,8 @@ export default function TeamJudgeCard({
                 items={team.items}
                 layout={team.layout}
                 greeting={team.greeting.text}
+                cardRatioW={cardRatioW}
+                cardRatioH={cardRatioH}
                 ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
               />
               {team.montageStatus === "generating" ? (

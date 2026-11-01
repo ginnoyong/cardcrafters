@@ -23,7 +23,9 @@
  * plain language — no jargon.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
+
+import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W } from "@cardcrafters/shared";
 
 import type { ClientScoring, ClientScoreTally } from "@/lib/store";
 import { friendlyScoreError } from "@/lib/socket";
@@ -56,6 +58,10 @@ export interface RatingPanelProps {
   /** Phase countdown label ("4:37") shown beside the heading; null/undefined
    *  when no timer is running. */
   remainingLabel?: string | null;
+  /** Card aspect ratio (game config) — the preview box locks to the SAME
+   *  ratio as the CardCanvas sticker card. Defaults to the shared 5/7. */
+  cardRatioW?: number;
+  cardRatioH?: number;
   testId?: string;
 }
 
@@ -71,6 +77,8 @@ export default function RatingPanel({
   sessionToken,
   cardVersion,
   remainingLabel,
+  cardRatioW = DEFAULT_CARD_RATIO_W,
+  cardRatioH = DEFAULT_CARD_RATIO_H,
   testId = "rating-panel",
 }: RatingPanelProps) {
   // Rateable cards: everything EXCEPT our own team's card (own-card guard —
@@ -229,19 +237,28 @@ export default function RatingPanel({
           the AI poster and the sticker card. */}
       {!imgFailed ? (
         <>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={imageUrl}
-            key={`${card.cardId}:${cardVersion ?? 0}:${variant}`}
-            data-testid="rating-card-image"
-            alt={`The card you are rating: ${cardName}`}
-            className={`cc-rating-image${imgLoaded ? " is-loaded" : ""}`}
-            role="button"
-            aria-label={variant === "poster" ? "show sticker card" : "show poster"}
-            onClick={() => setVariant((v) => (v === "poster" ? "sticker" : "poster"))}
-            onLoad={() => setImgLoaded(true)}
-            onError={() => setImgFailed(true)}
-          />
+          <div
+            className="cc-rating-image-box"
+            style={{
+              aspectRatio: `${cardRatioW} / ${cardRatioH}`,
+              "--card-ratio-w": cardRatioW,
+              "--card-ratio-h": cardRatioH,
+            } as CSSProperties}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={imageUrl}
+              key={`${card.cardId}:${cardVersion ?? 0}:${variant}`}
+              data-testid="rating-card-image"
+              alt={`The card you are rating: ${cardName}`}
+              className={`cc-rating-image${imgLoaded ? " is-loaded" : ""}`}
+              role="button"
+              aria-label={variant === "poster" ? "show sticker card" : "show poster"}
+              onClick={() => setVariant((v) => (v === "poster" ? "sticker" : "poster"))}
+              onLoad={() => setImgLoaded(true)}
+              onError={() => setImgFailed(true)}
+            />
+          </div>
           <button
             type="button"
             className="cc-btn cc-flip-btn"

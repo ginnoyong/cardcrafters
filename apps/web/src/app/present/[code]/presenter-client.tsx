@@ -23,7 +23,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import QRCode from "qrcode";
 
-import { MAX_TEAM_MEMBERS, PHASE } from "@cardcrafters/shared";
+import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W, MAX_TEAM_MEMBERS, PHASE } from "@cardcrafters/shared";
 
 // Client-only: react-konva throws at module load under Next's bundled React
 // (version check) — never evaluate it during SSR/prerender.
@@ -459,6 +459,8 @@ function PresenterBoard({
               team={stageTeam}
               cardLabel={null}
               tally={null}
+              cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
+              cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
               testId={`presenter-judge-${stageTeam.id}`}
               actions={
                 <button
@@ -478,7 +480,12 @@ function PresenterBoard({
               }
             />
           ) : (
-            <TeamShowcase team={stageTeam} testId={`presenter-showcase-${stageTeam.id}`} />
+            <TeamShowcase
+              team={stageTeam}
+              cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
+              cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
+              testId={`presenter-showcase-${stageTeam.id}`}
+            />
           )}
         </section>
       ) : null}

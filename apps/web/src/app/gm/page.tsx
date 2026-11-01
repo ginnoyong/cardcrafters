@@ -30,11 +30,11 @@
  * GM auth IS knowing the game code (party-game trade-off, see ws/auth.ts).
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import dynamic from "next/dynamic";
 import QRCode from "qrcode";
 
-import { MAX_TEAMS, PHASE } from "@cardcrafters/shared";
+import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W, MAX_TEAMS, PHASE } from "@cardcrafters/shared";
 
 import { PeoplesChoiceBanner, StandingsList, WinnerBanner, teamLabel } from "@/components/Standings";
 import TeamJudgeCard, { JudgeScoreChip } from "@/components/TeamJudgeCard";
@@ -402,12 +402,18 @@ function TeamMiniCanvas({
   team,
   montageStatus,
   montageImageUrl,
+  cardRatioW = DEFAULT_CARD_RATIO_W,
+  cardRatioH = DEFAULT_CARD_RATIO_H,
   interactive,
   onOpen3d,
 }: {
   team: ClientTeam;
   montageStatus?: "generating" | "ready" | "fallback" | null;
   montageImageUrl?: string | null;
+  /** Card aspect ratio (game config) — locks the mini poster box to the SAME
+   *  ratio as the CardCanvas sticker card. */
+  cardRatioW?: number;
+  cardRatioH?: number;
   interactive: boolean;
   onOpen3d: () => void;
 }) {
@@ -440,6 +446,8 @@ function TeamMiniCanvas({
         items={team.items}
         layout={team.layout}
         greeting={team.greeting.text}
+        cardRatioW={cardRatioW}
+        cardRatioH={cardRatioH}
         ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
       />
       {/* Montage (poster) accumulator surface, moved here from the greeting/QR
@@ -453,7 +461,15 @@ function TeamMiniCanvas({
           Generating poster…
         </p>
       ) : montageStatus === "ready" && montageImageUrl ? (
-        <div className="cc-montage" aria-label={`poster for ${team.name}`}>
+        <div
+          className="cc-montage"
+          style={{
+            aspectRatio: `${cardRatioW} / ${cardRatioH}`,
+            "--card-ratio-w": cardRatioW,
+            "--card-ratio-h": cardRatioH,
+          } as CSSProperties}
+          aria-label={`poster for ${team.name}`}
+        >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={montageImageUrl}
@@ -866,6 +882,8 @@ function Console({ game }: { game: CreatedGame }) {
                     })()}
                     cardLabel={scoringLabelByTeam.get(team.id) ?? null}
                     tally={tallyByTeamId.get(team.id) ?? null}
+                    cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
+                    cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
                     testId={`gm-judge-${team.id}`}
                     cardKind={judging ? "judging" : "scoring"}
                     actions={
@@ -1073,6 +1091,8 @@ function Console({ game }: { game: CreatedGame }) {
                 team={team}
                 montageStatus={merged?.montageStatus ?? team.montageStatus ?? null}
                 montageImageUrl={merged?.montageImageUrl ?? team.montageImageUrl ?? null}
+                cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
+                cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
                 interactive={resultsStage && snapshot.winnerTeamId !== null}
                 onOpen3d={() => setModalTeamId(team.id)}
               />
@@ -1101,6 +1121,20 @@ function Console({ game }: { game: CreatedGame }) {
           })()}
           onClose={() => setModalTeamId(null)}
         />
+      ) : null}
+
+      {/* Presenter view link — lives INSIDE Console (the phase lives in the
+          store here) so it can hide during BUILD: the judging/scoring boxes
+          already carry per-team presenter View buttons and the big link is
+          noise while teams are crafting. LOBBY/GREETINGS keep it so teams
+          can watch the big screen from the start. */}
+      {phase !== PHASE.BUILD ? (
+        <p className="cc-hint">
+          Presenter view:{" "}
+          <a className="cc-link" href={`/present/${game.code}`}>
+            /present/{game.code}
+          </a>
+        </p>
       ) : null}
     </div>
   );
@@ -1189,13 +1223,9 @@ export default function GmPage() {
       <h1>Card Crafters — Game Master</h1>
       {game ? (
         <GameStoreProvider>
+          {/* The presenter-view link renders inside <Console/> (gated on the
+              phase — hidden during BUILD); see Console's return JSX. */}
           <Console game={game} />
-          <p className="cc-hint">
-            Presenter view:{" "}
-            <a className="cc-link" href={`/present/${game.code}`}>
-              /present/{game.code}
-            </a>
-          </p>
         </GameStoreProvider>
       ) : (
         <form

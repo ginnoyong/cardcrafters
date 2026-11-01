@@ -26,8 +26,10 @@
  * like every other consumer: react-konva must never evaluate during SSR.
  */
 
+import type { CSSProperties } from "react";
 import dynamic from "next/dynamic";
 
+import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W } from "@cardcrafters/shared";
 import type { ClientTeam } from "@/lib/store";
 
 // Client-only: react-konva throws at module load under Next's bundled React
@@ -40,9 +42,16 @@ const CardCanvas = dynamic(() => import("@/components/player/CardCanvas"), {
 export default function TeamShowcase({
   team,
   testId,
+  cardRatioW = DEFAULT_CARD_RATIO_W,
+  cardRatioH = DEFAULT_CARD_RATIO_H,
 }: {
   team: ClientTeam;
   testId?: string;
+  /** Card aspect ratio (game config) — the montage poster box locks to the
+   *  SAME ratio as the CardCanvas sticker card so the hero/sub cards render
+   *  at identical dimensions. */
+  cardRatioW?: number;
+  cardRatioH?: number;
 }) {
   const readyCount = team.items.filter((i) => i.status === "ready").length;
   // The composed card is the hero whenever the poster is not on screen yet
@@ -57,7 +66,15 @@ export default function TeamShowcase({
     >
       <div className="cc-showcase-main">
         {posterReady ? (
-          <div className="cc-montage" aria-label={`poster for ${team.name}`}>
+          <div
+            className="cc-montage"
+            style={{
+              aspectRatio: `${cardRatioW} / ${cardRatioH}`,
+              "--card-ratio-w": cardRatioW,
+              "--card-ratio-h": cardRatioH,
+            } as CSSProperties}
+            aria-label={`poster for ${team.name}`}
+          >
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={team.montageImageUrl ?? ""}
@@ -71,6 +88,8 @@ export default function TeamShowcase({
               items={team.items}
               layout={team.layout}
               greeting={team.greeting.text}
+              cardRatioW={cardRatioW}
+              cardRatioH={cardRatioH}
               ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
             />
             {team.montageStatus === "generating" ? (
@@ -89,6 +108,8 @@ export default function TeamShowcase({
               items={team.items}
               layout={team.layout}
               greeting={team.greeting.text}
+              cardRatioW={cardRatioW}
+              cardRatioH={cardRatioH}
               ariaLabel={`${team.name} sticker card — ${readyCount} stickers placed`}
             />
           </div>

@@ -16,7 +16,11 @@ import {
   type ReactNode,
 } from "react";
 
-import { phaseChangedSchema } from "@cardcrafters/shared";
+import {
+  DEFAULT_CARD_RATIO_H,
+  DEFAULT_CARD_RATIO_W,
+  phaseChangedSchema,
+} from "@cardcrafters/shared";
 
 // ---------------------------------------------------------------------------
 // Snapshot types (subset of server SyncFullPayload the UI actually renders)
@@ -215,6 +219,12 @@ export interface GameSnapshot {
   buildTimerSeconds?: number | null;
   /** Configured SCORING timer in seconds (0 = untimed). */
   scoringTimerSeconds?: number | null;
+  /** Card aspect ratio (from CardConfig via sync:full's `config` section;
+   *  server default 5/7). Undefined on hand-built test snapshots — consumers
+   *  fall back to DEFAULT_CARD_RATIO_W/H so the montage poster box always
+   *  matches the CardCanvas sticker card's aspect ratio. */
+  cardRatioW?: number;
+  cardRatioH?: number;
   phaseEndsAt: number | null;
   cutoffAt: number | null;
   scoresLocked: boolean;
@@ -1079,6 +1089,10 @@ function normalizeSnapshot(
   const config = (raw as unknown as { config?: Record<string, unknown> }).config;
   const timerSecs = (v: unknown): number | null =>
     typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+  // Card aspect ratio rides the same CardConfig section (defensive: garbage
+  // or absent → the shared defaults, matching CardCanvas's own fallbacks).
+  const ratio = (v: unknown, fallback: number): number =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 ? v : fallback;
   // ---- Scoring slice (all defensively parsed; the wire shape is
   // ---- audience-dependent, see SyncFullEvent docs).
   const rawScoring = (raw.scoring ?? null) as
@@ -1141,6 +1155,8 @@ function normalizeSnapshot(
     theme: typeof raw.theme === "string" ? raw.theme : null,
     buildTimerSeconds: timerSecs(config?.buildTimerSeconds),
     scoringTimerSeconds: timerSecs(config?.scoringTimerSeconds),
+    cardRatioW: ratio(config?.cardRatioW, DEFAULT_CARD_RATIO_W),
+    cardRatioH: ratio(config?.cardRatioH, DEFAULT_CARD_RATIO_H),
     phaseEndsAt: typeof raw.phaseEndsAt === "number" ? raw.phaseEndsAt : null,
     cutoffAt: typeof raw.cutoffAt === "number" ? raw.cutoffAt : null,
     scoresLocked: Boolean(raw.scoresLocked),
