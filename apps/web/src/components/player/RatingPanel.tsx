@@ -112,19 +112,19 @@ export default function RatingPanel({
   const mine = card ? myScores[card.cardId] : undefined;
   const tally = card ? scores[card.cardId] : undefined;
 
-  // Card preview image state: opacity fades in once loaded; a failed fetch
+  // Card preview image state: the image is ALWAYS visible (no load-fade —
+  // a fade left the img invisible when its load event fired before React
+  // attached onLoad, e.g. cached/SSR-prerendered imgs); a failed fetch
   // (403 expired session, 409 phase change, render failure) shows a hint
   // instead of a broken-image glyph.
-  const [imgLoaded, setImgLoaded] = useState(false);
   const [imgFailed, setImgFailed] = useState(false);
   // Poster-first flip: the preview defaults to the team's AI poster and can
   // be flipped to the sticker card. Resets when the card changes.
   const [variant, setVariant] = useState<"poster" | "sticker">("poster");
   useEffect(() => {
-    setImgLoaded(false);
     setImgFailed(false);
     setVariant("poster");
-  }, [card?.cardId, cardVersion]); // cardVersion bump → fresh render, re-fade
+  }, [card?.cardId, cardVersion]); // cardVersion bump → fresh render
 
   if (rateable.length === 0) {
     return (
@@ -251,11 +251,10 @@ export default function RatingPanel({
               key={`${card.cardId}:${cardVersion ?? 0}:${variant}`}
               data-testid="rating-card-image"
               alt={`The card you are rating: ${cardName}`}
-              className={`cc-rating-image${imgLoaded ? " is-loaded" : ""}`}
+              className="cc-rating-image"
               role="button"
               aria-label={variant === "poster" ? "show sticker card" : "show poster"}
               onClick={() => setVariant((v) => (v === "poster" ? "sticker" : "poster"))}
-              onLoad={() => setImgLoaded(true)}
               onError={() => setImgFailed(true)}
             />
           </div>

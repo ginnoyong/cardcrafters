@@ -370,14 +370,26 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
   const ownStickerUrl = ownCardUrl;
 
   const [ownVariant, setOwnVariant] = useState<"poster" | "sticker">("poster");
-  const [ownImgLoaded, setOwnImgLoaded] = useState(false);
   const [ownImgFailed, setOwnImgFailed] = useState(false);
-  // Reset the flip + fade state whenever the own card surface changes.
+  // Poster → sticker auto-fallback: if the poster side fails to load (the
+  // montage file vanished, or the poster render 500s), flip to the sticker
+  // URL automatically ONCE before showing "Card preview unavailable." — the
+  // composed sticker render is always available in SCORING.
+  const [ownAutoFellBack, setOwnAutoFellBack] = useState(false);
+  // Reset the flip + fallback state whenever the own card surface changes.
   useEffect(() => {
     setOwnVariant("poster");
-    setOwnImgLoaded(false);
     setOwnImgFailed(false);
+    setOwnAutoFellBack(false);
   }, [snapshot?.scoring?.yourTeamCardId, snapshot?.cardVersion]);
+  const handleOwnImgError = () => {
+    if (ownVariant === "poster" && !ownAutoFellBack) {
+      setOwnAutoFellBack(true);
+      setOwnVariant("sticker");
+    } else {
+      setOwnImgFailed(true);
+    }
+  };
 
   // The countdown ticks during BUILD and SCORING (the two timed phases that
   // matter to players; REVEAL's 30s auto-expiry is presenter/GM business).
@@ -541,59 +553,10 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
               </div>
             </>
           ) : snapshot.phase === PHASE.SCORING && snapshot.scoring ? (
-            // SCORING: "Our card" (own-card poster-first flip view + team
-            // activity feed side by side) above the rating surface (browse
-            // cards, skip our own, 1–10 FINAL ratings, live averages).
+            // SCORING: the rating surface FIRST (browse cards, skip our own,
+            // 1–10 FINAL ratings, live averages), then "Our card" (own-card
+            // poster-first flip view + team activity feed side by side).
             <>
-              <section className="cc-card" aria-label="our card" data-testid="our-card">
-                <h3>Our card</h3>
-                <p className="cc-hint">{team.name}</p>
-                {ownPosterUrl && ownStickerUrl ? (
-                  <div className="cc-our-card-grid">
-                    <div className="cc-our-card-image">
-                      {!ownImgFailed ? (
-                        <>
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <div
-                            className="cc-rating-image-box"
-                            style={cardRatioStyle(
-                              snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W,
-                              snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H,
-                            )}
-                          >
-                            <img
-                              src={ownVariant === "poster" ? ownPosterUrl : ownStickerUrl}
-                              key={`${snapshot.scoring.yourTeamCardId}:${snapshot.cardVersion ?? 0}:${ownVariant}`}
-                              data-testid="our-card-image"
-                              alt={`Our team's card (${ownVariant === "poster" ? "poster" : "sticker"})`}
-                              className={`cc-rating-image${ownImgLoaded ? " is-loaded" : ""}`}
-                              role="button"
-                              aria-label={ownVariant === "poster" ? "show sticker card" : "show poster"}
-                              onClick={() => setOwnVariant((v) => (v === "poster" ? "sticker" : "poster"))}
-                              onLoad={() => setOwnImgLoaded(true)}
-                              onError={() => setOwnImgFailed(true)}
-                            />
-                          </div>
-                          <button
-                            type="button"
-                            className="cc-btn cc-flip-btn"
-                            data-testid="our-card-flip"
-                            onClick={() => setOwnVariant((v) => (v === "poster" ? "sticker" : "poster"))}
-                          >
-                            {ownVariant === "poster" ? "Show sticker card" : "Show poster"}
-                          </button>
-                        </>
-                      ) : (
-                        <p className="cc-hint">Card preview unavailable.</p>
-                      )}
-                    </div>
-                    <div className="cc-our-card-activity">
-                      <h3>Team activity</h3>
-                      <ActivityFeed entries={team.activity} />
-                    </div>
-                  </div>
-                ) : null}
-              </section>
               <RatingPanel
                 scoring={snapshot.scoring}
                 scores={snapshot.scores}
@@ -607,6 +570,60 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                 cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
                 testId="player-rating-panel"
               />
+              <section className="cc-card" aria-label="our card" data-testid="our-card">
+                <h3>Our card</h3>
+                <p className="cc-hint">{team.name}</p>
+                {ownPosterUrl && ownStickerUrl ? (
+                  <div className="cc-our-card-grid">
+                    <div className="cc-our-card-image">
+                      {/* The image is ALWAYS visible (no load-fade — a fade
+                          left the img invisible when its load event fired
+                          before React attached onLoad). On failure the hint
+                          replaces only the img inside the box; the flip
+                          button stays — tapping it retries the other side. */}
+                      <div
+                        className="cc-rating-image-box"
+                        style={cardRatioStyle(
+                          snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W,
+                          snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H,
+                        )}
+                      >
+                        {!ownImgFailed ? (
+                          /* eslint-disable-next-line @next/next/no-img-element */
+                          <img
+                            src={ownVariant === "poster" ? ownPosterUrl : ownStickerUrl}
+                            key={`${snapshot.scoring.yourTeamCardId}:${snapshot.cardVersion ?? 0}:${ownVariant}`}
+                            data-testid="our-card-image"
+                            alt={`Our team's card (${ownVariant === "poster" ? "poster" : "sticker"})`}
+                            className="cc-rating-image"
+                            role="button"
+                            aria-label={ownVariant === "poster" ? "show sticker card" : "show poster"}
+                            onClick={() => setOwnVariant((v) => (v === "poster" ? "sticker" : "poster"))}
+                            onError={handleOwnImgError}
+                          />
+                        ) : (
+                          <p className="cc-hint">Card preview unavailable.</p>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        className="cc-btn cc-flip-btn"
+                        data-testid="our-card-flip"
+                        onClick={() => {
+                          setOwnImgFailed(false); // retry the other side after a failure
+                          setOwnVariant((v) => (v === "poster" ? "sticker" : "poster"));
+                        }}
+                      >
+                        {ownVariant === "poster" ? "Show sticker card" : "Show poster"}
+                      </button>
+                    </div>
+                    <div className="cc-our-card-activity">
+                      <h3>Team activity</h3>
+                      <ActivityFeed entries={team.activity} />
+                    </div>
+                  </div>
+                ) : null}
+              </section>
             </>
           ) : judging ? (
             // JUDGING: ratings are locked — keep the rated summary + the
@@ -731,7 +748,10 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
             </>
           ) : null}
 
-          <MySubmissions items={myItems} onHighlight={handleHighlight} />
+          {/* "Your stickers" — hidden during SCORING (the rating carousel +
+              "Our card" own the screen there, and the submissions are baked
+              into the card being scored); BUILD and post-SCORING keep it. */}
+          {!scoringActive ? <MySubmissions items={myItems} onHighlight={handleHighlight} /> : null}
 
           {/* Suppressed during BUILD (the feed sits next to the prompt bar)
               and during SCORING — the "Our card" section renders the activity
