@@ -393,9 +393,13 @@ function TeamCard({
 }
 
 // ---------------------------------------------------------------------------
-// Live card mini: one read-only CardCanvas per team (GM console preview).
-// After the winner pick (REVEAL/RESULTS + winnerTeamId), the whole thumbnail
-// becomes a button-like control opening the 3D reveal modal for THAT team.
+// Live card mini: ONE card per team (GM console preview). Default view is the
+// AI-montage poster when it is ready, otherwise the composed CardCanvas; when
+// the poster exists the visual is a click-to-flip toggle (poster ⇄ sticker
+// CardCanvas — same role/tabIndex/Enter/Space pattern as TeamJudgeCard).
+// After the winner pick (REVEAL/RESULTS + winnerTeamId) the whole thumbnail
+// becomes a button-like control opening the 3D reveal modal for THAT team
+// instead — the modal wins over the flip in that phase.
 // ---------------------------------------------------------------------------
 
 function TeamMiniCanvas({
@@ -417,7 +421,52 @@ function TeamMiniCanvas({
   interactive: boolean;
   onOpen3d: () => void;
 }) {
+  // Flip state: false = default view (AI poster when ready, else the composed
+  // CardCanvas), true = the other face. Only meaningful when the poster is
+  // ready and the thumbnail is NOT the results-stage 3D modal trigger.
+  const [flipped, setFlipped] = useState(false);
+
   const readyCount = team.items.filter((i) => i.status === "ready").length;
+  // The poster face exists only when the AI montage actually landed.
+  const posterReady = montageStatus === "ready" && !!montageImageUrl;
+  // Phase gating: REVEAL/RESULTS (+winner) → the click opens the 3D reveal
+  // modal (existing wiring); everywhere else (BUILD) → the click flips
+  // poster ⇄ sticker. No collision: the flip control only mounts when the
+  // modal handler is inactive.
+  const canFlip = !interactive && posterReady;
+  // What's on screen: the poster by default (when it exists), the composed
+  // CardCanvas when flipped or when there is no poster yet.
+  const showPoster = posterReady && !flipped;
+
+  const montageBox = (
+    <div
+      className="cc-montage"
+      style={{
+        aspectRatio: `${cardRatioW} / ${cardRatioH}`,
+        "--card-ratio-w": cardRatioW,
+        "--card-ratio-h": cardRatioH,
+      } as CSSProperties}
+      aria-label={`poster for ${team.name}`}
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={montageImageUrl ?? ""}
+        alt={`Finished poster for ${team.name}`}
+        className="cc-montage-img"
+      />
+    </div>
+  );
+  const stickerBox = (
+    <CardCanvas
+      items={team.items}
+      layout={team.layout}
+      greeting={team.greeting.text}
+      cardRatioW={cardRatioW}
+      cardRatioH={cardRatioH}
+      ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
+    />
+  );
+
   return (
     <div
       className={`cc-mini${interactive ? " is-clickable" : ""}`}
@@ -442,42 +491,45 @@ function TeamMiniCanvas({
       <h3>
         {team.name} <span className="cc-muted">({team.label})</span>
       </h3>
-      <CardCanvas
-        items={team.items}
-        layout={team.layout}
-        greeting={team.greeting.text}
-        cardRatioW={cardRatioW}
-        cardRatioH={cardRatioH}
-        ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
-      />
-      {/* Montage (poster) accumulator surface, moved here from the greeting/QR
-          TeamCard: while the poster pass is in flight show a small indicator
-          line under the live composed card; when the poster lands (ready) the
-          finished poster image renders BELOW the composed CardCanvas — the
-          composed canvas stays the live build view, the poster is the
-          as-shipped card face. Fallback/absent keeps the canvas alone. */}
-      {montageStatus === "generating" ? (
-        <p className="cc-montage-status" aria-live="polite">
-          Generating poster…
-        </p>
-      ) : montageStatus === "ready" && montageImageUrl ? (
+      {canFlip ? (
+        /* Button-like flip control (TeamJudgeCard pattern): one toggle whose
+           label announces what the NEXT click shows. Poster face first,
+           sticker CardCanvas when flipped. */
         <div
-          className="cc-montage"
-          style={{
-            aspectRatio: `${cardRatioW} / ${cardRatioH}`,
-            "--card-ratio-w": cardRatioW,
-            "--card-ratio-h": cardRatioH,
-          } as CSSProperties}
-          aria-label={`poster for ${team.name}`}
+          className="cc-mini-flip"
+          role="button"
+          tabIndex={0}
+          aria-pressed={flipped}
+          aria-label={
+            flipped
+              ? `show AI montage version for ${team.name}`
+              : `show sticker version for ${team.name}`
+          }
+          data-testid={`gm-mini-flip-${team.id}`}
+          onClick={() => setFlipped((v) => !v)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              setFlipped((v) => !v);
+            }
+          }}
         >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={montageImageUrl}
-            alt={`Finished poster for ${team.name}`}
-            className="cc-montage-img"
-          />
+          {showPoster ? montageBox : stickerBox}
         </div>
-      ) : null}
+      ) : (
+        <>
+          {showPoster ? montageBox : stickerBox}
+          {/* Montage (poster) accumulator status: while the poster pass is in
+              flight show a small indicator line under the live composed card
+              (same contract as the judge boxes). Fallback/absent keeps the
+              canvas alone. */}
+          {montageStatus === "generating" ? (
+            <p className="cc-montage-status" aria-live="polite">
+              Generating poster…
+            </p>
+          ) : null}
+        </>
+      )}
       <p className="cc-hint" aria-live="polite">
         {readyCount} sticker{readyCount === 1 ? "" : "s"} on the card
       </p>
@@ -1073,12 +1125,15 @@ function Console({ game }: { game: CreatedGame }) {
         </>
       ) : null}
 
-      {/* Live previews: one read-only mini canvas per team. GREETINGS: the
-          greeting + an empty canvas; BUILD: live items + layout. HIDDEN in
-          JUDGING and SCORING (the judge boxes' flip visual carries the
-          poster/sticker now). After the
+      {/* Live previews: ONE card per team. GREETINGS: the greeting + an empty
+          canvas; BUILD: live items + layout — the AI-montage poster once it's
+          ready (click flips poster ⇄ sticker view; before that, the composed
+          canvas with a "Generating poster…" line). HIDDEN in JUDGING and
+          SCORING (the judge boxes' flip visual carries the poster/sticker
+          now). After the
           winner pick (REVEAL/RESULTS + winnerTeamId) each thumbnail opens the
-          3D reveal modal for that team (winner = gloss rig). */}
+          3D reveal modal for that team (winner = gloss rig) instead of
+          flipping. */}
       {!judgeBoxes && snapshot && snapshot.teams.length > 0 ? (
         <section aria-label="live card previews" className="cc-mini-grid">
           {snapshot.teams.map((team) => {

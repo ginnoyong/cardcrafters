@@ -1381,6 +1381,18 @@ no animations requiring sound. */
   outline-offset: 2px;
 }
 
+/* BUILD mini flip control (poster ⇄ sticker): same affordances as the
+   3D thumbnails — pointer cursor + shared keyboard focus ring. */
+.cc-mini-flip {
+  cursor: pointer;
+  border-radius: var(--radius);
+}
+
+.cc-mini-flip:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
 /* --- Print: one big QR card per team ------------------------------------ */
 
 @media print {
