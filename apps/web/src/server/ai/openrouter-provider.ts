@@ -281,6 +281,16 @@ export class OpenRouterProvider implements AiProvider {
     started: number,
   ): Promise<AiCallResult> {
     const prompt = messages.map((m) => messageText(m.content)).join("\n\n");
+    // MONTAGE PORTRAIT BIAS (bleed-in fix, part b): the game's card is a tall
+    // 5:7 portrait — a square poster gets center-cropped to the card ratio at
+    // the source (gradePoster's cropToCardRatio), which cuts the greeting
+    // title's outer glyphs when the model painted it full-width. Requesting
+    // the portrait size natively (gpt-image-1's 1024×1536 = 2:3) shrinks that
+    // side crop dramatically. montage_image ONLY — item_image stickers must
+    // stay square (transparent square canvas). OpenRouter ignores unsupported
+    // params rather than rejecting them, so models without a size knob are
+    // unharmed.
+    const size = task === "montage_image" ? "1024x1536" : undefined;
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.baseUrl}/images`, {
@@ -292,7 +302,9 @@ export class OpenRouterProvider implements AiProvider {
           "X-Title": "Card Crafters",
           "User-Agent": "CardCrafters/0.1 (+https://cardcrafters.local)",
         },
-        body: JSON.stringify({ model: cfg.primary, prompt }),
+        body: JSON.stringify(
+          size ? { model: cfg.primary, prompt, size } : { model: cfg.primary, prompt },
+        ),
         signal: AbortSignal.timeout(cfg.timeoutMs),
       });
     } catch (cause) {

@@ -1048,7 +1048,11 @@ no animations requiring sound. */
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  /* cover (not contain): posters are now card-ratio-cropped AT THE SOURCE
+     (gradePoster cardRatioW/H), so cover and contain render identically —
+     but cover guards against any residual native-aspect mismatch (an older
+     persisted square poster would letterbox under contain). */
+  object-fit: cover;
 }
 
 /* Head row: prev · card title · next. */

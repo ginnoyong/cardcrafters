@@ -527,6 +527,41 @@ describe("montage accumulator (staging-driven)", () => {
     expect(meta.height).toBe(1120);
   });
 
+  it("(g2c) square AI poster + the game's card ratio → the persisted PNG is center-cropped to the card ratio (source-side aspect normalization)", async () => {
+    // Real image models return varying aspects (often square); the persisted
+    // poster must already match the game's card ratio so every UI box (5:7)
+    // renders identically. The REAL gradePoster runs (no seam override) —
+    // the accumulator forwards game.config.cardRatioW/H (the setup game uses
+    // DEFAULT_CARD_CONFIG: 5/7).
+    const s = await setup();
+    tempDirs.push(s.storageDir);
+    const squarePoster = await sharp({
+      create: { width: 64, height: 64, channels: 3, background: "#2244cc" },
+    })
+      .png()
+      .toBuffer();
+    const fake = createFakeAi({ imageBase64: squarePoster.toString("base64") });
+    const deps = depsOf(s, fake.ai);
+
+    await finalizeMontageAll(deps, s.gameId);
+
+    const row = await s.repo.getMontageState(s.teamId, s.round);
+    expect(row?.status).toBe("READY");
+    expect(row?.lastError).toBeNull();
+    const files = await readdir(path.join(s.storageDir, s.gameId, s.teamId));
+    expect(files).toHaveLength(1);
+    expect(files[0]!.endsWith(".png")).toBe(true);
+    const persisted = await readFile(path.join(s.storageDir, s.gameId, s.teamId, files[0]!));
+    const meta = await sharp(persisted).metadata();
+    expect(meta.format).toBe("png");
+    // Crop math: native 64×64 (aspect 1) vs 5/7 → width crops to
+    // floor(64·5/7) = 45, height stays 64 (never upscaled).
+    expect(meta.width).toBe(45);
+    expect(meta.height).toBe(64);
+    // Output ratio ≈ 5/7 within 2px of the exact box.
+    expect(Math.abs(meta.width! / meta.height! - 5 / 7)).toBeLessThan(2 / 64);
+  });
+
   it("(g4) greeting bleed-in: the greeting rides BOTH AI inputs, the image prompt embeds it, and the mock prompt ships it end-to-end", async () => {
     // Phase 1 — fake AI: the greeting reaches BOTH tasks verbatim, and the
     // montage_image input's prompt (what the image model actually receives)

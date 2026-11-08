@@ -425,6 +425,55 @@ describe("gradePoster", () => {
     expect(pixelAt(raw, 60, 30, 120)).toEqual([34, 68, 204, 255]);
   });
 
+  it("square poster + card ratio 5/7 → center-cropped to the card ratio (dims ≤ native, corners cut, center kept)", async () => {
+    // Square synthetic poster with distinct corner/center markers: real
+    // image models often return square, and the lower-third greeting title
+    // treatment is CENTERED — a symmetric side crop must keep it.
+    const canvas = createCanvas(200, 200);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#2244cc";
+    ctx.fillRect(0, 0, 200, 200);
+    ctx.fillStyle = "#ff0000";
+    ctx.fillRect(0, 0, 20, 20); // top-left marker — cropped away
+    ctx.fillStyle = "#00ff00";
+    ctx.fillRect(90, 90, 20, 20); // center marker — survives
+    const poster = canvas.toBuffer("image/png");
+
+    const out = await gradePoster(poster, NEUTRAL, 5, 7);
+    const meta = await sharp(out).metadata();
+    expect(meta.format).toBe("png");
+    // Crop math: native aspect 1 > 5/7 → width crops to floor(200·5/7) =
+    // 142, height stays 200. Never upscaled.
+    expect(meta.width).toBe(142);
+    expect(meta.height).toBe(200);
+    // Output ratio ≈ 5/7 (within 2px of the exact box) and ≤ native dims.
+    expect(Math.abs(meta.width! / meta.height! - 5 / 7)).toBeLessThan(2 / 200);
+    expect(meta.width!).toBeLessThanOrEqual(200);
+    expect(meta.height!).toBeLessThanOrEqual(200);
+    // Pixel probes: the centered marker survives ((200−142)/2 = 29px cropped
+    // per side → native x=100 lands at x=71); the corner marker is gone.
+    const raw = await sharp(out).ensureAlpha().raw().toBuffer();
+    expect(pixelAt(raw, 71, 100, 142)).toEqual([0, 255, 0, 255]);
+    expect(pixelAt(raw, 2, 2, 142)).toEqual([34, 68, 204, 255]);
+  });
+
+  it("poster already at the card ratio (200×280 = 5/7) → dims unchanged (crop is a no-op within tolerance)", async () => {
+    const out = await gradePoster(flatPoster(200, 280), NEUTRAL, 5, 7);
+    const meta = await sharp(out).metadata();
+    expect(meta.width).toBe(200);
+    expect(meta.height).toBe(280);
+  });
+
+  it("cardRatioW/H undefined → native preserved (square stays square, no crop)", async () => {
+    const out = await gradePoster(
+      flatPoster(160, 160),
+      { temperature: 0.8, saturation: 1, contrast: 1, vignette: 0 },
+    );
+    const meta = await sharp(out).metadata();
+    expect(meta.width).toBe(160);
+    expect(meta.height).toBe(160);
+  });
+
   it("undecodable poster bytes → throws (the caller falls back to the raw bytes)", async () => {
     await expect(
       gradePoster(Buffer.from("definitely not a png"), NEUTRAL),

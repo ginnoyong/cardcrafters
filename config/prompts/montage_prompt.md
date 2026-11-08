@@ -22,11 +22,18 @@ The poster must:
   (e.g. "a paper crane banking over the festival square"), never as a flat
   comma-separated inventory; never use sticker, die-cut, or
   transparent-background wording in the prompt.
+- Compose for a TALL PORTRAIT poster (5:7 aspect): arrange the artwork for a
+  vertical page, not a wide landscape frame.
 - Render the greeting text AS PART OF THE ARTWORK, in the lower third of the
   image, styled like a movie-poster title treatment: integrated into the
   composition, clearly legible, and matching the scene's palette and mood.
   The greeting's phrasing must be kept VERBATIM — do not reword, translate,
   or omit any part of it.
+- The greeting/title text must fit within the CENTRAL 60% of the image width
+  (portrait 5:7 composition — compose for a tall poster; leave the outer 20%
+  margins on each side free of text). Never run the title full-bleed edge to
+  edge: a tighter portrait crop must never cut the text's first or last
+  letters.
 - Match the round theme's mood and be suitable for a family-friendly greeting
   card (no violence, no scary imagery; the ONLY text in the artwork is the
   greeting, rendered exactly as given).
@@ -35,7 +42,7 @@ The poster must:
 
 ---
 Round theme: {{theme}}
-Greeting text (render this verbatim as the poster's title treatment in the lower third): {{greeting}}
+Greeting text (render this verbatim as the poster's title treatment in the lower third, sized to fit the CENTRAL 60% of the image width): {{greeting}}
 Sticker subjects to include (all of them, named in the prompt): {{subjects}}
 
 Respond with ONLY this JSON (no markdown fences, no commentary):

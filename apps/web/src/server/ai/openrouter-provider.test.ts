@@ -266,6 +266,47 @@ describe("OpenRouterProvider montage_image (poster task)", () => {
     expect(prompt).toContain(`Art direction: ${MONTAGE_INPUT.styleHint}.`);
     expect(STICKER_LEAK.test(prompt)).toBe(false);
   });
+
+  it("images-endpoint montage payload requests the PORTRAIT size (bleed-in fix) — item_image never does", async () => {
+    // The 5:7 card crop must not truncate the greeting title: the montage
+    // fallback asks gpt-image-1 for its native portrait size (1024×1536 =
+    // 2:3) so the source-side card-ratio crop stays small. Stickers stay
+    // square — no size field may ride along on item_image.
+    const imagesBody = () =>
+      jsonResponse({
+        data: [{ b64_json: "QUJD", media_type: "image/png" }],
+      });
+
+    const montage = scriptedFetch([
+      () => jsonResponse(JSON.parse(PROD_404_BODY), 404),
+      imagesBody,
+    ]);
+    const montageProvider = new OpenRouterProvider({
+      apiKey: "k",
+      fetchImpl: montage.fetchImpl,
+      templates: textTemplates(),
+    });
+    await montageProvider.run(
+      "montage_image",
+      MONTAGE_INPUT,
+      { ...MONTAGE_CFG, primary: "openai/gpt-image-1" },
+    );
+    expect(montage.calls[1]!.url).toBe("https://openrouter.ai/api/v1/images");
+    expect(montage.calls[1]!.body.size).toBe("1024x1536");
+
+    const item = scriptedFetch([
+      () => jsonResponse(JSON.parse(PROD_404_BODY), 404),
+      imagesBody,
+    ]);
+    const itemProvider = new OpenRouterProvider({
+      apiKey: "k",
+      fetchImpl: item.fetchImpl,
+      templates: textTemplates(),
+    });
+    await itemProvider.run("item_image", ITEM_INPUT, IMAGE_CFG);
+    expect(item.calls[1]!.url).toBe("https://openrouter.ai/api/v1/images");
+    expect(item.calls[1]!.body.size).toBeUndefined();
+  });
 });
 
 // Minimal template dir (PromptTemplates.load requires every non-image task

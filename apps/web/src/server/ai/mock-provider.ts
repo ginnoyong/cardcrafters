@@ -1040,7 +1040,9 @@ const MONTAGE_FLAVOR_ADJECTIVES: readonly string[] = [
  * Canned deterministic montage prompt: avalanche-hash-seeded flavor adjective
  * + theme + greeting text + subjects joined, phrased as ONE vivid poster
  * image prompt (single cohesive full-bleed illustration with the greeting
- * BAKED IN as the lower-third title treatment, family-friendly). Validated
+ * BAKED IN as the lower-third title treatment, kept within the central 60%
+ * of the image width so a 5:7 portrait crop never truncates it,
+ * family-friendly). Validated
  * against montagePromptSchema by compute()'s schema table — the same
  * belt-and-braces as other tasks.
  */
@@ -1064,9 +1066,14 @@ function mockMontagePrompt(input: Record<string, unknown>): unknown {
 
   const subjectList =
     subjects.length > 0 ? subjects.join(", ") : "a charming ensemble of themed icons";
+  // Mirrors the hardened montage_prompt template's crop-safety constraint:
+  // the greeting rides inside the ARTWORK, in the lower third, and every
+  // text glyph stays within the CENTRAL 60% of the image width (outer 20%
+  // margins per side stay text-free) so a tighter portrait (5:7) center
+  // crop can never truncate the greeting's tail.
   const greetingNote = greeting
-    ? ` Render the greeting "${greeting}" verbatim as the poster's title treatment across the lower third.`
-    : " Render the greeting verbatim as the poster's title treatment across the lower third.";
+    ? ` Render the greeting "${greeting}" verbatim as the poster's title treatment across the lower third, sized to fit the CENTRAL 60% of the image width (outer 20% margins on each side stay free of text).`
+    : " Render the greeting verbatim as the poster's title treatment across the lower third, sized to fit the CENTRAL 60% of the image width (outer 20% margins on each side stay free of text).";
 
   const prompt =
     `${flavor} full-bleed movie-poster illustration for a ${theme} greeting card: ` +

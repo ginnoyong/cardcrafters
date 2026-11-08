@@ -92,8 +92,15 @@ export interface MontageAccumulatorDeps {
   timeoutMs?: number;
   /** Poster grading seam (tests): defaults to gradePoster
    *  (render/card-render). Inject a failing or observing fn to exercise the
-   *  grading fallback / skip paths. */
-  gradePoster?: (posterPng: Buffer, grading: MontageGrading) => Promise<Buffer>;
+   *  grading fallback / skip paths. The game's cardRatioW/H are forwarded so
+   *  the real gradePoster can center-crop the poster to the card ratio at
+   *  the source (real image models return varying aspects — often square). */
+  gradePoster?: (
+    posterPng: Buffer,
+    grading: MontageGrading,
+    cardRatioW?: number,
+    cardRatioH?: number,
+  ) => Promise<Buffer>;
 }
 
 /** What the prompt pipeline stages per ACCEPTED submission. */
@@ -397,7 +404,17 @@ async function runGenPass(
     let gradeErrorMessage: string | null = null;
     try {
       const grade = deps.gradePoster ?? gradePoster;
-      posterBytes = await grade(rawBytes, deriveGradingFromStyle(style, teamId));
+      // The game's card ratio rides along: the real gradePoster grades AND
+      // center-crops the poster to cardRatioW/H (source-side aspect
+      // normalization — every UI box assumes the card ratio, so the persisted
+      // file must match it). game may be null (fail-open path below keeps
+      // the raw bytes anyway).
+      posterBytes = await grade(
+        rawBytes,
+        deriveGradingFromStyle(style, teamId),
+        game?.config.cardRatioW,
+        game?.config.cardRatioH,
+      );
     } catch (err) {
       posterBytes = rawBytes;
       gradeErrorMessage = err instanceof Error ? err.message : String(err);
@@ -415,9 +432,10 @@ async function runGenPass(
     // PNG under the public/static storage root, subdir per game/team,
     // served at the matching /static/ URL (no user text in the path).
     const storageDir = deps.storageDir ?? DEFAULT_MONTAGE_DIR;
-    // A successfully graded poster is a fresh PNG encode at native size
-    // (gradePoster normalizes through sharp); the unchanged fallback (grading
-    // failure) keeps the mime-derived ext.
+    // A successfully graded poster is a fresh PNG encode at the game's card
+    // ratio (gradePoster normalizes through sharp + center-crops to
+    // cardRatioW/H); the unchanged fallback (grading failure) keeps the
+    // mime-derived ext.
     const ext =
       posterBytes !== rawBytes ? "png" : imageMime === "image/jpeg" ? "jpg" : "png";
     const fileName = `montage-${teamId}-${round}-${Date.now()}.${ext}`;

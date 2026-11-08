@@ -276,15 +276,68 @@ export async function renderCardPng(
  *
  * The poster is loaded at its NATIVE size, the grading is applied exactly
  * as renderCardPng's finalPass does, and the output is always a fresh PNG
- * encode at the poster's native dimensions (input bytes are normalized
- * through sharp first, so any decodable format works as input).
+ * encode (input bytes are normalized through sharp first, so any decodable
+ * format works as input).
+ *
+ * CARD-RATIO NORMALIZATION (source fix for the rating-carousel aspect bug):
+ * when cardRatioW/H are supplied, the graded poster is center-cropped to the
+ * game's card ratio whenever its native aspect differs (tolerance 0.01).
+ * Real image models return varying aspects (often square); every UI box
+ * assumes the card ratio, so the PERSISTED file must already match it —
+ * cover vs contain CSS then becomes irrelevant. The crop only ever shrinks:
+ * the LONGER side is cropped down to the ratio (native 1024×1024 @ 5/7 →
+ * 731×1024), never upscaled. The lower-third greeting title treatment is
+ * centered in the artwork, so a symmetric side crop keeps it readable.
+ * Defaults: cardRatioW/H undefined → skip cropping (native preserved).
  *
  * Guards: undecodable poster bytes → throws (the caller falls back to
  * persisting the raw bytes — a degraded-but-ready non-fatal path).
  */
+
+/** Aspect tolerance below which a poster counts as already card-ratio. */
+const POSTER_ASPECT_TOLERANCE = 0.01;
+
+/**
+ * Center-crop a PNG to the given card ratio — crop-only, never upscale.
+ * Degenerate targets (< 1px, e.g. a 1×1 placeholder poster) keep the native
+ * size; undefined/invalid ratios skip the crop entirely.
+ */
+async function cropToCardRatio(
+  png: Buffer,
+  cardRatioW?: number,
+  cardRatioH?: number,
+): Promise<Buffer> {
+  if (!cardRatioW || !cardRatioH || cardRatioW <= 0 || cardRatioH <= 0) return png;
+  const meta = await sharp(png).metadata();
+  const width = meta.width;
+  const height = meta.height;
+  if (!width || !height) return png;
+  const nativeAspect = width / height;
+  const targetAspect = cardRatioW / cardRatioH;
+  if (Math.abs(nativeAspect - targetAspect) <= POSTER_ASPECT_TOLERANCE) return png;
+  // Crop the LONGER side down to the ratio (never upscale): wider than the
+  // ratio → shrink the width; taller → shrink the height.
+  let targetW = width;
+  let targetH = height;
+  if (nativeAspect > targetAspect) {
+    targetW = Math.floor(height * targetAspect);
+  } else {
+    targetH = Math.floor(width / targetAspect);
+  }
+  if (targetW < 1 || targetH < 1) return png;
+  // fit "cover" + position "centre" with target dims ≤ native = a pure
+  // center crop at 1:1 scale — no resampling, no upscaling.
+  return sharp(png)
+    .resize({ width: targetW, height: targetH, fit: "cover", position: "centre" })
+    .png()
+    .toBuffer();
+}
+
 export async function gradePoster(
   posterPng: Buffer,
   grading: MontageGrading,
+  cardRatioW?: number,
+  cardRatioH?: number,
 ): Promise<Buffer> {
   // Normalize through sharp so any decodable input (png/jpeg/webp) becomes a
   // PNG @napi-rs/canvas can draw (same normalization as loadStickerImage).
@@ -300,7 +353,10 @@ export async function gradePoster(
   // finished artwork so the whole poster reads as one).
   applyGrading(canvas, ctx, grading);
 
-  return canvas.encode("png");
+  // Card-ratio normalization runs AFTER grading (both are centered
+  // transforms, so the order is visually equivalent — but cropping last
+  // guarantees the OUTPUT file always carries the card ratio).
+  return cropToCardRatio(await canvas.encode("png"), cardRatioW, cardRatioH);
 }
 
 /**
