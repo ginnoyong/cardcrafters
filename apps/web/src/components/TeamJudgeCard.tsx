@@ -119,8 +119,8 @@ export default function TeamJudgeCard({
           runs). */}
       <div className={`cc-judge-visual${posterReady ? " is-flippable" : ""}`}>
           {posterReady ? (
-            /* Button-like flip control (same role/buttonTabIndex/Enter/Space
-               pattern as TeamMiniCanvas's 3D thumbnails): one toggle whose
+            /* Button-like flip control (same role/tabIndex/Enter/Space
+               pattern as TeamMiniCanvas's flip cards): one toggle whose
                label announces what the NEXT click shows. Poster face first,
                sticker CardCanvas when flipped. */
             <div

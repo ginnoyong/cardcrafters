@@ -1332,70 +1332,92 @@ no animations requiring sound. */
   outline-offset: 2px;
 }
 
-/* GM 3D reveal modal (gm/page.tsx): full-viewport scrim + a centered stage
-   card hosting the Reveal3D scene, with a floating ✕ close button. */
-.cc-modal {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
+/* Winner reveal card (gm/page.tsx REVEAL/RESULTS): the winning team's card
+   centered under the winner banner at 2× the standard hero width (~960px
+   wrapper; the inner poster/sticker boxes keep the game's card ratio and
+   share the CardCanvas 70vh height cap so both faces render identically
+   sized). The whole visual is a button-like flip control (poster ⇄ sticker)
+   with the shared keyboard focus ring. */
+.cc-winner-card {
   display: grid;
-  place-items: center;
-  padding: 1.25rem;
-  background: color-mix(in srgb, var(--bg) 78%, transparent);
-  backdrop-filter: blur(3px);
+  justify-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
 }
 
-.cc-modal-stage {
-  position: relative;
-  width: min(92vw, 720px);
-  max-height: 92vh;
-  overflow: auto;
-  background: var(--bg-card);
-  border: 1px solid color-mix(in srgb, var(--accent-strong) 45%, transparent);
-  border-radius: var(--radius);
-  box-shadow: 0 18px 60px rgb(0 0 0 / 0.55);
-}
-
-.cc-modal-stage .cc-reveal3d {
-  border: none;
-}
-
-.cc-modal-close {
-  position: absolute;
-  top: 0.6rem;
-  right: 0.6rem;
-  z-index: 2;
-  min-width: 2.4rem;
-  min-height: 2.4rem;
-  padding: 0 0.6rem;
-  font-size: 1.1rem;
-  line-height: 1;
-  color: var(--text);
-  background: var(--bg-elevated);
-  border: 1px solid color-mix(in srgb, var(--text-muted) 40%, transparent);
-  border-radius: 999px;
-  cursor: pointer;
-}
-
-.cc-modal-close:hover {
-  border-color: var(--accent);
-  color: var(--accent-strong);
-}
-
-/* Clickable 3D thumbnails in the GM mini grid (REVEAL/RESULTS after the
-   winner pick) — pointer affordance + the shared keyboard focus ring. */
-.cc-mini.is-clickable {
+.cc-winner-card > [role="button"] {
+  width: min(960px, 100%);
   cursor: pointer;
   border-radius: var(--radius);
 }
 
-.cc-mini.is-clickable:focus-visible {
+.cc-winner-card > [role="button"]:focus-visible {
   outline: 3px solid var(--focus);
   outline-offset: 2px;
 }
 
-/* BUILD mini flip control (poster ⇄ sticker): same affordances as the
-   3D thumbnails — pointer cursor + shared keyboard focus ring. */
+/* Light golden sparkle overlay on the winner poster face ONLY: two layered
+   pseudo-elements of soft gold radial-gradient glints, twinkling slowly via
+   opacity + a whisper of scale (pure CSS, no JS particles, screen blend so
+   it reads as light ON the poster). Subtle by design — low opacity, slow
+   period. Reduced motion: the sparkles freeze at a faint static shimmer. */
+.cc-winner-sparkle {
+  position: relative;
+}
+
+.cc-winner-sparkle::before,
+.cc-winner-sparkle::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  border-radius: var(--radius);
+  background-repeat: no-repeat;
+  mix-blend-mode: screen;
+  opacity: 0.4;
+  animation: cc-winner-twinkle 9s ease-in-out infinite;
+}
+
+.cc-winner-sparkle::before {
+  background-image:
+    radial-gradient(3px 3px at 18% 22%, rgba(255, 215, 130, 0.85) 45%, transparent 65%),
+    radial-gradient(2px 2px at 74% 12%, rgba(255, 236, 180, 0.8) 45%, transparent 65%),
+    radial-gradient(2.5px 2.5px at 86% 58%, rgba(255, 215, 130, 0.75) 45%, transparent 65%),
+    radial-gradient(2px 2px at 32% 78%, rgba(255, 225, 150, 0.8) 45%, transparent 65%);
+}
+
+.cc-winner-sparkle::after {
+  background-image:
+    radial-gradient(2.5px 2.5px at 58% 30%, rgba(255, 215, 130, 0.8) 45%, transparent 65%),
+    radial-gradient(2px 2px at 10% 62%, rgba(255, 236, 180, 0.75) 45%, transparent 65%),
+    radial-gradient(3px 3px at 66% 84%, rgba(255, 215, 130, 0.8) 45%, transparent 65%),
+    radial-gradient(2px 2px at 90% 30%, rgba(255, 225, 150, 0.7) 45%, transparent 65%);
+  animation-delay: -4.5s;
+}
+
+@keyframes cc-winner-twinkle {
+  0%,
+  100% {
+    opacity: 0.18;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(1.04);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cc-winner-sparkle::before,
+  .cc-winner-sparkle::after {
+    animation: none;
+    opacity: 0.3;
+  }
+}
+
+/* BUILD/REVEAL mini flip control (poster ⇄ sticker): pointer cursor +
+   shared keyboard focus ring. */
 .cc-mini-flip {
   cursor: pointer;
   border-radius: var(--radius);

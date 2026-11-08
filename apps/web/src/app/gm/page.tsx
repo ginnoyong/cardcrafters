@@ -53,13 +53,6 @@ const CardCanvas = dynamic(() => import("@/components/player/CardCanvas"), {
   ssr: false,
   loading: () => <div className="cc-canvas-wrap">Loading canvas…</div>,
 });
-// Client-only: the Three.js reveal scene (three is imported lazily INSIDE the
-// component's effect) — only ever mounted inside the GM's 3D modal, so it
-// never lands in the console's initial bundle or an SSR pass.
-const Reveal3D = dynamic(() => import("@/components/Reveal3D").then((m) => m.Reveal3D), {
-  ssr: false,
-  loading: () => <div className="cc-hint">Loading 3D reveal…</div>,
-});
 import {
   GameStoreProvider,
   phaseLabel,
@@ -397,9 +390,9 @@ function TeamCard({
 // AI-montage poster when it is ready, otherwise the composed CardCanvas; when
 // the poster exists the visual is a click-to-flip toggle (poster ⇄ sticker
 // CardCanvas — same role/tabIndex/Enter/Space pattern as TeamJudgeCard).
-// After the winner pick (REVEAL/RESULTS + winnerTeamId) the whole thumbnail
-// becomes a button-like control opening the 3D reveal modal for THAT team
-// instead — the modal wins over the flip in that phase.
+// REVEAL/RESULTS included: every phase flips in place — there is no 3D modal
+// anymore (the lightbox was scrapped; the winner gets its own big flip card
+// in the banner block instead).
 // ---------------------------------------------------------------------------
 
 function TeamMiniCanvas({
@@ -408,8 +401,6 @@ function TeamMiniCanvas({
   montageImageUrl,
   cardRatioW = DEFAULT_CARD_RATIO_W,
   cardRatioH = DEFAULT_CARD_RATIO_H,
-  interactive,
-  onOpen3d,
 }: {
   team: ClientTeam;
   montageStatus?: "generating" | "ready" | "fallback" | null;
@@ -418,22 +409,18 @@ function TeamMiniCanvas({
    *  ratio as the CardCanvas sticker card. */
   cardRatioW?: number;
   cardRatioH?: number;
-  interactive: boolean;
-  onOpen3d: () => void;
 }) {
   // Flip state: false = default view (AI poster when ready, else the composed
   // CardCanvas), true = the other face. Only meaningful when the poster is
-  // ready and the thumbnail is NOT the results-stage 3D modal trigger.
+  // ready.
   const [flipped, setFlipped] = useState(false);
 
   const readyCount = team.items.filter((i) => i.status === "ready").length;
   // The poster face exists only when the AI montage actually landed.
   const posterReady = montageStatus === "ready" && !!montageImageUrl;
-  // Phase gating: REVEAL/RESULTS (+winner) → the click opens the 3D reveal
-  // modal (existing wiring); everywhere else (BUILD) → the click flips
-  // poster ⇄ sticker. No collision: the flip control only mounts when the
-  // modal handler is inactive.
-  const canFlip = !interactive && posterReady;
+  // The flip control exists whenever the poster is on screen (all phases —
+  // BUILD, REVEAL and RESULTS flip the same way, poster ⇄ sticker).
+  const canFlip = posterReady;
   // What's on screen: the poster by default (when it exists), the composed
   // CardCanvas when flipped or when there is no poster yet.
   const showPoster = posterReady && !flipped;
@@ -468,26 +455,7 @@ function TeamMiniCanvas({
   );
 
   return (
-    <div
-      className={`cc-mini${interactive ? " is-clickable" : ""}`}
-      aria-label={
-        interactive ? `Show ${team.name} card in 3D` : `live preview of ${team.name}'s card`
-      }
-      role={interactive ? "button" : undefined}
-      tabIndex={interactive ? 0 : undefined}
-      data-testid={interactive ? `gm-thumb-3d-${team.id}` : undefined}
-      onClick={interactive ? onOpen3d : undefined}
-      onKeyDown={
-        interactive
-          ? (e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onOpen3d();
-              }
-            }
-          : undefined
-      }
-    >
+    <div className="cc-mini" aria-label={`live preview of ${team.name}'s card`}>
       <h3>
         {team.name} <span className="cc-muted">({team.label})</span>
       </h3>
@@ -538,79 +506,95 @@ function TeamMiniCanvas({
 }
 
 // ---------------------------------------------------------------------------
-// 3D reveal modal: one team's finished card as the Reveal3D scene. The winner
-// gets the gloss rig (brighter lights + sheen sweep); every other team gets
-// the default look. ✕ (autofocused on open), Escape and a backdrop click all
-// close; the backdrop check compares e.target against e.currentTarget so a
-// click anywhere inside the stage never closes the modal.
+// Winner reveal card: the WINNING team's AI-montage poster inside the results
+// banner block — centered at 2× the standard hero width (~960px wrapper; the
+// poster box itself locks to the game's card ratio and shares the CardCanvas
+// 70vh height cap so both faces render identically sized). Poster face first
+// with a LIGHT golden sparkle overlay (.cc-winner-sparkle, pure CSS — no JS
+// particles); click/Enter/Space flips to the sticker CardCanvas (the winning
+// team's items/layout/greeting — TeamJudgeCard pattern, aria-pressed, NO 3D
+// modal). Without a ready poster the composed CardCanvas renders statically
+// (no flip, no sparkle — nothing to twinkle on).
 // ---------------------------------------------------------------------------
 
-function RevealModal({
-  code,
-  teamId,
-  teamName,
-  gloss,
-  montageImageUrl,
-  onClose,
+function WinnerRevealCard({
+  team,
+  cardRatioW = DEFAULT_CARD_RATIO_W,
+  cardRatioH = DEFAULT_CARD_RATIO_H,
 }: {
-  code: string;
-  teamId: string;
-  teamName: string;
-  gloss: boolean;
-  /** Team's AI-montage poster URL, when one exists. Preferred over the
-   *  composed render; the reveal-card endpoint stays the fallback. */
-  montageImageUrl?: string | null;
-  onClose: () => void;
+  team: ClientTeam;
+  cardRatioW?: number;
+  cardRatioH?: number;
 }) {
-  const closeRef = useRef<HTMLButtonElement | null>(null);
+  // Flip state: false = the AI-montage poster (with sparkle), true = the
+  // composed sticker CardCanvas.
+  const [flipped, setFlipped] = useState(false);
 
-  // Keyboard focus lands on the ✕ button the moment the modal opens.
-  useEffect(() => {
-    closeRef.current?.focus();
-  }, []);
+  const readyCount = team.items.filter((i) => i.status === "ready").length;
+  const posterReady = team.montageStatus === "ready" && !!team.montageImageUrl;
 
-  // Escape closes the modal from anywhere (a real keydown on window, so it
-  // works even if focus is on the canvas).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  if (!posterReady) {
+    return (
+      <div className="cc-winner-card" aria-label={`the winning card by ${team.name}`}>
+        <CardCanvas
+          items={team.items}
+          layout={team.layout}
+          greeting={team.greeting.text}
+          cardRatioW={cardRatioW}
+          cardRatioH={cardRatioH}
+          ariaLabel={`${team.name}'s winning card — ${readyCount} stickers placed`}
+        />
+      </div>
+    );
+  }
 
   return (
-    <div
-      className="cc-modal"
-      data-testid="gm-3d-modal"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
+    <div className="cc-winner-card">
       <div
-        className="cc-modal-stage"
-        role="dialog"
-        aria-modal="true"
-        aria-label={`${teamName} card in 3D`}
+        role="button"
+        tabIndex={0}
+        aria-pressed={flipped}
+        aria-label={
+          flipped
+            ? "show AI montage version of the winning card"
+            : "show sticker version of the winning card"
+        }
+        data-testid="gm-winner-flip"
+        onClick={() => setFlipped((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setFlipped((v) => !v);
+          }
+        }}
       >
-        <button
-          ref={closeRef}
-          type="button"
-          className="cc-modal-close"
-          aria-label="close 3D reveal"
-          onClick={onClose}
-        >
-          ✕
-        </button>
-        <Reveal3D
-          code={code}
-          label={teamName}
-          testId="gm-3d-reveal"
-          gloss={gloss}
-          textureUrl={montageImageUrl ?? `/api/games/${encodeURIComponent(code)}/reveal-card?teamId=${encodeURIComponent(teamId)}`}
-          kicker={gloss ? undefined : "Team card"}
-          trophy={gloss}
-        />
+        {flipped ? (
+          <CardCanvas
+            items={team.items}
+            layout={team.layout}
+            greeting={team.greeting.text}
+            cardRatioW={cardRatioW}
+            cardRatioH={cardRatioH}
+            ariaLabel={`${team.name}'s winning sticker card — ${readyCount} stickers placed`}
+          />
+        ) : (
+          <div
+            className="cc-montage cc-winner-sparkle"
+            style={{
+              aspectRatio: `${cardRatioW} / ${cardRatioH}`,
+              "--card-ratio-w": cardRatioW,
+              "--card-ratio-h": cardRatioH,
+            } as CSSProperties}
+            aria-label={`winning poster for ${team.name}`}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={team.montageImageUrl ?? ""}
+              alt={`Winning poster by ${team.name}`}
+              className="cc-montage-img"
+            />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -626,8 +610,6 @@ function Console({ game }: { game: CreatedGame }) {
   const [connected, setConnected] = useState(false);
   // Single-QR accordion: the one team whose QR area is open (null = all closed).
   const [qrTeamId, setQrTeamId] = useState<string | null>(null);
-  // 3D reveal modal: the team whose finished card is on screen (null = closed).
-  const [modalTeamId, setModalTeamId] = useState<string | null>(null);
   // Final polish window: set by the GM-only `montage:started` heads-up (emitted
   // just before the preScoring hook runs) and cleared by `scoring:started`.
   const [polishing, setPolishing] = useState(false);
@@ -854,6 +836,12 @@ function Console({ game }: { game: CreatedGame }) {
     snapshot?.standings.find((s) => s.teamId === snapshot.peoplesChoiceTeamId)?.label ||
     "";
   const resultsStage = phase === PHASE.REVEAL || phase === PHASE.RESULTS;
+  // The winning team's live snapshot row (REVEAL/RESULTS only) — drives the
+  // big winner card in the banner block (AI poster ⇄ sticker flip).
+  const winnerTeam =
+    resultsStage && snapshot?.winnerTeamId
+      ? snapshot.teams.find((t) => t.id === snapshot.winnerTeamId) ?? null
+      : null;
   // JUDGING/SCORING: the team grid renders judge boxes (poster-first flip
   // card + actions) INSTEAD of the greeting/QR cards, and the mini-preview
   // grid is hidden — the boxes carry the poster/sticker view in both phases.
@@ -902,7 +890,10 @@ function Console({ game }: { game: CreatedGame }) {
           (poster-first flip card + View link) instead. JUDGING adds the
           score chip + Pick winner and sorts by judgingRows; SCORING keeps
           the original teams order (scores in flux). Same cc-team/cc-card
-          wrappers. */}
+          wrappers. REVEAL/RESULTS render NO team boxes at all (the stage is
+          the screen — same as the presenter): the winner banner block below
+          carries the winning card and the mini grid carries every team's. */}
+      {!resultsStage ? (
       <section aria-label="teams" className="cc-team-grid">
         {judgingOrderedTeams.map((team) => {
           if (judgeBoxes) {
@@ -990,6 +981,7 @@ function Console({ game }: { game: CreatedGame }) {
           );
         })}
       </section>
+      ) : null}
 
       {/* Single prominent Start control: below the roster/team cards, above
           the live card previews. Hidden once BUILD is underway. */}
@@ -1080,10 +1072,11 @@ function Console({ game }: { game: CreatedGame }) {
           the Pick winner button (judging:winner), sorted the same way
           (avg desc → count desc → label). */}
 
-      {/* REVEAL/RESULTS: the winner banner + People's Choice + standings.
-          At REVEAL the banner itself is a button-like control that keeps the
-          reveal on the big screen for another 30 s (reveal:extend); at
-          RESULTS the same banner renders inert (the reveal is over). */}
+      {/* REVEAL/RESULTS: the winner banner + the winning team's big card +
+          People's Choice. At REVEAL the banner itself is a button-like
+          control that keeps the reveal on the big screen for another 30 s
+          (reveal:extend); at RESULTS the same banner renders inert (the
+          reveal is over). No team boxes above — the stage is the screen. */}
       {resultsStage && snapshot?.winnerTeamId ? (
         <>
           {phase === PHASE.REVEAL ? (
@@ -1111,27 +1104,31 @@ function Console({ game }: { game: CreatedGame }) {
           ) : (
             <WinnerBanner label={winnerLabel || "…"} testId="gm-winner-banner" />
           )}
+          {/* The winning team's AI-montage card — centered, 2× the standard
+              hero width, with a light golden sparkle on the poster face;
+              click/Enter/Space flips poster ⇄ sticker IN PLACE (no 3D modal
+              — the lightbox is gone). In REVEAL this card sits below the
+              extend button so the two clicks never nest. */}
+          {winnerTeam ? (
+            <WinnerRevealCard
+              team={winnerTeam}
+              cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
+              cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
+            />
+          ) : null}
           {peoplesChoiceLabel ? (
             <PeoplesChoiceBanner label={peoplesChoiceLabel} testId="gm-peoples-choice" />
           ) : null}
-          <StandingsList
-            standings={snapshot.standings}
-            winnerTeamId={snapshot.winnerTeamId}
-            peoplesChoiceTeamId={snapshot.peoplesChoiceTeamId}
-            testId="gm-standings"
-          />
         </>
       ) : null}
 
       {/* Live previews: ONE card per team. GREETINGS: the greeting + an empty
           canvas; BUILD: live items + layout — the AI-montage poster once it's
           ready (click flips poster ⇄ sticker view; before that, the composed
-          canvas with a "Generating poster…" line). HIDDEN in JUDGING and
-          SCORING (the judge boxes' flip visual carries the poster/sticker
-          now). After the
-          winner pick (REVEAL/RESULTS + winnerTeamId) each thumbnail opens the
-          3D reveal modal for that team (winner = gloss rig) instead of
-          flipping. */}
+          canvas with a "Generating poster…" line). REVEAL/RESULTS: the same
+          flip cards (the 3D lightbox is gone — the winner gets its own big
+          flip card in the banner block above). HIDDEN in JUDGING and SCORING
+          (the judge boxes' flip visual carries the poster/sticker now). */}
       {!judgeBoxes && snapshot && snapshot.teams.length > 0 ? (
         <section aria-label="live card previews" className="cc-mini-grid">
           {snapshot.teams.map((team) => {
@@ -1146,33 +1143,21 @@ function Console({ game }: { game: CreatedGame }) {
                 montageImageUrl={merged?.montageImageUrl ?? team.montageImageUrl ?? null}
                 cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
                 cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
-                interactive={resultsStage && snapshot.winnerTeamId !== null}
-                onOpen3d={() => setModalTeamId(team.id)}
               />
             );
           })}
         </section>
       ) : null}
 
-      {/* 3D reveal modal (REVEAL/RESULTS): flip through every team's finished
-          card; the winner's card gets the gloss treatment + winner wording.
-          Non-winners show a neutral "Team card" kicker without the trophy.
-          The AI-montage poster is preferred as the texture; the composed
-          render (reveal-card endpoint) is the fallback. */}
-      {modalTeamId && snapshot ? (
-        <RevealModal
-          code={game.code}
-          teamId={modalTeamId}
-          teamName={
-            snapshot.teams.find((t) => t.id === modalTeamId)?.name ?? "Team"
-          }
-          gloss={modalTeamId === snapshot.winnerTeamId}
-          montageImageUrl={(() => {
-            const merged = teams.find((t) => t.id === modalTeamId);
-            const live = snapshot.teams.find((t) => t.id === modalTeamId);
-            return merged?.montageImageUrl ?? live?.montageImageUrl ?? null;
-          })()}
-          onClose={() => setModalTeamId(null)}
+      {/* Standings LAST in REVEAL/RESULTS: winner banner (with the winning
+          card) → every team's mini card → the ranked table. Gated the same
+          way as the banner block. */}
+      {resultsStage && snapshot?.winnerTeamId ? (
+        <StandingsList
+          standings={snapshot.standings}
+          winnerTeamId={snapshot.winnerTeamId}
+          peoplesChoiceTeamId={snapshot.peoplesChoiceTeamId}
+          testId="gm-standings"
         />
       ) : null}
 
