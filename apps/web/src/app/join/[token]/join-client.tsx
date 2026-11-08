@@ -36,7 +36,7 @@ import NoUndoNotice from "@/components/player/NoUndoNotice";
 import PromptBar, { createPromptBarHandle, type PromptBarHandle } from "@/components/player/PromptBar";
 import RatingPanel, { type ScoreSubmitOutcome } from "@/components/player/RatingPanel";
 import { selectMyItems } from "@/components/player/my-items";
-import TeamShowcase from "@/components/TeamShowcase";
+import TeamJudgeCard from "@/components/TeamJudgeCard";
 import { PeoplesChoiceBanner, StandingsList, WinnerBanner, teamLabel } from "@/components/Standings";
 import {
   createGameSocket,
@@ -342,54 +342,22 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
   // (ledger empty) — NoUndoNotice itself also checks the localStorage ack.
   const noUndoNeeded = build && Object.keys(snapshot?.myItems ?? {}).length === 0;
 
-  // SCORING own-team flip view ("Our card" section): poster-first — the AI
-  // poster when the montage pass is READY, otherwise the composed card served
-  // as the poster variant; the sticker side is always the plain composed
-  // render (same URL without the poster variant). Same flip pattern as
-  // RatingPanel.
+  // Locked-phase single-card surface: SCORING (with a scoring order) shows
+  // the RatingPanel carousel first; EVERY locked phase renders ONE
+  // TeamJudgeCard below the header (poster-first flip: AI montage ↔ sticker
+  // card, prompt accordion switching with the flip — same as the GM/presenter
+  // judge boxes).
 
-  const scoringActive = snapshot?.phase === PHASE.SCORING && !!snapshot.scoring && !!team;
-  // Montage-poster showcase (post-SCORING: JUDGING/REVEAL/RESULTS): the AI
-  // poster hero (or the composed card while generating / on fallback) with
-  // the sticker card + prompts as subs. Gated OFF for the whole SCORING
-  // phase — the "Our card" flip section below supersedes it there (the same
-  // card surfaces, served as server-rendered scoring-card PNGs), and the
-  // standalone CardCanvas + montage block covers the scoring-wait gap. When
-  // active it OWNS the card surfaces — the standalone block is suppressed.
-  const showcaseActive = locked && !!team && snapshot?.phase !== PHASE.SCORING;
-  const ownCardUrl =
-    snapshot?.scoring?.yourTeamCardId
-      ? `/api/games/${identity.code}/scoring-card/${snapshot.scoring.yourTeamCardId}?token=${identity.sessionToken}&v=${snapshot.cardVersion ?? 0}`
-      : null;
-  const ownPosterUrl =
-    team?.montageStatus === "ready" && team?.montageImageUrl
-      ? team.montageImageUrl
-      : ownCardUrl
-        ? `${ownCardUrl}&variant=poster`
-        : null;
-  const ownStickerUrl = ownCardUrl;
-
-  const [ownVariant, setOwnVariant] = useState<"poster" | "sticker">("poster");
-  const [ownImgFailed, setOwnImgFailed] = useState(false);
-  // Poster → sticker auto-fallback: if the poster side fails to load (the
-  // montage file vanished, or the poster render 500s), flip to the sticker
-  // URL automatically ONCE before showing "Card preview unavailable." — the
-  // composed sticker render is always available in SCORING.
-  const [ownAutoFellBack, setOwnAutoFellBack] = useState(false);
-  // Reset the flip + fallback state whenever the own card surface changes.
-  useEffect(() => {
-    setOwnVariant("poster");
-    setOwnImgFailed(false);
-    setOwnAutoFellBack(false);
-  }, [snapshot?.scoring?.yourTeamCardId, snapshot?.cardVersion]);
-  const handleOwnImgError = () => {
-    if (ownVariant === "poster" && !ownAutoFellBack) {
-      setOwnAutoFellBack(true);
-      setOwnVariant("sticker");
-    } else {
-      setOwnImgFailed(true);
-    }
-  };
+  // Own card label for the single TeamJudgeCard: the team-NAMED scoring card
+  // (snapshot.scoring.cards entry matching our ownTeamCardId — teamName equals
+  // the team's real name: judging-stage anonymity is dropped per decision 2a)
+  // with the team's label as fallback in the pre/absent-scoring phases. Only
+  // rendered when team exists; null lets TeamJudgeCard fall back to team.label.
+  const ownCardLabel =
+    (snapshot?.scoring && snapshot.scoring.yourTeamCardId
+      ? snapshot.scoring.cards.find((c) => c.cardId === snapshot.scoring?.yourTeamCardId)?.teamName
+      : undefined) ??
+    (team ? team.label : null);
 
   // The countdown ticks during BUILD and SCORING (the two timed phases that
   // matter to players; REVEAL's 30s auto-expiry is presenter/GM business).
@@ -516,22 +484,13 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
             ) : null}
           </section>
 
-          {/* Montage-poster showcase (post-SCORING: JUDGING/REVEAL/RESULTS):
-              MAIN = the AI poster (or the composed card while generating /
-              on fallback) directly under the team-name header; SUBS =
-              sticker card + prompts row. Owns both card surfaces — the
-              standalone CardCanvas + montage block below is suppressed while
-              active. SCORING uses the "Our card" flip section instead;
-              BUILD keeps the old layout byte-identical. */}
-          {showcaseActive && team ? (
-            <TeamShowcase
-              team={team}
-              cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
-              cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
-              testId="player-showcase"
-            />
-          ) : null}
-
+          {/* Single-card pattern (EVERY locked phase): ONE TeamJudgeCard —
+              click flips the AI-montage poster ↔ sticker card, and the
+              prompt-transparency accordion under it switches with the flip
+              (montage prompt ↔ sticker prompts with real nicknames) — the
+              exact GM/presenter judge-box pattern. The prompt is readable
+              after a refresh because players' JUDGING+ snapshots now carry
+              montagePromptText. BUILD keeps the old layout. */}
           {build ? (
             <>
               {/* BUILD: 2-col row — the prompt bar (left half) next to the
@@ -552,114 +511,79 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                 <ActivityFeed entries={team.activity} />
               </div>
             </>
-          ) : snapshot.phase === PHASE.SCORING && snapshot.scoring ? (
-            // SCORING: the rating surface FIRST (browse cards, skip our own,
-            // 1–10 FINAL ratings, live averages), then "Our card" (own-card
-            // poster-first flip view + team activity feed side by side).
+          ) : (
+            // LOCKED phases (SCORING/JUDGING/REVEAL/RESULTS): the rating
+            // carousel FIRST in SCORING (browse cards, skip our own, 1–10
+            // FINAL ratings, live averages), then ONE TeamJudgeCard — the
+            // single flip card + switching prompt accordion for every locked
+            // phase — followed by the phase status sections (rated summary /
+            // winner + standings / scoring wait). Team activity runs as its
+            // own section below the card (single feed, all locked phases).
             <>
-              <RatingPanel
-                scoring={snapshot.scoring}
-                scores={snapshot.scores}
-                myScores={snapshot.myScores}
-                onSubmit={handleSubmitScore}
-                gameCode={identity.code}
-                sessionToken={identity.sessionToken}
-                cardVersion={snapshot.cardVersion}
-                remainingLabel={remainingLabel}
-                cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
-                cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
-                testId="player-rating-panel"
-              />
-              <section className="cc-card" aria-label="our card" data-testid="our-card">
-                <h3>Our card</h3>
-                <p className="cc-hint">{team.name}</p>
-                {ownPosterUrl && ownStickerUrl ? (
-                  <div className="cc-our-card-grid">
-                    <div className="cc-our-card-image">
-                      {/* The image is ALWAYS visible (no load-fade — a fade
-                          left the img invisible when its load event fired
-                          before React attached onLoad). On failure the hint
-                          replaces only the img inside the box; the flip
-                          button stays — tapping it retries the other side. */}
-                      <div
-                        className="cc-rating-image-box"
-                        style={cardRatioStyle(
-                          snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W,
-                          snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H,
-                        )}
-                      >
-                        {!ownImgFailed ? (
-                          /* eslint-disable-next-line @next/next/no-img-element */
-                          <img
-                            src={ownVariant === "poster" ? ownPosterUrl : ownStickerUrl}
-                            key={`${snapshot.scoring.yourTeamCardId}:${snapshot.cardVersion ?? 0}:${ownVariant}`}
-                            data-testid="our-card-image"
-                            alt={`Our team's card (${ownVariant === "poster" ? "poster" : "sticker"})`}
-                            className="cc-rating-image"
-                            role="button"
-                            aria-label={ownVariant === "poster" ? "show sticker card" : "show poster"}
-                            onClick={() => setOwnVariant((v) => (v === "poster" ? "sticker" : "poster"))}
-                            onError={handleOwnImgError}
-                          />
-                        ) : (
-                          <p className="cc-hint">Card preview unavailable.</p>
-                        )}
-                      </div>
-                      <button
-                        type="button"
-                        className="cc-btn cc-flip-btn"
-                        data-testid="our-card-flip"
-                        onClick={() => {
-                          setOwnImgFailed(false); // retry the other side after a failure
-                          setOwnVariant((v) => (v === "poster" ? "sticker" : "poster"));
-                        }}
-                      >
-                        {ownVariant === "poster" ? "Show sticker card" : "Show poster"}
-                      </button>
-                    </div>
-                    <div className="cc-our-card-activity">
-                      <h3>Team activity</h3>
-                      <ActivityFeed entries={team.activity} />
-                    </div>
-                  </div>
-                ) : null}
-              </section>
-            </>
-          ) : judging ? (
-            // JUDGING: ratings are locked — keep the rated summary + the
-            // waiting notice; the card view above persists.
-            <section className="cc-card" aria-label="judging wait" role="status" data-testid="judging-wait">
-              <h3>Waiting for the game master</h3>
-              <p className="cc-hint">Ratings are locked — the host is picking the winner.</p>
-              {ratedSummary ? <p className="cc-hint">Your ratings: {ratedSummary}</p> : null}
-            </section>
-          ) : revealing || results ? (
-            // REVEAL/RESULTS: the winner ("The winner is…") + the public
-            // standings when the server has broadcast them.
-            <>
-              <WinnerBanner label={winnerLabel || "…"} testId="player-winner-banner" />
-              {results && peoplesChoiceLabel ? (
-                <PeoplesChoiceBanner label={peoplesChoiceLabel} testId="player-peoples-choice" />
-              ) : null}
-              {snapshot.standings.length > 0 ? (
-                <StandingsList
-                  standings={snapshot.standings}
-                  winnerTeamId={snapshot.winnerTeamId}
-                  peoplesChoiceTeamId={snapshot.peoplesChoiceTeamId}
-                  testId="player-standings"
+              {snapshot.phase === PHASE.SCORING && snapshot.scoring ? (
+                <RatingPanel
+                  scoring={snapshot.scoring}
+                  scores={snapshot.scores}
+                  myScores={snapshot.myScores}
+                  onSubmit={handleSubmitScore}
+                  gameCode={identity.code}
+                  sessionToken={identity.sessionToken}
+                  cardVersion={snapshot.cardVersion}
+                  remainingLabel={remainingLabel}
+                  cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
+                  cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
+                  testId="player-rating-panel"
                 />
               ) : null}
+
+              <TeamJudgeCard
+                team={team}
+                cardLabel={ownCardLabel}
+                tally={null}
+                actions={null}
+                cardKind={snapshot.phase === PHASE.SCORING ? "scoring" : "judging"}
+                cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
+                cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
+                testId="player-our-card"
+              />
+
+              {judging ? (
+                // JUDGING: ratings are locked — keep the rated summary + the
+                // waiting notice; the single card view above persists.
+                <section className="cc-card" aria-label="judging wait" role="status" data-testid="judging-wait">
+                  <h3>Waiting for the game master</h3>
+                  <p className="cc-hint">Ratings are locked — the host is picking the winner.</p>
+                  {ratedSummary ? <p className="cc-hint">Your ratings: {ratedSummary}</p> : null}
+                </section>
+              ) : revealing || results ? (
+                // REVEAL/RESULTS: the winner ("The winner is…") + the public
+                // standings when the server has broadcast them.
+                <>
+                  <WinnerBanner label={winnerLabel || "…"} testId="player-winner-banner" />
+                  {results && peoplesChoiceLabel ? (
+                    <PeoplesChoiceBanner label={peoplesChoiceLabel} testId="player-peoples-choice" />
+                  ) : null}
+                  {snapshot.standings.length > 0 ? (
+                    <StandingsList
+                      standings={snapshot.standings}
+                      winnerTeamId={snapshot.winnerTeamId}
+                      peoplesChoiceTeamId={snapshot.peoplesChoiceTeamId}
+                      testId="player-standings"
+                    />
+                  ) : null}
+                </>
+              ) : snapshot.phase === PHASE.SCORING ? (
+                <section className="cc-card" aria-label="scoring wait" role="status" data-testid="scoring-wait">
+                  <h3>Getting the rating cards ready…</h3>
+                  <p className="cc-hint">Rating opens in a moment.</p>
+                </section>
+              ) : (
+                <section className="cc-card" aria-label="build ended" role="status">
+                  <h3>Time's up — the host locked the cards</h3>
+                  <p className="cc-hint">Your team's finished card is shown above.</p>
+                </section>
+              )}
             </>
-          ) : snapshot?.phase === PHASE.SCORING ? (
-            <section className="cc-card" aria-label="scoring wait" role="status" data-testid="scoring-wait">
-              <h3>Getting the rating cards ready…</h3>
-              <p className="cc-hint">Rating opens in a moment.</p>
-            </section>
-          ) : (
-            <section className="cc-card" aria-label="build ended" role="status">
-              <h3>Time's up — the host locked the cards</h3>
-              <p className="cc-hint">Your team's finished card is shown above.</p>
-            </section>
           )}
 
           {build ? (
@@ -704,59 +628,16 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                 )}
               </div>
             </div>
-          ) : !showcaseActive && !scoringActive ? (
-            <>
-              <CardCanvas
-                items={team.items}
-                layout={team.layout}
-                greeting={team.greeting.text}
-                cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
-                cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
-                myPlayerId={identity.playerId}
-                highlightItemId={highlightItemId}
-                onItemTap={handleHighlight}
-                ariaLabel={`your team's card — ${team.items.filter((i) => i.status === "ready").length} stickers placed`}
-              />
-
-              {/* Montage (poster) accumulator surface — mirrors gm/page.tsx:
-                  while the poster pass is in flight show a small indicator
-                  next to the composed card; when the poster lands (ready)
-                  show the image (the composed card stays); fallback keeps the
-                  card unchanged. Suppressed while the showcase owns these
-                  surfaces (SCORING onward). */}
-              {team.montageStatus === "generating" ? (
-                <p className="cc-montage-status" aria-live="polite">
-                  Generating poster…
-                </p>
-              ) : team.montageStatus === "ready" && team.montageImageUrl ? (
-                <div
-                  className="cc-montage"
-                  style={cardRatioStyle(
-                    snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W,
-                    snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H,
-                  )}
-                  aria-label={`poster for ${team.name}`}
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={team.montageImageUrl}
-                    alt={`Finished poster for ${team.name}`}
-                    className="cc-montage-img"
-                  />
-                </div>
-              ) : null}
-            </>
           ) : null}
 
-          {/* "Your stickers" — hidden during SCORING (the rating carousel +
-              "Our card" own the screen there, and the submissions are baked
-              into the card being scored); BUILD and post-SCORING keep it. */}
-          {!scoringActive ? <MySubmissions items={myItems} onHighlight={handleHighlight} /> : null}
+          {/* "Your stickers" — BUILD only (locked phases show the single
+              TeamJudgeCard instead: the sticker prompts live in its flip
+              accordion, and the submissions are baked into the card). */}
+          {build ? <MySubmissions items={myItems} onHighlight={handleHighlight} /> : null}
 
-          {/* Suppressed during BUILD (the feed sits next to the prompt bar)
-              and during SCORING — the "Our card" section renders the activity
-              feed in its right column instead. */}
-          {!scoringActive && !build ? <ActivityFeed entries={team.activity} /> : null}
+          {/* ONE team activity feed per locked phase, below the card —
+              suppressed during BUILD (the feed sits next to the prompt bar). */}
+          {!build ? <ActivityFeed entries={team.activity} /> : null}
         </>
       ) : (
         <>

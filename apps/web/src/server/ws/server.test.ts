@@ -238,14 +238,16 @@ describe("buildSyncFull — critique audience scoping (GM only)", () => {
 
 // ---------------------------------------------------------------------------
 // Montage promptText audience scoping: the persisted poster prompt rides the
-// sync snapshot for the GM in every phase, and for the PRESENTER from JUDGING
-// onward (the JUDGING big screen renders the shared TeamJudgeCard whose
-// "View prompt" accordion reads montagePromptText). Players never receive it
-// in a snapshot; lastError stays GM-only in every phase.
+// sync snapshot for the GM in every phase, and for the PRESENTER and PLAYERS
+// from JUDGING onward (the judging stage is team-named — user decision 2a —
+// and GM console, presenter big screen and the players' join screen all
+// render the shared TeamJudgeCard whose "View prompt" accordion reads
+// montagePromptText). BUILD/SCORING keep promptText out of EVERY role's
+// snapshot; lastError stays GM-only in every phase.
 // ---------------------------------------------------------------------------
 
 describe("buildSyncFull — montage promptText presenter visibility (JUDGING+)", () => {
-  it("presenter snapshot in JUDGING carries montage.promptText; player never does", async () => {
+  it("presenter + player snapshots in JUDGING carry montage.promptText; lean in BUILD; lastError GM-only", async () => {
     const s = await setup();
     await s.repo.upsertMontageState(s.teamId, 1, {
       patch: {
@@ -292,11 +294,14 @@ describe("buildSyncFull — montage promptText presenter visibility (JUDGING+)",
       lastError: "poster grading failed twice",
     });
 
-    // Player: still lean in JUDGING (fail-closed for every non-GM/presenter
-    // role).
+    // Player: promptText now rides the JUDGING snapshot too (the player join
+    // screen renders the same TeamJudgeCard accordion after a refresh) —
+    // lastError still never leaves the GM payload.
     const player = await buildSyncFull(s.hub, s.repo, s.gameId, playerIdentity(s));
-    const playerMontage = player.teams[0]!.montage as { promptText?: string } | null;
+    const playerMontage = player.teams[0]!.montage as
+      { promptText?: string; lastError?: string } | null;
     expect(playerMontage).not.toBeNull();
-    expect(playerMontage!.promptText).toBeUndefined();
+    expect(playerMontage!.promptText).toBe("a glossy poster of a red balloon dog");
+    expect(playerMontage!.lastError).toBeUndefined();
   });
 });

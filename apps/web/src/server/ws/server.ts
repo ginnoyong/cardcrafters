@@ -183,8 +183,9 @@ export interface SyncFullPayload extends Record<string, unknown> {
     /** Current-round greeting (empty text + null status until generated). */
     greeting: { text: string; status: string | null };
     /** Montage (poster) state — null until the accumulator first runs.
-     *  `promptText` rides along for GM snapshots ONLY (internal craft
-     *  detail; presenter/player payloads stay lean). */
+     *  `promptText` rides along for GM snapshots in every phase and for
+     *  presenter/player snapshots from JUDGING onward (the shared
+     *  TeamJudgeCard accordion reads it; BUILD/SCORING keep it out). */
     montage?: {
       status: string;
       imageUrl?: string;
@@ -299,16 +300,18 @@ export async function buildSyncFull(
               ? { imageUrl: montage.imageUrl }
               : {}),
             // promptText (the EXACT image-model prompt, persisted by the
-            // accumulator) is INTERNAL craft detail — GM ONLY… except the
-            // presenter from JUDGING onward: the JUDGING big screen renders
-            // the shared TeamJudgeCard with the "View prompt" transparency
-            // accordion, so the presenter's refresh-surviving snapshot must
-            // carry promptText too (no anonymity stakes — the judging stage
-            // is team-named). Players keep the lean status/imageUrl payload
-            // in every phase (live montage:updated events may still carry
-            // promptText, but the snapshot keeps it out of player payloads).
+            // accumulator) is INTERNAL craft detail in BUILD/SCORING — no
+            // role's snapshot carries it there. From JUDGING onward it is
+            // PUBLIC: the judging stage is team-named (user decision 2a, no
+            // anonymity stakes), and the GM console, presenter big screen AND
+            // every player's join screen render the shared TeamJudgeCard with
+            // the "View prompt" transparency accordion, so all three
+            // identities' refresh-surviving snapshots must carry promptText
+            // (a player who refreshed mid-JUDGING would otherwise lose it —
+            // live montage:updated events only reach sockets connected since
+            // BUILD).
             ...((identity?.role === "gm" ||
-              (identity?.role === "presenter" &&
+              ((identity?.role === "presenter" || identity?.role === "player") &&
                 [PHASE.JUDGING, PHASE.REVEAL, PHASE.RESULTS].includes(
                   state.phase as (typeof PHASE)[keyof typeof PHASE],
                 ))) &&
@@ -316,7 +319,7 @@ export async function buildSyncFull(
               ? { promptText: montage.promptText }
               : {}),
             // lastError (why the poster fell back) is GM-facing diagnosis,
-            // same visibility rules as promptText.
+            // STAYS GM-ONLY in every phase (unlike promptText).
             ...(identity?.role === "gm" && montage.lastError
               ? { lastError: montage.lastError }
               : {}),
