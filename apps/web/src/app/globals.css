@@ -517,10 +517,11 @@ label {
 /* BUILD-phase layout (player build screen). Header box: team name + theme
    subtitle in the left column, the phase/timer badge in the right column
    (.cc-card is already a grid — two columns auto-place name/badge on row 1
-   and the theme line under the name). Input row: the prompt bar on the left
-   half, the team activity feed on the right half (its .cc-feed list already
-   scrolls; capped at 12rem inside the half-width box). Cards row: the live
-   sticker card at 1/3, the AI poster slot at 2/3. */
+   and the theme line under the name). Below the full-width prompt bar sits
+   the single-card stage: ONE flip card (sticker CardCanvas ⇄ AI-montage
+   poster) with the toggling panel (activity-with-find ⇄ montage prompt)
+   under it — sizing mirrors the locked-phase .cc-judge-card/.cc-judge-visual
+   so both screens render the card at the same visual width. */
 .cc-build-head {
   grid-template-columns: 1fr auto;
   align-items: start;
@@ -531,28 +532,26 @@ label {
   text-align: right;
 }
 
-.cc-build-inputrow {
+.cc-build-stage {
+  min-width: 0;
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1rem;
-  align-items: start;
+  gap: 0.6rem;
 }
 
-.cc-build-inputrow .cc-feed {
-  max-height: 12rem;
+.cc-build-visual {
+  min-width: 0;
+  display: grid;
+  gap: 0.4rem;
 }
 
-.cc-build-cards {
-  display: grid;
-  grid-template-columns: 1fr 2fr;
-  gap: 1rem;
-  align-items: start;
+/* When the AI poster is ready the build card is a button-like flip control
+   (same pattern as .cc-judge-visual.is-flippable). */
+.cc-build-visual.is-flippable {
+  cursor: pointer;
 }
 
 @media (max-width: 720px) {
-  .cc-build-head,
-  .cc-build-inputrow,
-  .cc-build-cards {
+  .cc-build-head {
     grid-template-columns: 1fr;
   }
 
@@ -862,6 +861,20 @@ label {
 .cc-feed li {
   font-size: 0.9rem;
   color: var(--text-muted);
+  /* Find-on-card row: text on the left (wrapping), small locate button on
+     the right — same button styling as the old MySubmissions row. */
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.cc-feed-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.cc-feed li .cc-btn-small {
+  flex: 0 0 auto;
 }
 
 .cc-feed li::before {
