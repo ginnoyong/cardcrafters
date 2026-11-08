@@ -77,43 +77,6 @@ function fmt(seconds: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-function TeamCard({
-  name,
-  label,
-  memberCount,
-  phase,
-  phaseEndsAt,
-  serverNow,
-  greetingText,
-}: {
-  name: string;
-  label: string;
-  memberCount: number;
-  phase: string;
-  phaseEndsAt: number | null;
-  serverNow: number;
-  greetingText?: string;
-}) {
-  const remaining = useCountdown(phaseEndsAt, serverNow);
-
-  return (
-    <div className="cc-card cc-present-team" aria-label={`team ${label} card`}>
-      <h3>
-        {name} <span className="cc-muted">({label})</span>
-      </h3>
-      <p className="cc-badge">
-        {phaseLabel(phase)} · {memberCount}/{MAX_TEAM_MEMBERS} players
-      </p>
-      {greetingText ? <p className="cc-greeting">“{greetingText}”</p> : null}
-      {remaining !== null ? (
-        <p className="cc-timer" aria-label="phase timer">
-          ⏱ {fmt(remaining)}
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
 function PresenterBoard({
   code,
   focusTeamId: initialFocusTeamId,
@@ -330,20 +293,6 @@ function PresenterBoard({
       ) : null}
       {!connected ? <p className="cc-hint">Connecting…</p> : null}
 
-      <section aria-label="team overview" className="cc-team-grid">
-        {(snapshot?.teams ?? []).map((team) => (
-          <TeamCard
-            key={team.id}
-            name={team.name}
-            label={team.label}
-            memberCount={team.members.length > 0 ? team.members.length : team.memberCount}
-            phase={snapshot?.phase ?? "LOBBY"}
-            phaseEndsAt={snapshot?.phaseEndsAt ?? null}
-            serverNow={snapshot?.serverNow ?? Date.now()}
-            greetingText={team.greeting?.text || undefined}
-          />
-        ))}
-      </section>
       {/* BUILD (and the pre-build LOBBY/GREETINGS phases): live card grid —
           one read-only mini canvas per team, right under the team overview
           cards (greeting + empty canvas; live items + layout). From SCORING
@@ -374,7 +323,7 @@ function PresenterBoard({
 
       {/* SCORING onward: one-at-a-time stage — a single team's showcase fills
           the screen (same main/sub layout as the player view), with ←/→
-          wrap-around cycle buttons; the meta TeamCard grid (roster/timer)
+          wrap-around cycle buttons.
           stays
           above. The montage surfaces live inside TeamShowcase now (poster
           hero / generating indicator), so the per-mini montage blocks are

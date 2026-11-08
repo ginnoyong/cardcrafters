@@ -947,8 +947,6 @@ function Console({ game }: { game: CreatedGame }) {
                         <a
                           className="cc-btn cc-btn-small"
                           href={`/present/${game.code}?team=${team.id}`}
-                          target="_blank"
-                          rel="noopener"
                           data-testid={`gm-judge-view-${team.id}`}
                         >
                           View
