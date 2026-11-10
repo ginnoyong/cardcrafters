@@ -41,10 +41,38 @@ import {
 // Cost estimation (optimistic budget reservation)
 // ---------------------------------------------------------------------------
 
-/** Conservative pre-call cost estimate for a non-image call, in USD. */
-const DEFAULT_CALL_ESTIMATE_USD = 0.05;
-/** Conservative pre-call cost estimate for an image-generation call, in USD. */
-const DEFAULT_IMAGE_CALL_ESTIMATE_USD = 0.1;
+/**
+ * Default per-game AI spend ceiling, in USD, applied when AI_BUDGET_PER_GAME_USD
+ * is not set in the environment (a valid positive env value always wins).
+ *
+ * Budget math (measured costs, worst case):
+ *   - text tasks (montage_prompt / greeting / validation / moderation):
+ *     ≈ $0.001–0.005 per call;
+ *   - image tasks (item_image / montage_image) on google/gemini-2.5-flash-image:
+ *     ≈ $0.03–0.04 per image (openai/gpt-image-1 fallback up to ≈ $0.19).
+ *   - Per team per round: up to 25 sticker images (cap 25/team) + 1
+ *     montage_prompt + 1 montage_image ≈ 25 × $0.04 + $0.05 ≈ $1.10; the
+ *     continuous montage loop can add one more montage_image per validated
+ *     submission burst (≤ 25/team) ≈ +$1.
+ *   - 10 teams → ~$15–22 per game worst case, ~$5–10 typical.
+ * $25 = realistic worst case ($22) × ~1.15 headroom.
+ */
+export const DEFAULT_AI_BUDGET_PER_GAME_USD = 25;
+
+/**
+ * Optimistic pre-call reserve for a non-image (text) call, in USD. Realistic
+ * measured text cost is $0.001–0.005; the reserve only gates CONCURRENT
+ * in-flight calls and is reconciled to the real cost on completion, so a
+ * realistic value prevents over-reservation lockouts at scale (many teams
+ * reserving far more than they will ever spend).
+ */
+export const DEFAULT_CALL_ESTIMATE_USD = 0.01;
+/**
+ * Optimistic pre-call reserve for an image-generation call, in USD. Realistic
+ * gemini-2.5-flash-image cost is $0.03–0.04 (gpt-image-1 fallback up to
+ * ~$0.19) — see the budget math on DEFAULT_AI_BUDGET_PER_GAME_USD.
+ */
+export const DEFAULT_IMAGE_CALL_ESTIMATE_USD = 0.05;
 
 /**
  * Optimistic cost estimate for one call, reserved BEFORE the provider runs so
@@ -324,22 +352,32 @@ export interface CreateAiRouterOptions {
 /**
  * Build a fully-configured AiRouter from the environment:
  *   AI_MODE (auto|mock|openrouter), OPENROUTER_API_KEY, OPENROUTER_BASE_URL,
- *   AI_BUDGET_PER_GAME_USD, plus the per-task AI_TASK_* overrides applied by
+ *   AI_BUDGET_PER_GAME_USD (default DEFAULT_AI_BUDGET_PER_GAME_USD when unset
+ *   or invalid), plus the per-task AI_TASK_* overrides applied by
  *   loadTaskConfig(). The server calls this once at boot.
  */
 export async function createAiRouter(opts: CreateAiRouterOptions) {
   const env = opts.env ?? process.env;
   const loaded = await loadTaskConfig(env, opts.configDir);
-  const budgetRaw = Number(env.AI_BUDGET_PER_GAME_USD);
-  const budgetUsd = Number.isFinite(budgetRaw) && budgetRaw > 0 ? budgetRaw : null;
+  const budgetUsd = resolveBudgetUsd(env);
   return new AiRouter({
     repo: opts.repo,
     mode: loaded.mode,
     config: loaded.tasks,
-    ...(budgetUsd !== null ? { budgetUsd } : {}),
+    budgetUsd,
     openrouter: { apiKey: env.OPENROUTER_API_KEY, baseUrl: env.OPENROUTER_BASE_URL },
     env,
   });
+}
+
+/**
+ * Per-game budget resolution: a valid positive AI_BUDGET_PER_GAME_USD env
+ * value wins; anything else falls back to DEFAULT_AI_BUDGET_PER_GAME_USD
+ * (budget tracking is ALWAYS on for real providers — the point of the guard).
+ */
+export function resolveBudgetUsd(env: NodeJS.ProcessEnv): number {
+  const budgetRaw = Number(env.AI_BUDGET_PER_GAME_USD);
+  return Number.isFinite(budgetRaw) && budgetRaw > 0 ? budgetRaw : DEFAULT_AI_BUDGET_PER_GAME_USD;
 }
 
 // ---------------------------------------------------------------------------

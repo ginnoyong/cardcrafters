@@ -8,7 +8,14 @@ import { MemoryRepo } from "../repo/memory-repo";
 import { AiBudgetExceededError, AiTaskError } from "./errors";
 import { OpenRouterProvider } from "./openrouter-provider";
 import { loadTaskConfig, TASK_NAMES, type AiTaskName, type TaskConfig } from "./provider";
-import { AiRouter, createAiRouter } from "./router";
+import {
+  AiRouter,
+  createAiRouter,
+  DEFAULT_AI_BUDGET_PER_GAME_USD,
+  DEFAULT_CALL_ESTIMATE_USD,
+  DEFAULT_IMAGE_CALL_ESTIMATE_USD,
+  resolveBudgetUsd,
+} from "./router";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -421,5 +428,25 @@ describe("createAiRouter", () => {
     expect(router.taskConfig("layout_montage")?.structured).toBe("layoutMontageSchema");
     // under the $25 budget a mock call succeeds (mock costs 0, unknown game ok)
     await expect(router.run("moderation", { prompt: "x" }, { gameId: "fresh-game" })).resolves.toBeTruthy();
+  });
+
+  it("defaults: $25/game budget (env override wins) + realistic cost reserves", () => {
+    // Budget math (see router.ts): per team per round ≈ 25 sticker images ×
+    // $0.04 + 1 montage_prompt + 1 montage_image ≈ $1.10, the continuous
+    // montage loop adds up to ≈ +$1, and 10 teams land at ~$15–22 worst case
+    // (~$5–10 typical) — the $25 default is that worst case × ~1.15 headroom.
+    expect(DEFAULT_AI_BUDGET_PER_GAME_USD).toBe(25);
+    // Reserves gate CONCURRENT in-flight calls only; they must match realistic
+    // per-call costs ($0.03–0.04 image, $0.001–0.005 text) so 10-team games
+    // don't lock themselves out by over-reserving.
+    expect(DEFAULT_IMAGE_CALL_ESTIMATE_USD).toBe(0.05);
+    expect(DEFAULT_CALL_ESTIMATE_USD).toBe(0.01);
+    // No env var → the default; a valid positive env value wins; invalid
+    // values (0, negative, garbage) fall back to the default too.
+    expect(resolveBudgetUsd({} as unknown as NodeJS.ProcessEnv)).toBe(25);
+    expect(resolveBudgetUsd({ AI_BUDGET_PER_GAME_USD: "40" } as unknown as NodeJS.ProcessEnv)).toBe(40);
+    expect(resolveBudgetUsd({ AI_BUDGET_PER_GAME_USD: "0" } as unknown as NodeJS.ProcessEnv)).toBe(25);
+    expect(resolveBudgetUsd({ AI_BUDGET_PER_GAME_USD: "-5" } as unknown as NodeJS.ProcessEnv)).toBe(25);
+    expect(resolveBudgetUsd({ AI_BUDGET_PER_GAME_USD: "nan" } as unknown as NodeJS.ProcessEnv)).toBe(25);
   });
 });

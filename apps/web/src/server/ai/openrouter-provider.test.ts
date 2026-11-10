@@ -57,12 +57,12 @@ const MONTAGE_CFG = {
   enabled: true,
 };
 
-/** Poster prompt (montage_prompt output) + the accumulator's style hint. */
+/** Greeting-card prompt (montage_prompt output) + the accumulator's style hint. */
 const MONTAGE_INPUT = {
   prompt:
-    "Joyful full-bleed movie-poster illustration for a balloon party greeting card: " +
-    "a single cohesive composition featuring a red balloon, a paper crown and a " +
-    "bunting banner, arranged as an ensemble cast with one clear focal hero.",
+    "Cheerful full-bleed greeting-card illustration for a balloon party card: " +
+    "a single warm storybook scene featuring a red balloon, a paper crown and a " +
+    "bunting banner, framed by decorative florals with one clear focal point.",
   styleHint: "palette #ff5a5f, #ffd166, joyful mood",
 };
 
@@ -262,7 +262,7 @@ describe("OpenRouterProvider montage_image (poster task)", () => {
     expect(calls[1]!.url).toBe("https://openrouter.ai/api/v1/images");
     expect(calls[1]!.body.model).toBe(MONTAGE_CFG.primary);
     const prompt = String(calls[1]!.body.prompt);
-    expect(prompt).toContain("single cohesive composition");
+    expect(prompt).toContain("single warm storybook scene");
     expect(prompt).toContain(`Art direction: ${MONTAGE_INPUT.styleHint}.`);
     expect(STICKER_LEAK.test(prompt)).toBe(false);
   });

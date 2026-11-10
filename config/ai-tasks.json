@@ -5,7 +5,7 @@
     "mode 'auto' = use OpenRouter iff OPENROUTER_API_KEY is set, otherwise the deterministic mock provider (full game runs on mock).",
     "ENV OVERRIDES (applied by loadTaskConfig at startup, take precedence over this file):",
     "  AI_MODE                    mock | openrouter | auto (default auto)",
-    "  AI_BUDGET_PER_GAME_USD     number, per-game AI spend ceiling (mock calls cost 0)",
+    "  AI_BUDGET_PER_GAME_USD     number, per-game AI spend ceiling (default 25; mock calls cost 0)",
     "  AI_TASK_<NAME>_MODEL       override the primary model, e.g. AI_TASK_PROMPT_VALIDATION_MODEL=openai/gpt-4o-mini",
     "  AI_TASK_<NAME>_FALLBACKS   override fallbacks, comma-separated, e.g. AI_TASK_ITEM_IMAGE_FALLBACKS=openai/gpt-image-1,google/gemini-2.5-flash-image",
     "  <NAME> is the task key upper-snake-cased: prompt_validation -> AI_TASK_PROMPT_VALIDATION_*, item_image -> AI_TASK_ITEM_IMAGE_*.",
@@ -92,7 +92,7 @@
       "primary": "google/gemini-2.5-flash",
       "fallbacks": ["openai/gpt-4.1-mini"],
       "temperature": 0.8,
-      "maxTokens": 400,
+      "maxTokens": 1200,
       "retries": 1,
       "timeoutMs": 15000,
       "structured": "montagePromptSchema"

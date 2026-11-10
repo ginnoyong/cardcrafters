@@ -16,7 +16,6 @@ import { DEFAULT_CARD_CONFIG, MAX_PROMPT_WORDS } from "@cardcrafters/shared";
 import { createAiRouter, type AiRouter } from "../ai/router";
 import { DEFAULT_ITEMS_DIR } from "../flows/item-image";
 import { DEFAULT_MONTAGE_DIR } from "../flows/montage-accumulator";
-import { MOCK_CRITIQUE_VERDICT } from "../layout/critique";
 import { createServer, type CardCraftersServer } from "../../../server";
 import { MemoryRepo } from "../repo/memory-repo";
 import { normalizeSyncFull, type SyncFullEvent } from "../../lib/store";
@@ -361,7 +360,7 @@ describe("ws integration (memory repo, ephemeral port)", () => {
     gm.close();
   });
 
-  // 15s: the critique buffer alone adds ~5s behind the ~2.5s build pipeline.
+  // 15s: headroom for the ~2.5s build pipeline plus the 1.5s layout debouncer.
   it("(j) build flow end-to-end: submit → item:pending → item:ready → layout:updated", { timeout: 15_000 }, async () => {
     // Theme is auto-set at creation time via the hub (the GM console does this
     // right after creating a game) — moves LOBBY → GREETINGS so players may
@@ -387,12 +386,11 @@ describe("ws integration (memory repo, ephemeral port)", () => {
 
     // Register listeners BEFORE the submit so nothing is missed. layout:updated
     // needs extra headroom: the debouncer trails by 1.5s after item:ready.
-    // layout:critique trails the layout commit by the 5s critique buffer (mock
-    // mode short-circuits the vision call, so no render/AI latency on top).
+    // NOTE: layout:critique events are no longer emitted — the vision critique
+    // scheduler is unwired (the deterministic solver owns packing quality).
     const pendingPromise = waitFor<Record<string, unknown>>(gm, "item:pending");
     const readyPromise = waitFor<Record<string, unknown>>(gm, "item:ready", 8_000);
     const layoutPromise = waitFor<Record<string, unknown>>(gm, "layout:updated", 5_000);
-    const critiquePromise = waitFor<Record<string, unknown>>(gm, "layout:critique", 8_000);
 
     const approve = await emitAck<{ ok: boolean; phase?: string }>(gm, "gm:approveGreetings", {});
     expect(approve.ok).toBe(true);
@@ -419,20 +417,6 @@ describe("ws integration (memory repo, ephemeral port)", () => {
       expect(layout.version).toBeGreaterThan(0);
       expect(Array.isArray(layout.placements)).toBe(true);
       expect((layout.placements as unknown[]).length).toBeGreaterThan(0);
-
-      // The vision critique trails the committed layout by the 5s buffer.
-      // Mock mode short-circuits: the fixed passing verdict, hub-stamped, and
-      // addressed to this team — GM-room only (the player socket must NOT get
-      // a second layout:updated re-emit, since the verdict passes).
-      const critique = await critiquePromise;
-      expect(critique).toMatchObject({
-        gameId,
-        teamId,
-        score: MOCK_CRITIQUE_VERDICT.score,
-        issues: MOCK_CRITIQUE_VERDICT.issues,
-        focalOk: MOCK_CRITIQUE_VERDICT.focalOk,
-      });
-      expect(critique.seq).toBeGreaterThan(0);
     } finally {
       // The real handler wrote a real file under the Next public dir — remove
       // it so the test leaves no artifacts behind (force:true tolerates a

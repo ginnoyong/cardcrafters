@@ -6,17 +6,22 @@
  * width and is CENTER-PINNED, with a hero-yield ladder down to 0.25 and a
  * [HERO_MIN_WIDTH, HERO_MAX_WIDTH] = [0.25, 0.75] hard clamp (the
  * floor-rescue lever may raise the ceiling toward MAX_ITEM_SIZE_PCT = 0.85
- * for the solo/low-n heroes that must pay the 0.80 coverage budget alone).
+ * for the solo/low-n heroes that must pay the 0.85 coverage budget alone).
  * Supports are pinned to the [0.5, 0.6]×hero ratio band (min 0.5×hero
- * ALWAYS — at every n), and the coverage target is 0.80 of the usable
- * canvas (hard floor 0.70, best-effort): the escalation ladder runs
- * ratio-adjust → coverage levers with lever-revert on unplaced items →
- * best-all-placed fallback, and only drops an item if NOTHING can be
- * placed (never observed on the probed fixtures — 137 configs, 0 drops,
- * 0 violations). The coverage pins below therefore sit at measured
- * min − 0.03 with the geometric feasibility limits (packing + overlap
- * caps + the ratio band) documented per n — several n settle BELOW the
- * 0.70 policy floor by geometry, which the ladder cannot fix.
+ * ALWAYS — at every n), and the coverage target is 0.85 of the usable
+ * canvas (best-effort 0.75 floor): the escalation ladder runs
+ * ratio-adjust → coverage levers (hero regrowth → budget raise → ceiling
+ * rescue) with lever-revert on unplaced items → best-all-placed fallback.
+ * The overlap caps (0.10 support–support / 0.25 hero tuck) are HARD — the
+ * build-phase overlap-cap escalation lever is RETIRED (v6: overlap
+ * minimization outranks raw coverage), so BUILD layouts always respect the
+ * base caps (the final montage pass still threads its own 1.8 factor via
+ * SolveOptions — see montage.test.ts), and configs that cannot reach 0.85
+ * settle best-effort ("coverage target missed" warning path), never
+ * dropping an item if nothing can be placed (never observed on the probed
+ * fixtures). The coverage pins below sit at measured min − 0.03 with the
+ * geometric feasibility limits (packing + the hard overlap caps + the ratio
+ * band) documented per n.
  *
  * EVERY numeric pin below is a MEASURED value (probe batch over seeds 1..5,
  * default 5:7 card + top greeting zone), asserted with −0.02/−0.03
@@ -178,29 +183,15 @@ function areaCoverage(placements: Placement[], items: LayoutItem[]): number {
 }
 
 /**
- * The solver's overlap-cap ESCALATION factor, parsed from its own warnings
- * ("coverage escalation: overlap caps relaxed ×N.NN" — see solveLayout's
- * coverage ladder). When the ladder escalated the caps, the returned layout
- * is only feasible UNDER THE ESCALATED caps — checking it against the base
- * caps would report spurious overlap_cap violations. Returns 1 when the
- * solver did not escalate (the base caps apply).
- */
-function overlapEscalationFactor(res: ReturnType<typeof solveLayout>): number {
-  const w = res.warnings.find((x) => x.includes("overlap caps relaxed ×"));
-  if (!w) return 1;
-  const m = w.match(/overlap caps relaxed ×([0-9]+(?:\.[0-9]+)?)/);
-  return m ? parseFloat(m[1]!) : 1;
-}
-
-/**
  * Hero-aware ConstraintCtx for checkLayout (hero-montage policy): pairs
  * involving the HERO measure against the HERO_TUCK_CAP (0.25) tuck tolerance;
- * support–support pairs keep overlapCapFor(n) (0.10). BOTH caps are inflated
- * by the solver's overlap-escalation factor (parsed from its warnings — see
- * overlapEscalationFactor). `hints` (optional) is forwarded to heroItemIdOf
- * so focal-hint designation is honored; `checkTextOverlap: false` is
- * forwarded for the n > 20 layouts where the solver itself drops the text
- * rule for items beyond the first 20.
+ * support–support pairs keep overlapCapFor(n) (0.10). No overlapCapFactor:
+ * the build-phase overlap-cap escalation lever is RETIRED (v6) — BUILD
+ * layouts always respect the BASE caps (the final montage pass threads its
+ * own 1.8 factor via SolveOptions — see montage.test.ts). `hints` (optional)
+ * is forwarded to heroItemIdOf so focal-hint designation is honored;
+ * `checkTextOverlap: false` is forwarded for the n > 20 layouts where the
+ * solver itself drops the text rule for items beyond the first 20.
  */
 function heroAwareCheck(
   res: ReturnType<typeof solveLayout>,
@@ -216,7 +207,6 @@ function heroAwareCheck(
     ...(minSizePct !== undefined ? { minSizePct } : {}),
     ...(opts.checkTextOverlap !== undefined ? { checkTextOverlap: opts.checkTextOverlap } : {}),
     overlapCap: overlapCapFor(its.length),
-    overlapCapFactor: overlapEscalationFactor(res),
     heroItemId: heroItemIdOf(its, hints ?? null) ?? undefined,
     heroOverlapCap: HERO_TUCK_CAP,
   });
@@ -225,16 +215,16 @@ function heroAwareCheck(
 /**
  * Max pairwise TRUE (SAT) overlap ratio, split by pair kind (hero-montage):
  * `heroPairs` = pairs involving the hero (cap HERO_TUCK_CAP = 0.25),
- * `otherPairs` = support–support pairs (cap 0.10). `factor` is the solver's
- * overlap-escalation factor (parsed from its warnings) — assert the caps
- * ×factor, NOT the base caps (an escalated solve only respects the
- * inflated caps).
+ * `otherPairs` = support–support pairs (cap 0.10). The caps are asserted at
+ * their BASE values — the build-phase overlap-cap escalation lever is
+ * RETIRED (v6), so BUILD layouts always respect the base caps (no escalation
+ * factor exists any more).
  */
 function maxSatByPairKind(
   res: ReturnType<typeof solveLayout>,
   its: LayoutItem[],
   hints?: LayoutComposition | null,
-): { heroPairs: number; otherPairs: number; factor: number } {
+): { heroPairs: number; otherPairs: number } {
   const byId = new Map(its.map((i) => [i.id, i] as const));
   const heroId = heroItemIdOf(its, hints ?? null);
   let heroPairs = 0;
@@ -254,7 +244,7 @@ function maxSatByPairKind(
       }
     }
   }
-  return { heroPairs, otherPairs, factor: overlapEscalationFactor(res) };
+  return { heroPairs, otherPairs };
 }
 
 describe("solveLayout — single item", () => {
@@ -405,30 +395,31 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
   // MEASURED emergent hero width windows (seeds 1..5, default 5:7 card +
   // greeting zone). The hero targets 0.60 (center-pinned) with a yield
   // ladder down to 0.25, clamped to [0.25, 0.75]; supports ride the
-  // [0.5, 0.6]×hero band at every n. n = 2 (squares) rides the 0.75
-  // HERO_MAX_WIDTH ceiling (one support cannot spend the 0.80 budget), and
-  // the window declines toward the 0.25 floor as the supports multiply.
+  // [0.5, 0.6]×hero band at every n. With the overlap-cap escalation
+  // retired (v6) the n = 2 (squares) hero settles just UNDER the 0.75
+  // HERO_MAX_WIDTH ceiling (0.708–0.720 — the hard caps cap the packing),
+  // and the window declines toward the 0.25 floor as the supports multiply.
   // Every window is the measured min−0.02..max+0.02 per fixture.
   const HERO_WINDOWS: ReadonlyArray<readonly [boolean, number, number, number]> = [
     // [squares?, n, lo, hi]
     //            measured (squares)   measured (mixed)
-    [true, 2, 0.692, 0.769], // 0.712–0.749
-    [true, 4, 0.498, 0.582], // 0.518–0.562
-    [true, 6, 0.493, 0.568], // 0.513–0.548
-    [true, 8, 0.397, 0.523], // 0.417–0.503
-    [true, 10, 0.324, 0.453], // 0.344–0.433
-    [true, 12, 0.330, 0.382], // 0.350–0.362
-    [true, 16, 0.282, 0.352], // 0.302–0.332
-    [true, 20, 0.248, 0.315], // 0.268–0.295
+    [true, 2, 0.688, 0.740], // 0.708–0.720 (just under the 0.75 ceiling — caps are hard)
+    [true, 4, 0.490, 0.586], // 0.510–0.566
+    [true, 6, 0.478, 0.518], // 0.498–0.498
+    [true, 8, 0.395, 0.509], // 0.415–0.489
+    [true, 10, 0.338, 0.428], // 0.358–0.408
+    [true, 12, 0.292, 0.388], // 0.312–0.368
+    [true, 16, 0.243, 0.352], // 0.263–0.332
+    [true, 20, 0.230, 0.327], // 0.250–0.307
     [true, 25, 0.230, 0.281], // 0.250–0.261 (at the 0.25 floor)
-    [false, 2, 0.556, 0.695], // 0.576–0.675
-    [false, 4, 0.487, 0.592], // 0.507–0.572
-    [false, 6, 0.469, 0.529], // 0.489–0.509
-    [false, 8, 0.366, 0.506], // 0.386–0.486
-    [false, 10, 0.329, 0.433], // 0.349–0.413
-    [false, 12, 0.300, 0.353], // 0.320–0.333
-    [false, 16, 0.265, 0.316], // 0.285–0.296
-    [false, 20, 0.230, 0.309], // 0.250–0.289 (at the 0.25 floor)
+    [false, 2, 0.551, 0.629], // 0.571–0.609
+    [false, 4, 0.504, 0.595], // 0.524–0.575
+    [false, 6, 0.455, 0.529], // 0.475–0.509
+    [false, 8, 0.357, 0.470], // 0.377–0.450
+    [false, 10, 0.311, 0.407], // 0.331–0.387
+    [false, 12, 0.286, 0.376], // 0.306–0.356
+    [false, 16, 0.236, 0.326], // 0.256–0.306
+    [false, 20, 0.230, 0.270], // 0.250–0.250 (at the 0.25 floor)
     [false, 25, 0.230, 0.270], // 0.250–0.250 (at the 0.25 floor)
   ];
 
@@ -451,19 +442,21 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
     }
   }, 600_000);
 
-  it("n = 2 (squares): hero at the 0.75 ceiling with NO hero-relax (the 0.60 target is over-satisfied); the yield ladder only fires where the budget forces it", () => {
-    // MEASURED (squares, seeds 1..5): hero 0.712–0.749 — ABOVE the 0.60
-    // target, so the yield ladder never engages at squares n = 2 (the
-    // budget cannot be spent by one 0.55-ratio support without the
-    // oversized hero). The window itself is asserted by the HERO_WINDOWS
-    // test; here we pin the no-relax state at the ceiling fixture.
+  it("n = 2 (squares): hero near the 0.75 ceiling with NO hero-relax (the 0.60 target is over-satisfied); the yield ladder never fires here", () => {
+    // MEASURED (squares, seeds 1..5): hero 0.708–0.720 — ABOVE the 0.60
+    // target and just UNDER the 0.75 ceiling (the retired overlap-cap
+    // escalation used to push it onto the ceiling; with HARD caps the
+    // packing settles slightly lower). The yield ladder never engages at
+    // squares n = 2 (the budget cannot be spent by one 0.55-ratio support
+    // without the oversized hero). The window itself is asserted by the
+    // HERO_WINDOWS test; here we pin the no-relax state near the ceiling.
     for (const seed of [1, 2, 3, 4, 5]) {
       const its = squareItems(2);
       const res = solve(its, seed);
       expect(res.placements).toHaveLength(2);
       const heroId = heroItemIdOf(its, null)!;
       const heroW = sqW(res.placements.find((p) => p.itemId === heroId)!);
-      expect(heroW, `seed ${seed} hero ≥ 0.69 (window)`).toBeGreaterThanOrEqual(0.692);
+      expect(heroW, `seed ${seed} hero ≥ 0.688 (window)`).toBeGreaterThanOrEqual(0.688);
       expect(
         isHeroRelaxed(res),
         `seed ${seed} no hero-relax at the ceiling`,
@@ -473,10 +466,9 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
 
   it("support RATIO BAND: supports within [0.5 − 1e-6, 0.62]×hero at EVERY n (squares + mixed, seeds 1..5) — the 0.5×hero floor holds always", () => {
     // The hard band [0.5, 0.6]×hero is enforced in candidates / local search
-    // / rebalance. MEASURED set-wide (seeds 1..5, all n): squares ratio
-    // 0.503–0.600, mixed ratio 0.500–0.600. Probe batch over every
-    // (fixture, n, seed): min ratio ≥ 0.5 − 5e-17 — worst case mx n=25 =
-    // 0.49999999999999994 passes the 1e-6 tolerance.
+    // / rebalance. MEASURED set-wide (seeds 1..5, all n): min 0.500 (mx
+    // n=25 seed 1 — floats at 0.5−5e-17, inside the 1e-6 tolerance), max
+    // 0.600 (sq n=4 seed 2).
     for (const n of [2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 25]) {
       for (const squareFix of [true, false]) {
         for (let seed = 1; seed <= 5; seed++) {
@@ -493,11 +485,11 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
           expect(
             Math.min(...ratios),
             `${squareFix ? "sq" : "mx"} n=${n} seed ${seed} min support/hero`,
-          ).toBeGreaterThanOrEqual(0.5 - 1e-6); // measured set-min 0.500 (mixed) / 0.503 (squares); probe: min ≥ 0.5 − 5e-17 at every (fixture, n, seed)
+          ).toBeGreaterThanOrEqual(0.5 - 1e-6); // measured set-min 0.500 (mx n=25 seed 1; float error ≤ 5e-17)
           expect(
             Math.max(...ratios),
             `${squareFix ? "sq" : "mx"} n=${n} seed ${seed} max support/hero`,
-          ).toBeLessThanOrEqual(0.62); // measured set-max 0.600
+          ).toBeLessThanOrEqual(0.62); // measured set-max 0.600 (sq n=4 seed 2)
         }
       }
     }
@@ -505,9 +497,11 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
 
   it("n=4 floors: min support/hero ≥ 0.48 with the text zone, ≥ 0.48 without it; top-corner anchors paint the corners", () => {
     // MEASURED (equal squares, seeds 1..5): with the greeting zone the hero
-    // lands in the 0.518–0.535 window and supports ride the [0.5, 0.6]×hero
+    // lands in the 0.510–0.566 window and supports ride the [0.5, 0.6]×hero
     // band; the 0.5×hero floor holds ALWAYS. Corner-anchor top-corner region
-    // coverage 0.729–0.833 with the zone (pinned ≥ 0.699).
+    // coverage 0.453–0.833 with the zone (best-effort — the doubled spacing
+    // weight 0.50 lets seed 5's anchor spread pull one corner slot sparse;
+    // pinned ≥ 0.42 = measured min − 0.03).
     for (let seed = 1; seed <= 5; seed++) {
       const its = squareItems(4);
       const heroId = heroItemIdOf(its, null)!;
@@ -522,11 +516,13 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
       expect(Math.min(...ratios), `seed ${seed} TZ min support/hero`).toBeGreaterThanOrEqual(0.48);
       expect(Math.max(...ratios), `seed ${seed} TZ max support/hero`).toBeLessThanOrEqual(0.62);
       expect(heroAwareCheck(res, its).ok, `seed ${seed} TZ checkLayout`).toBe(true);
-      // Corner anchors keep the top-corner slots painted (measured 0.729–0.833).
+      // Corner anchors keep the top-corner slots painted (measured
+      // 0.453–0.833 — best-effort pin at measured min − 0.03; the v6
+      // spacing-weight rebalance spreads the anchors further out).
       expect(
         cornerRegionCoverage(res, its),
         `seed ${seed} top-corner coverage`,
-      ).toBeGreaterThanOrEqual(0.699);
+      ).toBeGreaterThanOrEqual(0.42);
 
       // Without the text zone: the hero grows (larger usable budget), the
       // band holds.
@@ -544,10 +540,6 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
           k: K,
           textZone: null,
           overlapCap: overlapCapFor(its.length),
-          // Escalation-aware: an escalated solve only respects the caps
-          // ×factor (parsed from the solver's own warnings — see
-          // overlapEscalationFactor).
-          overlapCapFactor: overlapEscalationFactor(resNoTz),
           heroItemId: heroId,
           heroOverlapCap: HERO_TUCK_CAP,
         }).ok,
@@ -556,34 +548,37 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
     }
   }, 300_000);
 
-  it("coverage: squares n=3 area-cov ≥ 0.77; union usable-cov ≥ measured−0.03 (the 0.80 target with geometric caps below the 0.70 floor documented per n)", () => {
-    // The solver drives the placed usable-union coverage toward the 0.80
-    // COVERAGE TARGET (hard floor 0.70, best-effort). MEASURED (seeds 1..5):
-    // packing + the overlap caps + the [0.5, 0.6]×hero ratio band set a
-    // per-n GEOMETRIC CAP on achievable coverage — several n settle BELOW
-    // the 0.70 policy floor (documented below), which the ladder cannot
-    // fix: the lever-revert + best-all-placed fallback keeps every item
-    // placed at the best feasible coverage. Pinned at measured min − 0.03.
+  it("coverage: squares n=3 area-cov ≥ 0.90; union usable-cov ≥ measured−0.03 (the 0.85 target with the best-effort 0.75 floor unreachable at most n — documented per n)", () => {
+    // The solver drives the placed usable-union coverage toward the 0.85
+    // COVERAGE TARGET (best-effort floor 0.75). MEASURED (seeds 1..5):
+    // packing + the HARD overlap caps (0.10 / 0.25 — the overlap-cap
+    // escalation lever is retired) + the [0.5, 0.6]×hero ratio band set a
+    // per-n GEOMETRIC CAP on achievable coverage — every probed n settles
+    // BELOW the 0.75 policy floor (documented below), which the ladder
+    // cannot fix: the lever-revert + best-all-placed fallback keeps every
+    // item placed at the best feasible coverage, and the shortfall is
+    // reported best-effort via the "coverage target missed" warning path.
+    // Pinned at measured min − 0.03.
     const COVERAGE_PINS: ReadonlyArray<readonly [boolean, number, number]> = [
       // [squares?, n, measured min − 0.03]
-      [true, 2, 0.67], // measured 0.703–0.738
-      [true, 4, 0.47], // measured 0.497–0.559 (geometric cap: 0.75 hero + 3 band supports cannot pack tighter)
-      [true, 6, 0.63], // measured 0.659–0.744
-      [true, 8, 0.55], // measured 0.580–0.819 (geometric cap at low seeds)
-      [true, 10, 0.46], // measured 0.486–0.757 (geometric cap below the 0.70 floor)
-      [true, 12, 0.55], // measured 0.581–0.611 (geometric cap below the 0.70 floor)
-      [true, 16, 0.52], // measured 0.552–0.675
-      [true, 20, 0.52], // measured 0.554–0.681
-      [true, 25, 0.57], // measured 0.595–0.614
-      [false, 2, 0.54], // measured 0.573–0.747 (geometric cap: budget can't be spent by one support)
-      [false, 4, 0.54], // measured 0.569–0.714
-      [false, 6, 0.62], // measured 0.648–0.685 (geometric cap below the 0.70 floor)
-      [false, 8, 0.56], // measured 0.594–0.751
-      [false, 10, 0.55], // measured 0.578–0.711 (geometric cap below the 0.70 floor)
-      [false, 12, 0.50], // measured 0.533–0.609 (geometric cap below the 0.70 floor)
-      [false, 16, 0.50], // measured 0.526–0.596 (geometric cap below the 0.70 floor)
-      [false, 20, 0.51], // measured 0.538–0.669 (geometric cap below the 0.70 floor)
-      [false, 25, 0.48], // measured 0.506–0.648 (geometric cap below the 0.70 floor)
+      [true, 2, 0.65], // measured 0.688–0.703 (geometric cap: one support cannot spend the budget; caps are hard)
+      [true, 4, 0.49], // measured 0.528–0.667 (geometric cap: 0.75 hero + 3 band supports cannot pack tighter)
+      [true, 6, 0.62], // measured 0.658–0.688
+      [true, 8, 0.58], // measured 0.616–0.807
+      [true, 10, 0.50], // measured 0.533–0.709 (geometric cap below the 0.75 floor)
+      [true, 12, 0.47], // measured 0.500–0.656 (geometric cap below the 0.75 floor)
+      [true, 16, 0.43], // measured 0.461–0.684 (geometric cap below the 0.75 floor)
+      [true, 20, 0.46], // measured 0.497–0.676 (geometric cap below the 0.75 floor)
+      [true, 25, 0.46], // measured 0.498–0.678 (geometric cap below the 0.75 floor)
+      [false, 2, 0.55], // measured 0.581–0.638 (geometric cap: budget can't be spent by one support)
+      [false, 4, 0.65], // measured 0.684–0.734
+      [false, 6, 0.64], // measured 0.672–0.720 (geometric cap below the 0.75 floor)
+      [false, 8, 0.55], // measured 0.586–0.777
+      [false, 10, 0.48], // measured 0.514–0.694 (geometric cap below the 0.75 floor)
+      [false, 12, 0.49], // measured 0.521–0.679 (geometric cap below the 0.75 floor)
+      [false, 16, 0.44], // measured 0.477–0.645 (geometric cap below the 0.75 floor)
+      [false, 20, 0.50], // measured 0.534–0.570 (geometric cap below the 0.75 floor)
+      [false, 25, 0.46], // measured 0.490–0.535 (geometric cap below the 0.75 floor)
     ];
     for (const [squareFix, n, pin] of COVERAGE_PINS) {
       for (let seed = 1; seed <= 5; seed++) {
@@ -596,8 +591,8 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
         ).toBeGreaterThanOrEqual(pin);
       }
     }
-    // Area coverage at n=3 (squares): the sums sit AT the 0.80 budget target
-    // (measured 0.800–0.806, overlap-free).
+    // Area coverage at n=3 (squares): the ladder's budget raise drives the
+    // sums well PAST the 0.85 target (measured 0.931–0.934, overlap-free).
     for (let seed = 1; seed <= 5; seed++) {
       const sq3 = squareItems(3);
       const res3 = solve(sq3, seed);
@@ -605,7 +600,7 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
       expect(
         areaCoverage(res3.placements, sq3),
         `seed ${seed} squares n=3 area coverage`,
-      ).toBeGreaterThanOrEqual(0.77);
+      ).toBeGreaterThanOrEqual(0.90);
     }
   }, 600_000);
 
@@ -637,11 +632,8 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
           textZone: TEXT_ZONE,
           minSizePct: res.relaxedMinSize,
           overlapCap: overlapCapFor(its.length),
-          // Escalation-aware (see overlapEscalationFactor): an escalated
-          // solve only respects the caps ×factor — without it the diagnostic
-          // reports spurious overlap_cap violations instead of the measured
-          // text_overlap-only set.
-          overlapCapFactor: overlapEscalationFactor(res),
+          // No overlapCapFactor: the build-phase overlap-cap escalation is
+          // retired (v6) — BUILD layouts respect the base caps.
           heroItemId: heroId,
           heroOverlapCap: HERO_TUCK_CAP,
         });
@@ -683,14 +675,9 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
 
   it("centered hero: x,y within 0.34–0.64 (±0.03 slack) for n ≤ 3, both fixtures (hero seeded at the exact card center)", () => {
     // MEASURED hero centroid fractions (squares + mixed, seeds 1..5, n ≤ 3):
-    // x 0.388–0.529, y 0.480–0.596. The hero's ONLY seed is the exact card
+    // x 0.432–0.557, y 0.489–0.533. The hero's ONLY seed is the exact card
     // center; bounds clamping may nudge it for wide heroes but keeps it in
-    // the middle band. Window widened to [0.34, 0.64] on BOTH axes: the MIXED
-    // fixture's wide hero (imgW up to 320 of 256-basis) is clamp-pulled off
-    // the exact center at mx n=2 seed 5 (measured x 0.388, y 0.596 — the y
-    // nudge was previously masked by the x assertion failing first) — still
-    // the middle band, so the window is widened rather than the hero
-    // un-clamped.
+    // the middle band [0.34, 0.64] on BOTH axes.
     for (const squareFix of [true, false]) {
       for (const n of [2, 3]) {
         for (let seed = 1; seed <= 5; seed++) {
@@ -701,9 +688,9 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
           const hp = res.placements.find((p) => p.itemId === heroId)!;
           const fx = hp.x / card.w;
           const fy = hp.y / card.h;
-          expect(fx, `${squareFix ? "sq" : "mx"} n=${n} seed ${seed} hero x`).toBeGreaterThanOrEqual(0.34); // widened for the wide mixed-fixture hero clamp-pull (measured 0.388; lo 0.34 = clamp-pull margin)
+          expect(fx, `${squareFix ? "sq" : "mx"} n=${n} seed ${seed} hero x`).toBeGreaterThanOrEqual(0.34); // measured 0.432–0.557 (the wide mixed-fixture hero keeps the middle band)
           expect(fx, `${squareFix ? "sq" : "mx"} n=${n} seed ${seed} hero x`).toBeLessThanOrEqual(0.64);
-          expect(fy, `${squareFix ? "sq" : "mx"} n=${n} seed ${seed} hero y`).toBeGreaterThanOrEqual(0.34); // widened for the wide mixed-fixture hero clamp-pull (measured 0.596; lo 0.34 = clamp-pull margin)
+          expect(fy, `${squareFix ? "sq" : "mx"} n=${n} seed ${seed} hero y`).toBeGreaterThanOrEqual(0.34); // measured 0.489–0.533
           expect(fy, `${squareFix ? "sq" : "mx"} n=${n} seed ${seed} hero y`).toBeLessThanOrEqual(0.64);
         }
       }
@@ -712,18 +699,19 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
 
   it("average display width curve tracks the measured means 1→2→3→5→10→25 (tolerance 0.03)", () => {
     // MEASURED mean-over-PLACED display widths (mixed fixture, seeds 1..3):
-    // 0.745 → 0.446 → 0.389 → 0.329 → 0.242 → 0.142 (the emergent hero and
-    // the [0.5, 0.6]×hero ratio band pin the curve; n=3 dropped 0.449 → 0.389
-    // because the working overlap-cap revert lowers n=3 packing). Asserted BOTH against
+    // 0.754 → 0.462 → 0.419 → 0.328 → 0.246 → 0.152 (the emergent hero and
+    // the [0.5, 0.6]×hero ratio band pin the curve; n=3 drops 0.462 → 0.419
+    // because the working overlap-cap revert lowers n=3 packing; the v6
+    // spacing-weight rebalance nudged the means up). Asserted BOTH against
     // the measured means (±0.03) and non-increasing stepwise (0.03
-    // tolerance — the measured 2→3 step rises 0.003, inside it).
+    // tolerance).
     const MEASURED: ReadonlyArray<readonly [number, number]> = [
-      [1, 0.745],
-      [2, 0.446],
-      [3, 0.389],
-      [5, 0.329],
-      [10, 0.242],
-      [25, 0.142],
+      [1, 0.754],
+      [2, 0.462],
+      [3, 0.419],
+      [5, 0.328],
+      [10, 0.246],
+      [25, 0.152],
     ];
     const avgs: number[] = [];
     for (const [n, measured] of MEASURED) {
@@ -774,13 +762,13 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
         const res = solve(its, seed);
         expect(res.placements).toHaveLength(n);
         const sat = maxSatByPairKind(res, its);
-        // Escalation-aware: an escalated solve only respects the caps ×factor
-        // (the factor is parsed from the solver's own warnings).
+        // Hard caps (the escalation factor is retired — BUILD runs respect
+        // the BASE caps at every n).
         expect(sat.heroPairs, `n=${n} seed ${seed} hero–support SAT`).toBeLessThanOrEqual(
-          0.25 * sat.factor + 1e-6,
+          0.25 + 1e-6,
         );
         expect(sat.otherPairs, `n=${n} seed ${seed} support–support SAT`).toBeLessThanOrEqual(
-          0.10 * sat.factor + 1e-6,
+          0.10 + 1e-6,
         );
       }
     }
@@ -808,10 +796,10 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
     // 0.80 coverage budget alone). Step 2: B arrives with a role:'focal'
     // hint → B takes the hero size and A resizes as a support (the solver
     // re-ranks hero-first on EVERY solve).
-    // MEASURED (seeds 1..5, equal 256×256 squares): A_solo 0.816–0.850
-    // (the floor-rescue ceiling raise is bounded by the 0.80 coverage
-    // budget, not always at the 0.85 MAX — pin relaxed 0.83 → 0.81),
-    // B_hero 0.729–0.764, A_after 0.427–0.447 (ratio to B inside the
+    // MEASURED (seeds 1..5, equal 256×256 squares): A_solo 0.850–0.850
+    // (the floor-rescue ceiling raise reaches MAX_ITEM_SIZE_PCT = 0.85 —
+    // the solo hero pays the 0.85 coverage budget alone),
+    // B_hero 0.708–0.721, A_after 0.421–0.425 (ratio to B inside the
     // [0.5, 0.6]×hero band), B > A always.
     for (const seed of [1, 2, 3, 4, 5]) {
       const a = mkItem("a", { orderIndex: 0 });
@@ -822,7 +810,7 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
         rng: mulberry32(seed),
       });
       expect(r1.placements).toHaveLength(1);
-      expect(sqW(r1.placements[0]!), `seed ${seed} A solo`).toBeGreaterThanOrEqual(0.81); // measured 0.816–0.850 (the 0.83 pin was tighter than the measured range)
+      expect(sqW(r1.placements[0]!), `seed ${seed} A solo`).toBeGreaterThanOrEqual(0.81); // measured 0.850–0.850 (rides the raised 0.85 ceiling exactly)
 
       const b = mkItem("b", { orderIndex: 1 });
       const hints = layoutCompositionSchema.parse({
@@ -843,13 +831,13 @@ describe("solveLayout — hero hierarchy (measured pins)", () => {
       expect(r2.placements).toHaveLength(2);
       const wB = sqW(r2.placements.find((p) => p.itemId === "b")!);
       const wA2 = sqW(r2.placements.find((p) => p.itemId === "a")!);
-      // B lands on the n=2 hero window (measured 0.729–0.764).
-      expect(wB, `seed ${seed} B hero`).toBeGreaterThanOrEqual(0.709);
-      expect(wB, `seed ${seed} B hero`).toBeLessThanOrEqual(0.784);
+      // B lands on the n=2 hero window (measured 0.708–0.721).
+      expect(wB, `seed ${seed} B hero`).toBeGreaterThanOrEqual(0.688);
+      expect(wB, `seed ${seed} B hero`).toBeLessThanOrEqual(0.741);
       // A shrinks off the solo curve onto the support band (measured
-      // 0.427–0.447; ratio to B stays inside [0.5, 0.6]×hero).
-      expect(wA2, `seed ${seed} A shrunk`).toBeGreaterThanOrEqual(0.407);
-      expect(wA2, `seed ${seed} A shrunk`).toBeLessThanOrEqual(0.467);
+      // 0.421–0.425; ratio to B stays inside [0.5, 0.6]×hero).
+      expect(wA2, `seed ${seed} A shrunk`).toBeGreaterThanOrEqual(0.401);
+      expect(wA2, `seed ${seed} A shrunk`).toBeLessThanOrEqual(0.445);
       expect(wA2, `seed ${seed} A support floor`).toBeGreaterThanOrEqual(0.5 * wB - 0.01);
       expect(wB).toBeGreaterThan(wA2);
       // B renders topmost.
@@ -918,9 +906,11 @@ describe("solveLayout — group-aware solver (semantic grouping)", () => {
   const halfOf = (p: Placement, item: LayoutItem): number => (item.imgW * p.scale * K) / 2;
 
   it("cohesion: 2 same-group items sit near-touching (d within the measured halfSum band), constraints pass", () => {
-    // MEASURED (seeds 1..5, equal 256×256 squares): d/halfSum 0.73–0.85 —
-    // the cohesion term (W=1.0) pulls the support up against the
-    // (center-pinned) hero; pinned at [0.71, 0.90].
+    // MEASURED (seeds 1..5, equal 256×256 squares): d/halfSum 0.882–0.918 —
+    // the v6 spacing-weight rebalance (spacing 0.50) pushes the equilibrium
+    // out of the old near-touching band; the cohesion term still keeps the
+    // same-group pair tighter than the separation fixture and the SAT tuck
+    // cap (0.25) still holds. Pinned at [0.86, 0.94] (min−0.02/max+0.02).
     const its = [mkItem("a"), mkItem("b", { orderIndex: 1 })];
     const hints = hintsFor([{ ids: ["a", "b"], cx: card.w / 2, cy: card.h * 0.55, spread: 140 }]);
     for (const seed of [1, 2, 3, 4, 5]) {
@@ -938,13 +928,14 @@ describe("solveLayout — group-aware solver (semantic grouping)", () => {
       const d = dist(pa, pb);
       // MEASURED (seeds 1..5): d/halfSum 0.73–0.85 — the pair equilibrates
       // just inside near-touching; pinned at [0.71, 0.90] (min−0.02/max+0.02).
-      expect(d / halfSum, `seed ${seed} d/halfSum=${(d / halfSum).toFixed(2)}`).toBeGreaterThanOrEqual(0.71);
-      expect(d / halfSum, `seed ${seed} d/halfSum=${(d / halfSum).toFixed(2)}`).toBeLessThanOrEqual(0.90);
+      expect(d / halfSum, `seed ${seed} d/halfSum=${(d / halfSum).toFixed(2)}`).toBeGreaterThanOrEqual(0.86);
+      expect(d / halfSum, `seed ${seed} d/halfSum=${(d / halfSum).toFixed(2)}`).toBeLessThanOrEqual(0.94);
       // The only pair here INVOLVES THE HERO ("a" is the hero — first
-      // sticker), so it rides the 0.25 tuck cap (× the escalation factor).
+      // sticker), so it rides the 0.25 tuck cap (hard — the escalation
+      // factor is retired).
       const sat = maxSatByPairKind(res, its);
-      expect(sat.heroPairs, `seed ${seed} hero–support SAT`).toBeLessThanOrEqual(0.25 * sat.factor + 1e-6);
-      expect(sat.otherPairs, `seed ${seed} support–support SAT`).toBeLessThanOrEqual(0.10 * sat.factor + 1e-6);
+      expect(sat.heroPairs, `seed ${seed} hero–support SAT`).toBeLessThanOrEqual(0.25 + 1e-6);
+      expect(sat.otherPairs, `seed ${seed} support–support SAT`).toBeLessThanOrEqual(0.10 + 1e-6);
       expect(heroAwareCheck(res, its, hints).ok, `seed ${seed}`).toBe(true);
     }
   }, 120_000);
@@ -952,10 +943,10 @@ describe("solveLayout — group-aware solver (semantic grouping)", () => {
   it("separation: 2 different-group items keep breathing room (d ≥ 0.70×(halfA+halfB))", () => {
     // USER DECISION (hero pinned center): "a" is the hero (first sticker) and
     // CANNOT move to its group center anymore — the hero sits centered and
-    // the support orbits it. MEASURED (seeds 1..5): d/halfSum 0.83–0.92 —
-    // the hero's dominance keeps the pair close, but the SAT caps still hold
-    // and the separation term keeps true overlap inside the 0.25 tuck
-    // tolerance. Pinned at [0.81, 0.99] (min−0.02/max+0.02).
+    // the support orbits it. MEASURED (seeds 1..5): d/halfSum 0.899–0.953 —
+    // the doubled spacing weight (v6) keeps the pair further apart, but the
+    // SAT caps still hold and the separation term keeps true overlap inside
+    // the 0.25 tuck tolerance. Pinned at [0.87, 0.97] (min−0.03/max+0.02).
     const its = [mkItem("a"), mkItem("b", { orderIndex: 1 })];
     const hints = hintsFor([
       { ids: ["a"], cx: card.w * 0.3, cy: card.h * 0.55, spread: 90 },
@@ -974,12 +965,13 @@ describe("solveLayout — group-aware solver (semantic grouping)", () => {
       const pb = res.placements.find((p) => p.itemId === "b")!;
       const halfSum = halfOf(pa, its[0]!) + halfOf(pb, its[1]!);
       const d = dist(pa, pb);
-      expect(d / halfSum, `seed ${seed} d/halfSum=${(d / halfSum).toFixed(2)}`).toBeGreaterThanOrEqual(0.81);
-      expect(d / halfSum, `seed ${seed} d/halfSum=${(d / halfSum).toFixed(2)}`).toBeLessThanOrEqual(0.99);
-      // Escalation-aware: the caps scale by the solver's escalation factor.
+      expect(d / halfSum, `seed ${seed} d/halfSum=${(d / halfSum).toFixed(2)}`).toBeGreaterThanOrEqual(0.87);
+      expect(d / halfSum, `seed ${seed} d/halfSum=${(d / halfSum).toFixed(2)}`).toBeLessThanOrEqual(0.97);
+      // Hard caps: the escalation factor is retired (BUILD runs respect the
+      // BASE caps).
       const sat = maxSatByPairKind(res, its);
-      expect(sat.heroPairs, `seed ${seed} hero–support SAT`).toBeLessThanOrEqual(0.25 * sat.factor + 1e-6);
-      expect(sat.otherPairs, `seed ${seed} support–support SAT`).toBeLessThanOrEqual(0.10 * sat.factor + 1e-6);
+      expect(sat.heroPairs, `seed ${seed} hero–support SAT`).toBeLessThanOrEqual(0.25 + 1e-6);
+      expect(sat.otherPairs, `seed ${seed} support–support SAT`).toBeLessThanOrEqual(0.10 + 1e-6);
       expect(heroAwareCheck(res, its, hints).ok, `seed ${seed}`).toBe(true);
     }
   }, 120_000);
@@ -1162,8 +1154,8 @@ describe("solveLayout — hero identification", () => {
     expect(heroItemIdOf(its, hints)).toBe("i1");
     // End to end: the designated hero solves DOMINANT (wider than every
     // support, inside the n=2 hero window) even though it would NOT have
-    // been the default rank-0 item. MEASURED (seed 9): wHero ≈ 0.73 (the
-    // 0.729–0.764 window), wSup ≈ 0.43 (ratio ≈ 0.6 — the band ceiling).
+    // been the default rank-0 item. MEASURED (seed 9): wHero ≈ 0.71 (the
+    // 0.708–0.720 window), wSup ≈ 0.41 (ratio ≈ 0.6 — the band ceiling).
     const res = solveLayout(its, {
       cardDims: card,
       k: K,

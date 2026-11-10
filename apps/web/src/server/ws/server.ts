@@ -44,7 +44,6 @@ import {
   computeAndPersistLayout,
   type LayoutEmit,
 } from "../layout/engine";
-import { createCritiqueScheduler, type CritiqueEmit } from "../layout/critique";
 import { runMontagePass } from "../layout/montage";
 import { finalizeMontageAll } from "../flows/montage-accumulator";
 import {
@@ -504,16 +503,10 @@ export function registerSocketHandlers(
       io.to(room).emit(event, enveloped);
     }
   };
-  // Vision layout critique: after every committed layout:updated emit the
-  // critique scheduler arms a trailing 5s buffer per team (bursts re-arm the
-  // SAME timer); on fire it renders the card to a PNG, asks the vision model
-  // for a verdict and emits `layout:critique` to the GM room ONLY (hub-stamped
-  // envelope). Mock mode (no real provider) short-circuits to a fixed passing
-  // verdict without rendering or calling the AI. Failures are swallowed —
-  // critique problems never break the build flow.
-  const critiqueEmit: CritiqueEmit = (event, payload, ctx) => {
-    io.to(gmRoom(ctx.gameId)).emit(event, { ...hub.stamp(ctx.gameId), teamId: ctx.teamId, ...payload });
-  };
+  // NOTE: the vision layout-critique scheduler (layout/critique.ts) is no
+  // longer wired here — the deterministic solver owns packing quality, and
+  // `layout:critique` events are no longer emitted. The module stays as a
+  // dormant library (its tests keep passing).
   // Montage (poster) accumulator routing: `montage:generating` is a GM +
   // presenter heads-up (players don't need the in-flight marker — their card
   // just gains the poster later); `montage:updated` goes to EVERYONE — the
@@ -548,22 +541,12 @@ export function registerSocketHandlers(
       emit: montageEmit,
     };
   }
-  const critique = createCritiqueScheduler({
-    repo,
-    ai: ai ?? null,
-    mockMode: ai ? ai.isMock() : true,
-    emitCritique: critiqueEmit,
-    emitLayout: layoutEmit,
-  });
   const layoutDebouncer = createLayoutDebouncer(async (ctx) => {
     const computed = await computeAndPersistLayout(
       { repo, ai: ai ?? null, emit: layoutEmit },
       ctx.gameId,
       ctx.teamId,
     );
-    // The critique trails the layout commit (never runs on a layout that
-    // didn't land).
-    if (computed) critique.schedule(ctx);
     return computed;
   });
 
@@ -572,13 +555,12 @@ export function registerSocketHandlers(
   // The hook's `round` param is unused: runMontagePass reads the game's current
   // round from the repo itself.
   hub.setPreScoring(async (gameId) => {
-    // Fire-and-forget: the montage chain (debounced layout flushes → critique
-    // settle → montage re-layout) must NOT block `scoring:started` — the GM
-    // sees the montage heads-up (`montage:started`, already emitted by the hub
-    // before this hook) and players get the scoring screen immediately.
+    // Fire-and-forget: the montage chain (debounced layout flushes → montage
+    // re-layout) must NOT block `scoring:started` — the GM sees the montage
+    // heads-up (`montage:started`, already emitted by the hub before this
+    // hook) and players get the scoring screen immediately.
     void (async () => {
       await layoutDebouncer.flushAll();
-      await critique.settleAll(gameId);
       await runMontagePass(
         { repo, ai: ai ?? null, mockMode: ai ? ai.isMock() : true, emit: layoutEmit },
         gameId,
@@ -1243,9 +1225,6 @@ export function registerSocketHandlers(
   return {
     async close() {
       await layoutDebouncer.flushAll();
-      // Critiques are ephemeral GM intel — pending ones are DROPPED on
-      // shutdown (dispose clears the timers; it does not flush).
-      critique.dispose();
       if (ownedQueue) await ownedQueue.close();
     },
   };

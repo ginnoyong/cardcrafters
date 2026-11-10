@@ -164,7 +164,7 @@ export class MockProvider implements AiProvider {
         data = mockLayoutMontage(input);
         break;
       case "montage_prompt":
-        // Deterministic canned poster prompt: hash-seeded flavor words +
+        // Deterministic canned greeting-card prompt: hash-seeded flavor words +
         // theme + greeting + subjects joined. Validated against
         // montagePromptSchema below (same belt-and-braces as other tasks).
         data = mockMontagePrompt(input);
@@ -1018,7 +1018,7 @@ function mockLayoutMontage(input: Record<string, unknown>): unknown {
 }
 
 // ---------------------------------------------------------------------------
-// montage_prompt — deterministic canned poster prompt (zero network)
+// montage_prompt — deterministic canned greeting-card prompt (zero network)
 // ---------------------------------------------------------------------------
 
 /** Flavor adjectives for the canned montage prompt; picked by an
@@ -1026,11 +1026,11 @@ function mockLayoutMontage(input: Record<string, unknown>): unknown {
  *  reasoning as stickerSeed — plain djb2 low bits cluster for similar
  *  strings). */
 const MONTAGE_FLAVOR_ADJECTIVES: readonly string[] = [
-  "Vibrant",
-  "Whimsical",
-  "Radiant",
-  "Playful",
-  "Bold",
+  "Warm",
+  "Charming",
+  "Heartfelt",
+  "Sweet",
+  "Cozy",
   "Dreamy",
   "Festive",
   "Cheerful",
@@ -1038,13 +1038,15 @@ const MONTAGE_FLAVOR_ADJECTIVES: readonly string[] = [
 
 /**
  * Canned deterministic montage prompt: avalanche-hash-seeded flavor adjective
- * + theme + greeting text + subjects joined, phrased as ONE vivid poster
- * image prompt (single cohesive full-bleed illustration with the greeting
- * BAKED IN as the lower-third title treatment, kept within the central 60%
- * of the image width so a 5:7 portrait crop never truncates it,
- * family-friendly). Validated
- * against montagePromptSchema by compute()'s schema table — the same
- * belt-and-braces as other tasks.
+ * + theme + greeting text + subjects joined, phrased as ONE vivid
+ * greeting-card illustration prompt (Hallmark style: a warm, hand-crafted,
+ * storybook scene — soft cohesive palette, decorative florals and charming
+ * accents, subjects integrated into the ONE shared scene) with the greeting
+ * BAKED IN as the lower-third hand-lettered title treatment, kept within the
+ * central 60% of the image width so a 5:7 portrait crop never truncates it,
+ * family-friendly. No character cap (montagePromptSchema no longer bounds the
+ * prompt length). Validated against montagePromptSchema by compute()'s schema
+ * table — the same belt-and-braces as other tasks.
  */
 function mockMontagePrompt(input: Record<string, unknown>): unknown {
   const theme = String(input.theme ?? "").trim() || "a happy occasion";
@@ -1072,18 +1074,19 @@ function mockMontagePrompt(input: Record<string, unknown>): unknown {
   // margins per side stay text-free) so a tighter portrait (5:7) center
   // crop can never truncate the greeting's tail.
   const greetingNote = greeting
-    ? ` Render the greeting "${greeting}" verbatim as the poster's title treatment across the lower third, sized to fit the CENTRAL 60% of the image width (outer 20% margins on each side stay free of text).`
-    : " Render the greeting verbatim as the poster's title treatment across the lower third, sized to fit the CENTRAL 60% of the image width (outer 20% margins on each side stay free of text).";
+    ? ` Render the greeting "${greeting}" verbatim as an elegant hand-lettered greeting treatment across the lower third, sized to fit the CENTRAL 60% of the image width (outer 20% margins on each side stay free of text).`
+    : " Render the greeting verbatim as an elegant hand-lettered greeting treatment across the lower third, sized to fit the CENTRAL 60% of the image width (outer 20% margins on each side stay free of text).";
 
   const prompt =
-    `${flavor} full-bleed movie-poster illustration for a ${theme} greeting card: ` +
-    `a single cohesive composition featuring ${subjectList}, arranged as an ensemble ` +
-    `cast with one clear focal hero. Bold cinematic poster style, rich painterly ` +
-    `shading, joyful lighting.${greetingNote} Family-friendly; the ONLY text in the artwork is the greeting, rendered exactly as given.`;
+    `${flavor} full-bleed greeting-card illustration for a ${theme} card, in the style of a premium ` +
+    `greeting-card studio: a single warm, hand-crafted storybook scene featuring ${subjectList}, ` +
+    `all subjects integrated into ONE shared scene with a clear focal point. Soft cohesive pastel ` +
+    `palette, gentle storybook lighting, decorative florals and charming hand-drawn accents ` +
+    `framing the scene.${greetingNote} Family-friendly; the ONLY text in the artwork is the greeting, rendered exactly as given.`;
 
-  // montagePromptSchema caps at 800 chars — hard-truncate defensively so a
-  // very long subject list can never make the mock itself schema-invalid.
-  return montagePromptSchema.parse({ prompt: prompt.slice(0, 800) });
+  // No length cap (montagePromptSchema only requires non-empty) — long subject
+  // lists flow through untruncated.
+  return montagePromptSchema.parse({ prompt });
 }
 
 // ---------------------------------------------------------------------------

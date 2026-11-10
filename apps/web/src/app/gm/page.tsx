@@ -704,12 +704,6 @@ function Console({ game }: { game: CreatedGame }) {
       onEvent<Record<string, unknown>>(socket, "item:withdrawn", (payload) =>
         dispatch({ type: "itemWithdrawn", payload }),
       ),
-      // Vision layout critique — GM-room-only verdict from the critique
-      // scheduler (build phase, ~5s after a layout lands). Stores the latest
-      // per-team score/issues for the card badges.
-      onEvent<Record<string, unknown>>(socket, "layout:critique", (payload) =>
-        dispatch({ type: "critiqueReceived", payload }),
-      ),
       // Montage (poster) accumulator — live status per team. The GM sees the
       // composed card with a small "Generating poster…" indicator while the
       // accumulator runs, then either the finished poster image (ready) or
@@ -759,7 +753,6 @@ function Console({ game }: { game: CreatedGame }) {
       ...t,
       greetingText: live?.greeting.text ?? "",
       members: live?.members ?? [],
-      critique: live?.critique ?? null,
       // Montage (poster) state is live-only — the REST game summary never
       // carries it, so the snapshot is the sole source once connected.
       montageStatus: live?.montageStatus ?? t.montageStatus ?? null,
@@ -917,6 +910,8 @@ function Console({ game }: { game: CreatedGame }) {
                       items: [],
                       layout: null,
                       activity: [],
+                      // layout:critique events no longer exist (scheduler
+                      // unwired) — the field stays a constant null default.
                       critique: null,
                       montageStatus: team.montageStatus ?? null,
                       montageImageUrl: team.montageImageUrl ?? null,

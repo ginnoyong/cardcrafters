@@ -8,30 +8,36 @@
  * a deterministic orderIndex tie-break).
  *
  * Terms (weight · meaning):
- *  focal 0.35  — visualWeight-weighted mean distance of item centroids from
+ *  focal 0.25  — visualWeight-weighted mean distance of item centroids from
  *                ctx.focalPoint, normalized by half the card diagonal
  *                (heavy stickers should sit near the composition's focus).
- *  space 0.25  — pairwise crowding: pairs whose centroid distance is below a
- *                "comfort distance" = 1.1 × sqrt(avg of the two AABB areas)
- *                are penalized proportionally to the shortfall.
- *  cover 0.15  — card coverage (fraction of a 24×24 sample grid inside any
+ *  space 0.50  — PAIRWISE-OVERLAP / crowding penalty: pairs whose centroid
+ *                distance is below a "comfort distance" =
+ *                1.1 × sqrt(avg of the two AABB areas) are penalized
+ *                proportionally to the shortfall. v6 USER GOAL "minimize
+ *                sticker overlapping": this term is DOUBLED (0.25 → 0.50)
+ *                so overlap minimization OUTRANKS raw coverage — the greedy
+ *                pass and the local search now prefer a less-overlapping
+ *                candidate whenever the coverage trade-off is comparable
+ *                (the caps 0.10 / 0.25 in constraints.ts stay the hard
+ *                bound; this term shapes the choice UNDER the caps).
+ *  cover 0.05  — card coverage (fraction of a 24×24 sample grid inside any
  *                AABB, measured over the WHOLE card) is penalized outside
  *                the band [0.40, 0.75] (derived from the solver's sizing
  *                policy: lower bound TOTAL_COVERAGE_TARGET − 10pp, upper
- *                bound SOLO_ITEM_COVERAGE + 10pp). NEUTRAL under v5's
- *                usable-canvas coverage policy: the v5 escalation ladder
+ *                bound SOLO_ITEM_COVERAGE + 10pp). NEUTRAL under v6's
+ *                usable-canvas coverage policy: the v6 escalation ladder
  *                measures the placed union against the USABLE canvas (card
  *                minus safe margins minus the text zone), not this whole-card
  *                band — so a solver-optimal layout can score 0 here by
- *                design. LATENT TENSION: when ctx.textZone is null the
- *                usable canvas equals the whole card, so the v5 ladder's
- *                budget-raise escalation (driving usable coverage toward
- *                0.80) can push the whole-card measure past this band's
- *                0.75 ceiling — the penalty then disagrees with the ladder's
- *                intent until the text zone is supplied.
- *  hiera 0.15  — size hierarchy: Spearman-style rank correlation between
+ *                design. Weight HALVED (0.15 → 0.05) in v6: with the overlap
+ *                term doubled this term is the coverage-side counterweight,
+ *                and it is neutral-by-design under the usable-canvas policy
+ *                (the ladder owns coverage chasing, not this term).
+ *  hiera 0.10  — size hierarchy: Spearman-style rank correlation between
  *                visualWeight and display size; penalty = (1 − corr)/2, so
- *                heavy items being big scores 0 and inverted order scores ~1.
+ *                heavy items being big scores 0 and inverted order scores ~1
+ *                (rebalanced 0.15 → 0.10 to fund the doubled overlap term).
  *  edge  0.05  — items whose AABB hugs the safe margin (gap < 1% of the card
  *                dimension) — placements that LOOK cramped against the edge.
  *  rot   0.05  — rotation variance: std of rotations > 12° is penalized
@@ -52,12 +58,19 @@ import {
   type Rect,
 } from "./constraints";
 
-/** Term weights — sum to exactly 1 so the score lives on a 0..1 scale. */
+/** Term weights — sum to exactly 1 so the score lives on a 0..1 scale.
+ *  v6 USER GOAL rebalance: the pairwise-overlap penalty (spacing) is DOUBLED
+ *  0.25 → 0.50 so overlap minimization outranks raw coverage (the retired
+ *  overlap-cap escalation and the halved coverage term complete the policy:
+ *  the solver fills the card as much as the HARD 0.10 / 0.25 caps allow).
+ *  Funded by: focal 0.35 → 0.25, coverage 0.15 → 0.05 (neutral-by-design
+ *  under the usable-canvas policy), hierarchy 0.15 → 0.10.
+ */
 export const SCORE_WEIGHTS = {
-  focal: 0.35,
-  spacing: 0.25,
-  coverage: 0.15,
-  hierarchy: 0.15,
+  focal: 0.25,
+  spacing: 0.5,
+  coverage: 0.05,
+  hierarchy: 0.1,
   edge: 0.05,
   rotation: 0.05,
 } as const;
@@ -85,8 +98,8 @@ const COVERAGE_GRID = 24;
 /**
  * Coverage band aligned with the solver's sizing policy: [0.40, 0.75],
  * measured over the WHOLE card. Lower bound 10pp under the multi-item total
- * target, upper bound 10pp over the solo target. NEUTRAL under v5's
- * usable-canvas coverage policy: the v5 ladder measures the placed union
+ * target, upper bound 10pp over the solo target. NEUTRAL under v6's
+ * usable-canvas coverage policy: the v6 ladder measures the placed union
  * against the USABLE canvas, not this whole-card band. LATENT TENSION: with
  * a null text zone the usable canvas equals the whole card, so the ladder's
  * budget-raise escalation can drive the whole-card measure past the 0.75

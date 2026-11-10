@@ -214,13 +214,15 @@ export const layoutMontageSchema = layoutCompositionSchema
 export type LayoutMontage = z.infer<typeof layoutMontageSchema>;
 
 /**
- * Step: montage prompt — ONE vivid poster image prompt for the team montage
- * (final card). Describes a single cohesive full-bleed illustration
+ * Step: montage prompt — ONE vivid image prompt for the team montage (final
+ * card). Describes a single cohesive full-bleed greeting-card illustration
  * incorporating every sticker subject, with space for the greeting text.
+ * No character cap: longer rich prompts must generate fully (maxTokens is
+ * raised to 1200 in config/ai-tasks.json to match).
  */
 export const montagePromptSchema = z
   .object({
-    prompt: z.string().trim().min(1).max(800),
+    prompt: z.string().trim().min(1),
   })
   .strict();
 export type MontagePrompt = z.infer<typeof montagePromptSchema>;
