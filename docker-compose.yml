@@ -42,7 +42,9 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      # Host port remapped to 3100: even an explicitly started container can
+      # never squat 3000 (local dev is `npm run dev` on 3000).
+      - "3100:3000"
 
 volumes:
   pgdata:
