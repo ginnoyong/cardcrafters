@@ -44,7 +44,6 @@ import {
   computeAndPersistLayout,
   type LayoutEmit,
 } from "../layout/engine";
-import { runMontagePass } from "../layout/montage";
 import { finalizeMontageAll } from "../flows/montage-accumulator";
 import {
   createPromptPipelineDeps,
@@ -561,11 +560,13 @@ export function registerSocketHandlers(
     // hook) and players get the scoring screen immediately.
     void (async () => {
       await layoutDebouncer.flushAll();
-      await runMontagePass(
-        { repo, ai: ai ?? null, mockMode: ai ? ai.isMock() : true, emit: layoutEmit },
-        gameId,
-      );
-      // Poster accumulator (sibling pass): produces the full-bleed poster
+      // NOTE: runMontagePass (the $0.108/call vision strategy pass) is retired
+      // from the flow — with the AI poster primary and the deterministic
+      // solver owning sticker packing, an AI layout re-arrange of the rarely-
+      // seen composed fallback card is spend without payoff. The module stays
+      // available (layout/montage.ts) if the fallback polish is ever wanted
+      // behind an explicit flag.
+      // Poster accumulator: produces the full-bleed poster
       // IMAGE per team (montage_prompt → montage_image → persisted PNG) and
       // emits montage:generating / montage:updated. Unlike the layout-level
       // pass it ALSO runs in mock mode (deterministic + $0), so demo games

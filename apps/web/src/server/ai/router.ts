@@ -57,7 +57,12 @@ import {
  *   - 10 teams → ~$15–22 per game worst case, ~$5–10 typical.
  * $25 = realistic worst case ($22) × ~1.15 headroom.
  */
-export const DEFAULT_AI_BUDGET_PER_GAME_USD = 25;
+// MEASURED across all played games (AiCall ledger): sticker images $0.031/call,
+// montage posters $0.034/call, layout_montage $0.108/call (retired from the
+// flow), text tasks <= $0.0013/call. Most expensive game ever: $1.02. A
+// worst-case 10-team game (250 stickers + continuous montage gens + text)
+// projects to ~$10.50 — cap at $15 (~1.4x) with env override available.
+export const DEFAULT_AI_BUDGET_PER_GAME_USD = 15;
 
 /**
  * Optimistic pre-call reserve for a non-image (text) call, in USD. Realistic
