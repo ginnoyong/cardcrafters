@@ -430,12 +430,10 @@ describe("createAiRouter", () => {
     await expect(router.run("moderation", { prompt: "x" }, { gameId: "fresh-game" })).resolves.toBeTruthy();
   });
 
-  it("defaults: $15/game budget (env override wins) + realistic cost reserves", () => {
-    // Budget math (see router.ts, MEASURED from the AiCall ledger): the most
-    // expensive game ever spent $1.02; a worst-case 10-team game (250 sticker
-    // images + continuous montage gens + text) projects to ~$10.50 — the $15
-    // default is that projection × ~1.4 headroom (env override wins).
-    expect(DEFAULT_AI_BUDGET_PER_GAME_USD).toBe(15);
+  it("defaults: $50/game budget (env override wins) + realistic cost reserves", () => {
+    // USER DECISION: $50/game (generous runaway protection, not a spend
+    // target — measured play is ~$1/game). Env override wins.
+    expect(DEFAULT_AI_BUDGET_PER_GAME_USD).toBe(50);
     // Reserves gate CONCURRENT in-flight calls only; they must match realistic
     // per-call costs ($0.03–0.04 image, $0.001–0.005 text) so 10-team games
     // don't lock themselves out by over-reserving.
@@ -443,10 +441,10 @@ describe("createAiRouter", () => {
     expect(DEFAULT_CALL_ESTIMATE_USD).toBe(0.01);
     // No env var → the default; a valid positive env value wins; invalid
     // values (0, negative, garbage) fall back to the default too.
-    expect(resolveBudgetUsd({} as unknown as NodeJS.ProcessEnv)).toBe(15);
+    expect(resolveBudgetUsd({} as unknown as NodeJS.ProcessEnv)).toBe(50);
     expect(resolveBudgetUsd({ AI_BUDGET_PER_GAME_USD: "40" } as unknown as NodeJS.ProcessEnv)).toBe(40);
-    expect(resolveBudgetUsd({ AI_BUDGET_PER_GAME_USD: "0" } as unknown as NodeJS.ProcessEnv)).toBe(15);
-    expect(resolveBudgetUsd({ AI_BUDGET_PER_GAME_USD: "-5" } as unknown as NodeJS.ProcessEnv)).toBe(15);
-    expect(resolveBudgetUsd({ AI_BUDGET_PER_GAME_USD: "nan" } as unknown as NodeJS.ProcessEnv)).toBe(15);
+    expect(resolveBudgetUsd({ AI_BUDGET_PER_GAME_USD: "0" } as unknown as NodeJS.ProcessEnv)).toBe(50);
+    expect(resolveBudgetUsd({ AI_BUDGET_PER_GAME_USD: "-5" } as unknown as NodeJS.ProcessEnv)).toBe(50);
+    expect(resolveBudgetUsd({ AI_BUDGET_PER_GAME_USD: "nan" } as unknown as NodeJS.ProcessEnv)).toBe(50);
   });
 });
