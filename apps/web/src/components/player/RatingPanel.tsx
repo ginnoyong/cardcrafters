@@ -65,9 +65,6 @@ export interface RatingPanelProps {
   testId?: string;
 }
 
-/** How long the confirm affordance waits before collapsing (ms). */
-const CONFIRM_RESET_MS = 6000;
-
 export default function RatingPanel({
   scoring,
   scores,
@@ -95,13 +92,6 @@ export default function RatingPanel({
   const [pending, setPending] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Auto-collapse the confirm affordance if the player doesn't confirm.
-  useEffect(() => {
-    if (pending === null) return;
-    const t = setTimeout(() => setPending(null), CONFIRM_RESET_MS);
-    return () => clearTimeout(t);
-  }, [pending]);
-
   // Clamp the index when the card list changes (scores/rounds stay stable
   // within SCORING, but resyncs can shrink the list defensively).
   useEffect(() => {
@@ -295,15 +285,7 @@ export default function RatingPanel({
               disabled={submitting}
               onClick={() => void confirmAndSubmit()}
             >
-              {submitting ? "Sending…" : "Yes, rate it"}
-            </button>
-            <button
-              type="button"
-              className="cc-btn"
-              disabled={submitting}
-              onClick={() => setPending(null)}
-            >
-              Pick again
+              {submitting ? "Sending…" : "Confirm"}
             </button>
           </div>
         </div>
