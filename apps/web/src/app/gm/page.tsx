@@ -839,11 +839,13 @@ function Console({ game }: { game: CreatedGame }) {
   // card + actions) INSTEAD of the greeting/QR cards, and the mini-preview
   // grid is hidden — the boxes carry the poster/sticker view in both phases.
   const judging = phase === PHASE.JUDGING;
-  // SCORING shows the SAME boxes MINUS the score chip and the Pick winner
-  // button (scores are still coming in — judging-only actions) and in the
-  // ORIGINAL teams order (no judgingRows sorting while numbers are in flux).
-  // Actions in SCORING = the presenter View link only; the cc-scoring-console
-  // below stays the GM's live progress view (chips + readiness + Go to judging).
+  // SCORING shows the SAME boxes PLUS the live score chip (averages land in
+  // the boxes as votes come in) MINUS the Pick winner button (judging-only),
+  // in the ORIGINAL teams order (no judgingRows sorting while numbers are in
+  // flux). The "Rate the cards — live scores" heading renders as a plain
+  // subtitle ABOVE the grid; the "Go to judging" transition renders as a
+  // standalone full-width control BELOW it (the old cc-scoring-console box
+  // is retired).
   const judgeBoxes = judging || phase === PHASE.SCORING;
   // Judge boxes render in judgingRows order (avg desc → count desc → label,
   // same ordering as the old table); teams without a scoring row keep their
@@ -878,11 +880,25 @@ function Console({ game }: { game: CreatedGame }) {
         </p>
       ) : null}
 
+      {/* SCORING: "Rate the cards — live scores" subtitle + live readiness
+          line — a plain header block ABOVE the team boxes (NOT a cc-card
+          box). Per-team averages now live INSIDE the judge boxes below
+          (JudgeScoreChip). data-testid="gm-scoring" kept so tests still find
+          the scoring-progress section. */}
+      {phase === PHASE.SCORING ? (
+        <section aria-label="scoring progress" data-testid="gm-scoring" className="cc-scoring-subtitle">
+          <h3>Rate the cards — live scores</h3>
+          <p className="cc-hint" aria-live="polite" data-testid="gm-scoring-progress">
+            {ratedY !== null ? `${ratedX} of ${ratedY} ratings in` : `${ratedX} ratings in`}
+          </p>
+        </section>
+      ) : null}
+
       {/* Teams: vertical greeting/QR cards with the single-QR accordion —
           except in JUDGING/SCORING, where the grid renders judge boxes
-          (poster-first flip card + View link) instead. JUDGING adds the
-          score chip + Pick winner and sorts by judgingRows; SCORING keeps
-          the original teams order (scores in flux). Same cc-team/cc-card
+          (poster-first flip card + score chip + View link) instead. JUDGING
+          adds Pick winner and sorts by judgingRows; SCORING keeps the
+          original teams order (scores in flux). Same cc-team/cc-card
           wrappers. REVEAL/RESULTS render NO team boxes at all (the stage is
           the screen — same as the presenter): the winner banner block below
           carries the winning card and the mini grid carries every team's. */}
@@ -926,10 +942,10 @@ function Console({ game }: { game: CreatedGame }) {
                     cardKind={judging ? "judging" : "scoring"}
                     actions={
                       <>
-                        {/* Score chip + Pick winner are JUDGING-only: in
-                            SCORING the scores are still coming in (the
-                            cc-scoring-console below is the progress view). */}
-                        {judging ? <JudgeScoreChip tally={tallyByTeamId.get(team.id) ?? null} /> : null}
+                        {/* SCORING: score chip + View — the live avg · votes
+                            readout lives IN the box now (the old chips
+                            console is gone). JUDGING adds Pick winner. */}
+                        <JudgeScoreChip tally={tallyByTeamId.get(team.id) ?? null} />
                         <a
                           className="cc-btn cc-btn-small"
                           href={`/present/${game.code}?team=${team.id}`}
@@ -1026,38 +1042,19 @@ function Console({ game }: { game: CreatedGame }) {
         </section>
       ) : null}
 
-      {/* SCORING: per-team live chips {team, avg, votes} + readiness + the
-          "Go to judging" control (gm:stopScoring locks the scores). The judge
-          boxes above carry NO scores in this phase — this console stays the
-          GM's live progress view. */}
-      {phase === PHASE.SCORING && scoringChips.length > 0 ? (
-        <section className="cc-card cc-scoring-console" aria-label="scoring progress" data-testid="gm-scoring">
-          <h3>Rate the cards — live scores</h3>
-          <p className="cc-hint" aria-live="polite" data-testid="gm-scoring-progress">
-            {ratedY !== null ? `${ratedX} of ${ratedY} ratings in` : `${ratedX} ratings in`}
-          </p>
-          <ul className="cc-score-chips">
-            {scoringChips.map((chip) => (
-              <li key={chip.cardId} className="cc-score-chip" data-testid={`gm-score-chip-${chip.teamId}`}>
-                <span className="cc-score-chip-team">
-                  {chip.teamName || chip.teamLabel} <span className="cc-muted">({chip.cardLabel})</span>
-                </span>
-                <span className="cc-score-chip-score" aria-live="polite">
-                  {chip.avg !== null ? `${chip.avg} avg` : "no votes yet"} · {chip.count} vote
-                  {chip.count === 1 ? "" : "s"}
-                </span>
-              </li>
-            ))}
-          </ul>
-          <div className="cc-btn-row">
-            <button
-              type="button"
-              className="cc-btn cc-btn-primary"
-              onClick={() => void gmAction("gm:stopScoring", {})}
-            >
-              Go to judging
-            </button>
-          </div>
+      {/* SCORING: standalone "Go to judging" phase transition (gm:stopScoring
+          locks the scores) — full-width cc-btn-primary in its own section,
+          mirroring the "Start scoring" pattern. The live averages moved into
+          the judge boxes above; the old cc-scoring-console box is retired. */}
+      {phase === PHASE.SCORING ? (
+        <section className="cc-start" aria-label="go to judging" data-testid="gm-go-judging">
+          <button
+            type="button"
+            className="cc-btn cc-btn-primary cc-btn-start"
+            onClick={() => void gmAction("gm:stopScoring", {})}
+          >
+            Go to judging
+          </button>
           <p className="cc-hint">Going to judging locks the scores — nobody can rate after that.</p>
         </section>
       ) : null}

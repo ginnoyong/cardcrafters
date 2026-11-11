@@ -3,8 +3,8 @@
 /**
  * TeamJudgeCard — the GM's per-team JUDGING/SCORING box: poster-first flip
  * view as the ONLY content column (full width) with the phase actions along
- * the bottom (JUDGING: score chip + View link + Pick winner; SCORING: View
- * link only). Mirrors TeamShowcase's structure
+ * the bottom (JUDGING: score chip + View link + Pick winner; SCORING: score
+ * chip + View link). Mirrors TeamShowcase's structure
  * ("use client", dynamic CardCanvas with ssr:false) with a click-to-flip
  * visual:
  *

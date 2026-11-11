@@ -1252,7 +1252,7 @@ no animations requiring sound. */
    the sections above). */
 /* GM scoring console (the judging table is retired — judge boxes carry
    the score/View/Pick actions now). Extra top margin matches the vertical
-   card-stack / .cc-start spacing. */
+   card-stack / .cc-start spacing. Still used by the presenter board. */
 .cc-scoring-console {
   gap: 0.75rem;
   margin-top: 1.5rem;
@@ -1260,6 +1260,19 @@ no animations requiring sound. */
 
 .cc-scoring-console h3 {
   margin: 0;
+}
+
+/* GM SCORING subtitle header — "Rate the cards — live scores" + the
+   readiness line as a plain heading block ABOVE the judge-box grid (NOT a
+   cc-card box; matches the section rhythm of .cc-start). The per-team
+   averages render inside the judge boxes themselves. */
+.cc-scoring-subtitle {
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.cc-scoring-subtitle h3 {
+  margin: 0 0 0.25rem;
 }
 
 /* Presenter REVEAL block: the big winner banner + the Show results button. */
