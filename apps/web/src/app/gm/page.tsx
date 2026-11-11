@@ -510,8 +510,8 @@ function TeamMiniCanvas({
 // banner block — centered at 2× the standard hero width (~960px wrapper; the
 // poster box itself locks to the game's card ratio and shares the CardCanvas
 // 70vh height cap so both faces render identically sized). Poster face first
-// with a LIGHT golden sparkle overlay (.cc-winner-sparkle, pure CSS — no JS
-// particles); click/Enter/Space flips to the sticker CardCanvas (the winning
+// with a warm ochre sparkle overlay (.cc-winner-sparkle, pure CSS — no JS
+// particles; multiply-blended deep-gold glints that read on the light theme); click/Enter/Space flips to the sticker CardCanvas (the winning
 // team's items/layout/greeting — TeamJudgeCard pattern, aria-pressed, NO 3D
 // modal). Without a ready poster the composed CardCanvas renders statically
 // (no flip, no sparkle — nothing to twinkle on).
