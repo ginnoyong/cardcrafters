@@ -358,17 +358,6 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
   // card, prompt accordion switching with the flip — same as the GM/presenter
   // judge boxes).
 
-  // Own card label for the single TeamJudgeCard: the team-NAMED scoring card
-  // (snapshot.scoring.cards entry matching our ownTeamCardId — teamName equals
-  // the team's real name: judging-stage anonymity is dropped per decision 2a)
-  // with the team's label as fallback in the pre/absent-scoring phases. Only
-  // rendered when team exists; null lets TeamJudgeCard fall back to team.label.
-  const ownCardLabel =
-    (snapshot?.scoring && snapshot.scoring.yourTeamCardId
-      ? snapshot.scoring.cards.find((c) => c.cardId === snapshot.scoring?.yourTeamCardId)?.teamName
-      : undefined) ??
-    (team ? team.label : null);
-
   // The countdown ticks during BUILD and SCORING (the two timed phases that
   // matter to players; REVEAL's 30s auto-expiry is presenter/GM business).
   const timed = build || snapshot?.phase === PHASE.SCORING;
@@ -478,21 +467,25 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
 
       {(build || locked) && snapshot && team ? (
         <>
-          {/* BUILD: 2-col header box — team name + theme subtitle on the
-              left, the phase/timer badge on the right (see .cc-build-head).
-              Other phases keep the plain stacked card. */}
-          <section className={`cc-card${build ? " cc-build-head" : ""}`} aria-label="your team">
-            <h2>{team.name}</h2>
-            <p className="cc-badge">
-              {phaseLabel(snapshot.phase)} · round {snapshot.round}
-              {remainingLabel ? ` · ⏱ ${remainingLabel}` : snapshot.phaseEndsAt ? " · timed" : ""}
-            </p>
-            {snapshot.theme ? (
-              <p>
-                Theme: <strong>{snapshot.theme}</strong>
+          {/* BUILD-only 2-col header box — team name + theme subtitle on
+              the left, the phase/timer badge on the right (see
+              .cc-build-head). Locked phases (SCORING+) drop this box: the h1
+              already carries the phase label, the RatingPanel/own-card
+              section carries the timer, and the theme was shown at build. */}
+          {build ? (
+            <section className="cc-card cc-build-head" aria-label="your team">
+              <h2>{team.name}</h2>
+              <p className="cc-badge">
+                {phaseLabel(snapshot.phase)} · round {snapshot.round}
+                {remainingLabel ? ` · ⏱ ${remainingLabel}` : snapshot.phaseEndsAt ? " · timed" : ""}
               </p>
-            ) : null}
-          </section>
+              {snapshot.theme ? (
+                <p>
+                  Theme: <strong>{snapshot.theme}</strong>
+                </p>
+              ) : null}
+            </section>
+          ) : null}
 
           {/* Single-card pattern (EVERY locked phase): ONE TeamJudgeCard —
               click flips the AI-montage poster ↔ sticker card, and the
@@ -649,16 +642,33 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                 />
               ) : null}
 
-              <TeamJudgeCard
-                team={team}
-                cardLabel={ownCardLabel}
-                tally={null}
-                actions={null}
-                cardKind={snapshot.phase === PHASE.SCORING ? "scoring" : "judging"}
-                cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
-                cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
-                testId="player-our-card"
-              />
+              {/* Own-card section: titled "Your team's card" (visible in
+                  SCORING and beyond). The timer chip rides the header row in
+                  SCORING — the pre-scoring gap keeps the countdown visible
+                  even though the RatingPanel (with its own timer) isn't
+                  rendered yet; JUDGING+ has no running timer, so nothing
+                  renders when remainingLabel is null. cardLabel stays null:
+                  the scoring card's teamName equals the team name (a
+                  duplicate) — TeamJudgeCard falls back to team.label so its
+                  h3 reads "Name (label)". */}
+              <section className="cc-card" aria-label="your team's card" data-testid="your-teams-card">
+                <div className="cc-own-card-head">
+                  <h3>Your team's card</h3>
+                  {snapshot.phase === PHASE.SCORING && remainingLabel ? (
+                    <span className="cc-badge">⏱ {remainingLabel}</span>
+                  ) : null}
+                </div>
+                <TeamJudgeCard
+                  team={team}
+                  cardLabel={null}
+                  tally={null}
+                  actions={null}
+                  cardKind={snapshot.phase === PHASE.SCORING ? "scoring" : "judging"}
+                  cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
+                  cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
+                  testId="player-our-card"
+                />
+              </section>
 
               {judging ? (
                 // JUDGING: ratings are locked — keep the rated summary + the
@@ -686,10 +696,12 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                   ) : null}
                 </>
               ) : snapshot.phase === PHASE.SCORING ? (
-                <section className="cc-card" aria-label="scoring wait" role="status" data-testid="scoring-wait">
-                  <h3>Getting the rating cards ready…</h3>
-                  <p className="cc-hint">Rating opens in a moment.</p>
-                </section>
+                // SCORING without a scoring order (the pre-scoring gap):
+                // nothing extra — the "Your team's card" section above plus
+                // the activity feed below already cover the screen (the
+                // TeamJudgeCard hero replaces the old "Getting the rating
+                // cards ready…" wait box).
+                null
               ) : (
                 <section className="cc-card" aria-label="build ended" role="status">
                   <h3>Time's up — the host locked the cards</h3>

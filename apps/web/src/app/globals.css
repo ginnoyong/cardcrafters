@@ -538,6 +538,27 @@ label {
   gap: 0.6rem;
 }
 
+/* Own-card section header row (player SCORING+ screen): the "Your team's
+   card" title with the ⏱ countdown chip on the right (SCORING only — the
+   chip disappears in JUDGING+ where no timer runs). .cc-card is a grid, so
+   the row is a 2-col flex strip placed as one grid child. */
+.cc-own-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.cc-own-card-head h3 {
+  margin: 0;
+}
+
+@media (max-width: 720px) {
+  .cc-own-card-head {
+    flex-wrap: wrap;
+  }
+}
+
 .cc-build-visual {
   min-width: 0;
   display: grid;
