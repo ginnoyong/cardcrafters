@@ -7,16 +7,16 @@
 :root {
   color-scheme: dark;
 
-  --bg: #16121f;
-  --bg-elevated: #211a2e;
-  --bg-card: #2a2140;
-  --text: #f2eefa;
-  --text-muted: #a99cc4;
-  --accent: #ff5f8f;
-  --accent-strong: #ffd166;
-  --ok: #6ee7a8;
-  --danger: #ff6b6b;
-  --focus: #8be9fd;
+  --bg: #15181c;            /* slate */
+  --bg-elevated: #1c2026;
+  --bg-card: #21262d;
+  --text: #eef1f4;
+  --text-muted: #9aa4ad;
+  --accent: #7fb0a1;        /* sage — the single brand accent */
+  --accent-strong: #a5cdc0; /* lighter sage-teal */
+  --ok: #86b89e;            /* desaturated mint */
+  --danger: #d98080;        /* desaturated coral */
+  --focus: #9db4c0;         /* cool gray-blue */
   --radius: 12px;
   --tap: 44px;
 }
@@ -56,6 +56,13 @@ body {
 
 h1 {
   font-size: 1.5rem;
+}
+
+/* Display-serif headings (Fraunces via --font-display, loaded in layout.tsx). */
+h1,
+h2,
+h3 {
+  font-family: var(--font-display), Georgia, "Times New Roman", serif;
 }
 
 .cc-code {
@@ -136,10 +143,15 @@ h1 {
 }
 
 .cc-btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #1c0d14;
+  background: #dfe3e8;
+  border-color: #dfe3e8;
+  color: #17191c;
   font-weight: 600;
+}
+
+.cc-btn-primary:hover:not(:disabled) {
+  background: #e8ecf0;
+  border-color: #e8ecf0;
 }
 
 .cc-btn-small {
@@ -453,7 +465,7 @@ label {
 
 .cc-canvas-box {
   border-radius: 14px;
-  box-shadow: 0 6px 24px rgb(0 0 0 / 0.35);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.25);
   background: var(--cc-paper);
   overflow: hidden;
   max-height: 70vh;
@@ -511,7 +523,7 @@ label {
   height: 100%;
   object-fit: cover;
   border-radius: var(--radius);
-  box-shadow: 0 2px 8px rgb(0 0 0 / 0.25);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.25);
 }
 
 /* BUILD-phase layout (player build screen). Header box: team name + theme
@@ -1142,7 +1154,7 @@ no animations requiring sound. */
 .cc-btn-rate.is-pending {
   background: var(--accent-strong);
   border-color: var(--accent-strong);
-  color: #1c0d14;
+  color: #17191c;
 }
 
 /* The big "The winner is… 🏆" banner (REVEAL/RESULTS, GM + presenter). */
