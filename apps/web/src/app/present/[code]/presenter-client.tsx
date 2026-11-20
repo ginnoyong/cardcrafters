@@ -12,14 +12,18 @@
  *    ↔ sticker flip view) with wrap-around prev/next and a live tally
  *    ("Card B · 7.5 avg · 3 votes"); the team stage is suppressed (names
  *    would leak the card↔team mapping — server-side rule).
- *  - REVEAL: the 3D reveal moment (Three.js floating card, components/
- *    Reveal3D.tsx) — the winning card materializes and floats; without WebGL
- *    / with reduced motion it falls back to the same static "The winner is…
- *    🏆" banner, plus a "Show results" button (reveal:ack — the server allows
- *    GM OR presenter; the hub also auto-expires REVEAL after 30 s, the button
- *    just moves things along).
- *  - RESULTS: winner banner + People's Choice banner + public standings
- *    (shared components/Standings.tsx, fed by the winnerAnnounced payload).
+ *  - REVEAL/RESULTS: the one-at-a-time stage shows the viewed team's TWO
+ *    cards SIDE BY SIDE (components/PresenterTeamStage.tsx: AI-montage
+ *    poster + sticker CardCanvas, each with a prompt-transparency
+ *    accordion). Banners are per-viewed-team: the brass "🏆 WINNER" banner
+ *    only when the viewed team IS the winner, the sage "👏 Crowd Favourite"
+ *    banner only when it is the People's Choice. REVEAL adds "Add 30 more
+ *    seconds" (reveal:extend) and "Show results" (reveal:ack — the server
+ *    allows GM OR presenter; the hub also auto-expires REVEAL after 30 s,
+ *    the button just moves things along) to the stage header; both phases
+ *    add a Return button back to the GM console. RESULTS keeps the public
+ *    standings list (shared components/Standings.tsx, fed by the
+ *    winnerAnnounced payload) below the stage.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -42,15 +46,9 @@ import {
   onEvent,
   type AckResult,
 } from "@/lib/socket";
-import {
-  PeoplesChoiceBanner,
-  StandingsList,
-  WinnerBanner,
-  teamLabel,
-} from "@/components/Standings";
-import { Reveal3D } from "@/components/Reveal3D";
+import { StandingsList } from "@/components/Standings";
+import PresenterTeamStage from "@/components/PresenterTeamStage";
 import TeamJudgeCard from "@/components/TeamJudgeCard";
-import TeamShowcase from "@/components/TeamShowcase";
 import { GameStoreProvider, phaseLabel, useGameStore, type SyncFullEvent } from "@/lib/store";
 
 function useCountdown(phaseEndsAt: number | null, serverNow: number): number | null {
@@ -204,18 +202,6 @@ function PresenterBoard({
     }
   }, []);
 
-  // Results-stage labels: the live team list first (the presenter knows the
-  // teams), the public standings' labels as the refresh fallback (a sync:full
-  // resync carries winnerTeamId but never the standings rows).
-  const winnerLabel =
-    teamLabel(snapshot?.teams ?? [], snapshot?.winnerTeamId) ||
-    snapshot?.standings.find((s) => s.teamId === snapshot.winnerTeamId)?.label ||
-    "";
-  const peoplesChoiceLabel =
-    teamLabel(snapshot?.teams ?? [], snapshot?.peoplesChoiceTeamId) ||
-    snapshot?.standings.find((s) => s.teamId === snapshot.peoplesChoiceTeamId)?.label ||
-    "";
-
   // One-at-a-time stage (SCORING onward): which team's showcase fills the
   // screen. Wrap-around prev/next; the index clamps when the team count
   // shrinks (a team leaves / round reset) so the stage never shows empty.
@@ -361,16 +347,13 @@ function PresenterBoard({
         </section>
       ) : null}
 
-      {/* SCORING onward: one-at-a-time stage — a single team's showcase fills
-          the screen (same main/sub layout as the player view), with ←/→
-          wrap-around cycle buttons.
-          stays
-          above. The montage surfaces live inside TeamShowcase now (poster
-          hero / generating indicator), so the per-mini montage blocks are
-          gone. In JUDGING the stage renders the shared TeamJudgeCard
-          (poster-first flip view + sticker prompts) with ONLY a Return
-          button — no score chip / Pick winner (presenter payloads carry no
-          scores and judging stays the GM's call). */}
+      {/* SCORING onward: one-at-a-time stage — a single team fills the
+          screen, with ←/→ wrap-around cycle buttons. In JUDGING the stage
+          renders the shared TeamJudgeCard (poster-first flip view + sticker
+          prompts) with Pick winner + Return; in REVEAL/RESULTS it renders
+          the side-by-side PresenterTeamStage (poster + sticker cards, each
+          with a prompt accordion, and the viewed team's WINNER / Crowd
+          Favourite banner above the cards when it earned either). */}
       {showStage && stageTeam ? (
         <section aria-label="team showcase stage" className="cc-present-stage" data-testid="presenter-stage">
           <div className="cc-present-stage-header">
@@ -462,14 +445,27 @@ function PresenterBoard({
               }
             />
           ) : (
-            <TeamShowcase
+            <PresenterTeamStage
               team={stageTeam}
               cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
               cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
-              testId={`presenter-showcase-${stageTeam.id}`}
+              testId="presenter-stage"
+              isWinner={snapshot.winnerTeamId === stageTeam.id}
+              isPeoplesChoice={snapshot.peoplesChoiceTeamId === stageTeam.id}
             />
           )}
         </section>
+      ) : null}
+
+      {/* RESULTS: the public standings list below the stage (fed by the
+          winnerAnnounced payload / the post-pick snapshot). */}
+      {snapshot?.phase === PHASE.RESULTS && snapshot.standings.length > 0 ? (
+        <StandingsList
+          standings={snapshot.standings}
+          winnerTeamId={snapshot.winnerTeamId}
+          peoplesChoiceTeamId={snapshot.peoplesChoiceTeamId}
+          testId="presenter-standings"
+        />
       ) : null}
 
       {snapshot && snapshot.teams.length === 0 ? (
@@ -547,57 +543,6 @@ function PresenterBoard({
             })()}
           </p>
         </section>
-      ) : null}
-
-      {/* REVEAL: the 3D reveal moment — the winning card materializes in a
-          small Three.js scene; any miss (reduced motion, no WebGL, texture
-          or Three.js load failure) falls back to the same static banner.
-          winnerTeamId rides the phase change; the name lands with the
-          winnerAnnounced broadcast a moment later — the heading reads "The
-          winner is…" until then. The "Show results" button (reveal:ack)
-          skips the 30 s auto-expiry wait. */}
-      {snapshot?.phase === PHASE.REVEAL && snapshot.winnerTeamId ? (
-        <section className="cc-reveal" aria-label="the reveal" data-testid="presenter-reveal">
-          <Reveal3D code={code} label={winnerLabel || "…"} testId="presenter-winner-banner" />
-          <div className="cc-btn-row cc-reveal-actions">
-            <button
-              type="button"
-              className="cc-btn"
-              data-testid="presenter-reveal-extend"
-              onClick={() => void extendReveal()}
-            >
-              Add 30 more seconds
-            </button>
-            <button
-              type="button"
-              className="cc-btn cc-btn-primary cc-btn-start"
-              onClick={() => void showResults()}
-            >
-              Show results
-            </button>
-          </div>
-        </section>
-      ) : null}
-
-      {/* RESULTS: winner + People's Choice + the public standings (fed by the
-          winnerAnnounced payload / the post-pick snapshot). */}
-      {snapshot?.phase === PHASE.RESULTS && snapshot.winnerTeamId ? (
-        <>
-        <div data-reveal-mode="results">
-          <WinnerBanner label={winnerLabel || "…"} testId="presenter-winner-banner" />
-        </div>
-          {peoplesChoiceLabel ? (
-            <PeoplesChoiceBanner label={peoplesChoiceLabel} testId="presenter-peoples-choice" />
-          ) : null}
-          {snapshot.standings.length > 0 ? (
-            <StandingsList
-              standings={snapshot.standings}
-              winnerTeamId={snapshot.winnerTeamId}
-              peoplesChoiceTeamId={snapshot.peoplesChoiceTeamId}
-              testId="presenter-standings"
-            />
-          ) : null}
-        </>
       ) : null}
     </main>
   );

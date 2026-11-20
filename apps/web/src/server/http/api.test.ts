@@ -299,147 +299,6 @@ async function localFinalPassAndCrispRender(
   return [finalPassRender, crispRender];
 }
 
-describe("GET /api/games/:code/reveal-card (winner card PNG for the REVEAL 3D moment)", () => {
-  /** Create a game and drive it LOBBY→…→REVEAL via hub events (no sockets). */
-  async function createGameInReveal(): Promise<{ code: string; gameId: string; winnerTeamId: string }> {
-    const res = await fetch(base("/api/games"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ teamCount: 2, theme: "Reveal Cards" }),
-    });
-    const body = (await res.json()) as { gameId: string; code: string; teams: Array<{ id: string }> };
-    const teams = await srv.repo.listTeams(body.gameId);
-    // Await the fire-and-forget greeting generation FIRST (mock resolves
-    // ~instantly) so the persisted greeting text is stable before the phases
-    // are driven and the served card is rendered (byte-comparison tests).
-    await waitForGreetings(srv.repo, srv.hub, body.gameId, teams.length);
-    const now = Date.now();
-    await srv.hub.applyEvent(body.gameId, { type: "gm:approveGreetings", now });
-    await srv.hub.applyEvent(body.gameId, { type: "gm:stopBuild", now });
-    await srv.hub.applyEvent(body.gameId, { type: "gm:stopScoring", now });
-    await srv.hub.applyEvent(body.gameId, { type: "gm:pickWinner", teamId: teams[0]!.id, now });
-    return { code: body.code, gameId: body.gameId, winnerTeamId: teams[0]!.id };
-  }
-
-  it("unknown code → 404", async () => {
-    const res = await fetch(base("/api/games/ZZZZZZ/reveal-card"));
-    expect(res.status).toBe(404);
-    const body = (await res.json()) as { ok: boolean; error: string };
-    expect(body.ok).toBe(false);
-    expect(body.error).toBe("unknown_code");
-  });
-
-  it("before REVEAL → 409 not_revealing (unfinished cards never leak)", async () => {
-    const res = await fetch(base("/api/games"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ teamCount: 2, theme: "Too Early" }),
-    });
-    const body = (await res.json()) as { code: string };
-    const early = await fetch(base(`/api/games/${body.code}/reveal-card`));
-    expect(early.status).toBe(409);
-    const err = (await early.json()) as { ok: boolean; error: string; phase: string };
-    expect(err.error).toBe("not_revealing");
-    expect(err.phase).toBe("GREETINGS");
-  });
-
-  it("REVEAL → 200 image/png (paper card render of the winning team)", async () => {
-    const { code } = await createGameInReveal();
-    const res = await fetch(base(`/api/games/${code}/reveal-card`));
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toBe("image/png");
-    expect(res.headers.get("cache-control")).toContain("no-store");
-    const buf = Buffer.from(await res.arrayBuffer());
-    // PNG magic bytes (\x89PNG) — a real, decodable image came back.
-    expect(buf.length).toBeGreaterThan(100);
-    expect(buf[0]).toBe(0x89);
-    expect(buf.subarray(1, 4).toString("ascii")).toBe("PNG");
-  });
-
-  it("RESULTS (auto-advance/ack) still serves the winning card", async () => {
-    const { code, gameId } = await createGameInReveal();
-    await srv.hub.applyEvent(gameId, { type: "reveal:ack", now: Date.now() });
-    const res = await fetch(base(`/api/games/${code}/reveal-card`));
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toBe("image/png");
-  });
-
-  it("still 200 in RESULTS after a server-side state rehydration (winner pick persistence)", async () => {
-    const { code, gameId } = await createGameInReveal();
-    // Simulate the hub forgetting the runtime state (restart): hydration
-    // rebuilds winnerTeamId from the persisted GM_WINNER pick.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (srv.hub as unknown as { runtime: Map<string, unknown> }).runtime.delete(gameId);
-    const res = await fetch(base(`/api/games/${code}/reveal-card`));
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toBe("image/png");
-  });
-
-  it("?teamId=<valid team> → 200 image/png for that team's card in RESULTS", async () => {
-    const { code, winnerTeamId } = await createGameInReveal();
-    const res = await fetch(base(`/api/games/${code}/reveal-card?teamId=${winnerTeamId}`));
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toBe("image/png");
-    expect(res.headers.get("cache-control")).toContain("no-store");
-    const buf = Buffer.from(await res.arrayBuffer());
-    expect(buf.length).toBeGreaterThan(100);
-    expect(buf[0]).toBe(0x89);
-    expect(buf.subarray(1, 4).toString("ascii")).toBe("PNG");
-  });
-
-  it("?teamId=<foreign id> → 404 team_not_found (no cross-game card leak)", async () => {
-    const { code } = await createGameInReveal();
-    const res = await fetch(
-      base(`/api/games/${code}/reveal-card?teamId=00000000-0000-4000-8000-000000000000`),
-    );
-    expect(res.status).toBe(404);
-    const body = (await res.json()) as { ok: boolean; error: string };
-    expect(body.ok).toBe(false);
-    expect(body.error).toBe("team_not_found");
-  });
-
-  it("?teamId before REVEAL (JUDGING) → 409 not_revealing even for a valid team", async () => {
-    const res = await fetch(base("/api/games"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ teamCount: 2, theme: "Too Early For TeamId" }),
-    });
-    const body = (await res.json()) as {
-      code: string;
-      gameId: string;
-      teams: Array<{ id: string }>;
-    };
-    const now = Date.now();
-    await srv.hub.applyEvent(body.gameId, { type: "gm:approveGreetings", now });
-    await srv.hub.applyEvent(body.gameId, { type: "gm:stopBuild", now });
-    await srv.hub.applyEvent(body.gameId, { type: "gm:stopScoring", now });
-    const res2 = await fetch(
-      base(`/api/games/${body.code}/reveal-card?teamId=${body.teams[0]!.id}`),
-    );
-    expect(res2.status).toBe(409);
-    const err = (await res2.json()) as { ok: boolean; error: string; phase: string };
-    expect(err.error).toBe("not_revealing");
-    expect(err.phase).toBe("JUDGING");
-  });
-
-  it("REVEAL → serves the byte-identical finalPass render (montage polish, NOT the crisp build render)", async () => {
-    const { code, gameId, winnerTeamId } = await createGameInReveal();
-    const res = await fetch(base(`/api/games/${code}/reveal-card`));
-    expect(res.status).toBe(200);
-    const fetched = Buffer.from(await res.arrayBuffer());
-    const game = (await srv.repo.getGame(gameId))!;
-    const [finalPassRender, crispRender] = await localFinalPassAndCrispRender(game, winnerTeamId);
-    // Byte-identical to the endpoint's own gather+render (renderCardPng is
-    // deterministic — card-render.test.ts pins byte-determinism, and the PNG
-    // embeds no timestamps).
-    expect(Buffer.compare(fetched, finalPassRender)).toBe(0);
-    // …and distinct from the crisp build-phase render: the finalPass grading
-    // (style-pack derived, or the neutral vignette) applies even for a
-    // zero-item card.
-    expect(Buffer.compare(fetched, crispRender)).not.toBe(0);
-  });
-});
-
 describe("GET /api/games/:code/scoring-card/:cardId?token= (player rating card PNG)", () => {
   /** Create a game, join a player on team A, and drive it to SCORING. */
   async function createGameInScoring(nickname = "Rater"): Promise<{
@@ -597,10 +456,10 @@ describe("GET /api/games/:code/scoring-card/:cardId?token= (player rating card P
    * END-TO-END: a seeded game with READY items (real sticker PNGs on disk)
    * and a persisted layout → the scoring-card PNG must decode to a REAL,
    * non-paper pixel-variance image (the stickers actually drawn), and must
-   * match the reveal-card render byte-for-byte (parity — same gather+render
-   * path: renderTeamCardPng in api.ts).
+   * match the local finalPass render byte-for-byte (parity — same
+   * gather+render path: renderTeamCardPng in api.ts).
    */
-  it("SCORING → decodes to a non-paper pixel-variance render with reveal-card parity", async () => {
+  it("SCORING → decodes to a non-paper pixel-variance render with local finalPass parity", async () => {
     const { code, gameId, sessionToken, firstCardId } = await createGameInScoring();
     const game = (await srv.repo.getGame(gameId))!;
     const card = game.scoringOrder!.cards.find((c) => c.cardId === firstCardId)!;
@@ -687,9 +546,10 @@ describe("GET /api/games/:code/scoring-card/:cardId?token= (player rating card P
     }
     expect(anyNonPaper).toBe(true);
 
-    // 5. reveal-card parity: the same gather+render path (renderTeamCardPng)
-    //    serves the reveal-card route — the fetched scoring render must be
-    //    byte-identical to the local finalPass render of the same state.
+    // 5. Local finalPass render parity: the same gather+render path
+    //    (renderTeamCardPng) backs the endpoint — the fetched scoring render
+    //    must be byte-identical to the local finalPass render of the same
+    //    state.
     const [finalPassRender] = await localFinalPassAndCrispRender(game, teamId);
     expect(Buffer.compare(fetched, finalPassRender)).toBe(0);
   });

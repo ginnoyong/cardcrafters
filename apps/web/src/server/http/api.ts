@@ -11,12 +11,6 @@
  *   GET  /api/games/:code    game summary → { phase, round, theme, teams[] }
  *                            (joinToken per team + per-team greeting only
  *                            with ?full=1 — GM/QR use)
- *   GET  /api/games/:code/reveal-card  the WINNING team's finished card as a
- *                            800×1120 PNG (presenter REVEAL 3D texture). Only
- *                            served while phase is REVEAL/RESULTS — the
- *                            winning card becomes public at REVEAL by
- *                            definition; cache-control: no-store keeps the
- *                            phase gate honest.
  *
  * NOTE: gmUrl embeds the game code (/gm?code=…). GM auth IS "knowing the
  * code" for this party game (documented in ws/auth.ts) — anyone with the URL
@@ -130,12 +124,12 @@ export function mergeCardConfig(partial: unknown): CardConfig {
 
 /**
  * Gather one team's finished card (layout + READY items + greeting) and render
- * it as a PNG. Shared by the reveal-card route (presenter REVEAL texture) and
- * the scoring-card route (player rating preview). Renders the FINAL polished
- * montage card (feathered stickers + style-pack grading); both routes are
- * phase-gated at SCORING or later, so the montage pass has already settled.
- * The render itself is fail-open about missing stickers, but a hard failure
- * propagates to the caller (routes turn it into a 500).
+ * it as a PNG. Serves the scoring-card route (player rating preview /
+ * presenter big screen). Renders the FINAL polished montage card (feathered
+ * stickers + style-pack grading); the route is phase-gated at SCORING or
+ * later, so the montage pass has already settled. The render itself is
+ * fail-open about missing stickers, but a hard failure propagates to the
+ * caller (routes turn it into a 500).
  */
 async function renderTeamCardPng(
   repo: Repository,
@@ -269,67 +263,6 @@ export async function handleApiRequest(
     return true;
   }
 
-  // GET /api/games/:code/reveal-card?teamId= — a finished card as a PNG (the
-  // presenter REVEAL 3D texture, and the GM console's 3D modal per team).
-  // The card is public from REVEAL on (the winner banner already names the
-  // team); before that the endpoint refuses (409) so unfinished/anonymous
-  // cards never leak. With ?teamId=<uuid> that team's card is served (the GM
-  // modal flips through every card) — the team must belong to the game (404
-  // team_not_found otherwise). Without teamId the WINNER's card is served
-  // (the original presenter behaviour, unchanged).
-  const revealMatch = /^\/api\/games\/([A-Za-z0-9]+)\/reveal-card$/.exec(path);
-  if (req.method === "GET" && revealMatch) {
-    const code = revealMatch[1]!;
-    const game = await hub.gameByCode(code);
-    if (!game) {
-      sendJson(res, 404, { ok: false, error: "unknown_code", code });
-      return true;
-    }
-    const state = await hub.runtimeState(game.id);
-    if (state.phase !== "REVEAL" && state.phase !== "RESULTS") {
-      sendJson(res, 409, { ok: false, error: "not_revealing", phase: state.phase });
-      return true;
-    }
-    const requestedTeamId = url.searchParams.get("teamId");
-    const teams = await repo.listTeams(game.id);
-    let targetTeamId: string;
-    if (requestedTeamId) {
-      // Explicit team request (GM 3D modal) — must be a team of THIS game.
-      if (!teams.some((t) => t.id === requestedTeamId)) {
-        sendJson(res, 404, { ok: false, error: "team_not_found" });
-        return true;
-      }
-      targetTeamId = requestedTeamId;
-    } else {
-      const winnerTeamId = state.winnerTeamId;
-      if (!winnerTeamId) {
-        sendJson(res, 409, { ok: false, error: "no_winner" });
-        return true;
-      }
-      const winner = teams.find((t) => t.id === winnerTeamId);
-      if (!winner) {
-        sendJson(res, 404, { ok: false, error: "winner_team_missing" });
-        return true;
-      }
-      targetTeamId = winnerTeamId;
-    }
-    // Shared gather-and-render path (fail-open: stickers that cannot load are
-    // skipped by the renderer itself). The hub's runtime round is authoritative
-    // for layout/items reads (persisted game.round can lag the runtime state).
-    let png: Buffer;
-    try {
-      png = await renderTeamCardPng(repo, game, targetTeamId, { runtimeRound: state.round });
-    } catch (err) {
-      sendJson(res, 500, {
-        ok: false,
-        error: err instanceof Error ? err.message : "card render failed",
-      });
-      return true;
-    }
-    res.writeHead(200, { "content-type": "image/png", "cache-control": "no-store" });
-    res.end(png);
-    return true;
-  }
   // GET /api/games/:code/scoring-card/:cardId?token=[&variant=poster] — one
   // scoring card's finished image. Two audiences:
   //  - a PLAYER rating it, authenticated by a valid session token (?token=…);

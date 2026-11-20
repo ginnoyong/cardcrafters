@@ -650,6 +650,75 @@ label {
   }
 }
 
+/* Presenter REVEAL/RESULTS stage (components/PresenterTeamStage.tsx):
+   conditional per-viewed-team honours banners (brass WINNER / sage Crowd
+   Favourite — only the team on stage shows its own) above a side-by-side
+   card pair: the AI-montage poster and the composed sticker CardCanvas,
+   each with a prompt-transparency accordion under it (which reuses
+   .cc-btn / .cc-prompt-view / .cc-showcase-prompts /
+   .cc-judge-prompt-content untouched). Cards keep the game's locked ratio,
+   so the columns must be full-width flex items — the grid handles the
+   split. */
+.cc-stage-banner {
+  display: grid;
+  gap: 0.15rem;
+  justify-items: center;
+  padding: 0.75rem 1rem;
+  border: 2px solid;
+  border-radius: var(--radius);
+  text-align: center;
+}
+
+.cc-stage-banner-kicker {
+  margin: 0;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.cc-stage-banner-name {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+/* WINNER: antique-brass/gold — tinted brass background + brass border. */
+.cc-stage-banner-winner {
+  border-color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent-strong) 14%, var(--bg-card));
+}
+
+/* Crowd Favourite: the sage brand accent, tinted the same way. */
+.cc-stage-banner-peoples-choice {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-card));
+}
+
+.cc-stage-cards {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.9rem;
+  align-items: start;
+}
+
+.cc-stage-card-col {
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.cc-stage-card-title {
+  margin: 0;
+  font-size: 1rem;
+}
+
+@media (max-width: 720px) {
+  .cc-stage-cards {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* GM judging boxes (Dispatch 1: replaces the cc-judging table in JUDGING):
    one .cc-judge-card per team — header + greeting, the poster/sticker flip
    visual as the ONLY content column (full width, with the prompt
@@ -1370,57 +1439,6 @@ no animations requiring sound. */
 
 .cc-scoring-subtitle h3 {
   margin: 0 0 0.25rem;
-}
-
-/* Presenter REVEAL block: the big winner banner + the Show results button. */
-.cc-reveal {
-  display: grid;
-  gap: 0.75rem;
-  margin-top: 1.5rem;
-}
-
-.cc-reveal-actions {
-  justify-content: center;
-}
-
-/* Presenter REVEAL 3D reveal (components/Reveal3D.tsx): the winning card as a
-   Three.js texture over a dark accent vignette. The canvas is transparent —
-   the scene background IS the section's vignette. Without WebGL / with
-   reduced motion the component falls back to the static .cc-winner-banner. */
-.cc-reveal3d {
-  display: grid;
-  gap: 0.35rem;
-  justify-items: center;
-  padding: 1.5rem 1rem;
-  border-color: var(--accent-strong);
-  background:
-    radial-gradient(
-      ellipse at center,
-      color-mix(in srgb, var(--accent-strong) 12%, var(--bg-card)) 0%,
-      var(--bg) 78%
-    );
-  overflow: hidden; /* the drifting card/glow never paints outside the card */
-}
-
-.cc-reveal3d-stage {
-  width: 100%;
-  max-width: 640px;
-  min-height: 320px;
-  aspect-ratio: 16 / 10;
-}
-
-.cc-reveal3d-stage canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
-/* The 3D moment must not animate for reduced-motion users either — the
-   component swaps to the static banner, this only guards the stage box. */
-@media (prefers-reduced-motion: reduce) {
-  .cc-reveal3d-stage {
-    display: none;
-  }
 }
 
 /* GM reveal-extend control (gm/page.tsx): the winner banner doubles as a
