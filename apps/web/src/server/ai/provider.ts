@@ -63,7 +63,7 @@ export function isAiTaskName(value: unknown): value is AiTaskName {
 
 export interface TaskConfig {
   name: AiTaskName;
-  /** Primary OpenRouter model id, e.g. "google/gemini-2.5-flash". */
+  /** Primary OpenRouter model id, e.g. "google/gemini-3.5-flash-lite". */
   primary: string;
   /** Fallback model ids, tried in order after the primary's retries fail. */
   fallbacks: string[];

@@ -3,7 +3,7 @@
  *
  * HONEST LIMITATIONS — read before touching:
  *  - The AI prompt for item_image already asks for a transparent sticker;
- *    real models (gemini-2.5-flash-image / gpt-image-1) usually comply, and
+ *    real models (gemini-3.1-flash-lite-image / gemini-3.1-flash-image) usually comply, and
  *    the mock provider always draws true alpha. This module is the FALLBACK
  *    for models that return an opaque image.
  *  - The algorithm is a CORNER-COLOR CHROMA KEY: the most common corner pixel

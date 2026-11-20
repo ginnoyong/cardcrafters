@@ -163,7 +163,7 @@ describe("AiRouter — mock mode", () => {
     } as unknown as NodeJS.ProcessEnv);
     expect(loaded.tasks.item_image.primary).toBe("test/image-model");
     expect(loaded.tasks.item_image.fallbacks).toEqual(["test/image-b", "test/image-c"]);
-    expect(loaded.tasks.prompt_validation.primary).toBe("google/gemini-2.5-flash");
+    expect(loaded.tasks.prompt_validation.primary).toBe("google/gemini-3.5-flash-lite");
   });
 });
 
@@ -227,7 +227,7 @@ describe("AiRouter — openrouter (mocked fetch)", () => {
   });
 
   it("schema-invalid output is retried across the chain; exhaustion throws AiTaskError", async () => {
-    // prompt_validation: retries=1, fallbacks=[gpt-4.1-mini, gpt-4o-mini]
+    // prompt_validation: retries=1, fallbacks=[gemini-3.8-flash, gpt-6-luna]
     // → every model gets 2 attempts → 6 calls, all ERROR.
     const { router, models, repo, gameId } = await mkOpenRouterRouter(() =>
       completionRes({ valid: true, reason: "" /* normalized_subject missing */ }, 0),

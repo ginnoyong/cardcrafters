@@ -1,14 +1,26 @@
 {
   "_readme": [
-    "Per-task AI configuration for Card Crafters (Step 4).",
+    "Per-task AI configuration for Card Crafters.",
     "Each task has: primary model, fallback models (tried in order after the primary's retries are exhausted), temperature, maxTokens, timeoutMs, retries, and an optional structured-output schema name from @cardcrafters/shared.",
     "mode 'auto' = use OpenRouter iff OPENROUTER_API_KEY is set, otherwise the deterministic mock provider (full game runs on mock).",
     "ENV OVERRIDES (applied by loadTaskConfig at startup, take precedence over this file):",
     "  AI_MODE                    mock | openrouter | auto (default auto)",
-    "  AI_BUDGET_PER_GAME_USD     number, per-game AI spend ceiling (default 25; mock calls cost 0)",
-    "  AI_TASK_<NAME>_MODEL       override the primary model, e.g. AI_TASK_PROMPT_VALIDATION_MODEL=openai/gpt-4o-mini",
-    "  AI_TASK_<NAME>_FALLBACKS   override fallbacks, comma-separated, e.g. AI_TASK_ITEM_IMAGE_FALLBACKS=openai/gpt-image-1,google/gemini-2.5-flash-image",
+    "  AI_BUDGET_PER_GAME_USD     number, per-game AI spend ceiling (default 50; mock calls cost 0)",
+    "  AI_TASK_<NAME>_MODEL       override the primary model, e.g. AI_TASK_PROMPT_VALIDATION_MODEL=google/gemini-3.8-flash",
+    "  AI_TASK_<NAME>_FALLBACKS   override fallbacks, comma-separated, e.g. AI_TASK_ITEM_IMAGE_FALLBACKS=google/gemini-3.1-flash-image,google/gemini-3-pro-image",
     "  <NAME> is the task key upper-snake-cased: prompt_validation -> AI_TASK_PROMPT_VALIDATION_*, item_image -> AI_TASK_ITEM_IMAGE_*.",
+    "MODEL LIFECYCLE (audited Nov 2026 \u2014 all models below have published retirement dates past March 2027,",
+    "except openai/gpt-6-luna which is Active with no announced retirement; it is OpenAI's designated",
+    "replacement for the retired gpt-4.1-mini line):",
+    "  google/gemini-3.5-flash-lite   text   retires 2027-07-21 or later",
+    "  google/gemini-3.8-flash        text   retires 2027-09-02 or later",
+    "  openai/gpt-6-luna              text   active, no announced retirement",
+    "  google/gemini-3.1-flash-lite-image  image  retires 2027-06-28 or later",
+    "  google/gemini-3.1-flash-image  image  retires 2027-05-28 or later",
+    "  google/gemini-3-pro-image      image  retires 2027-05-28 or later",
+    "RETIRED (never re-add): openai/gpt-image-1 (shut down 2026-10-23), openai/gpt-4.1-mini and",
+    "openai/gpt-4o-mini (shut down 2027-01-14), google/gemini-2.5-flash (reroutes 2026-12-01),",
+    "google/gemini-2.5-flash-image (retires 2027-03-15), openai/gpt-5-image-mini (unconfirmed, 'not sooner than 2026-12-01').",
     "maxTokens 0 means 'omit max_tokens' (used by the image task)."
   ],
   "mode": "auto",
@@ -18,10 +30,10 @@
   },
   "tasks": {
     "prompt_validation": {
-      "primary": "google/gemini-2.5-flash",
+      "primary": "google/gemini-3.5-flash-lite",
       "fallbacks": [
-        "openai/gpt-4.1-mini",
-        "openai/gpt-4o-mini"
+        "google/gemini-3.8-flash",
+        "openai/gpt-6-luna"
       ],
       "temperature": 0,
       "maxTokens": 200,
@@ -30,9 +42,9 @@
       "structured": "promptValidationSchema"
     },
     "moderation": {
-      "primary": "openai/gpt-4.1-mini",
+      "primary": "openai/gpt-6-luna",
       "fallbacks": [
-        "google/gemini-2.5-flash"
+        "google/gemini-3.5-flash-lite"
       ],
       "temperature": 0,
       "maxTokens": 150,
@@ -41,9 +53,10 @@
       "structured": "moderationSchema"
     },
     "greeting_variations": {
-      "primary": "google/gemini-2.5-flash",
+      "primary": "google/gemini-3.5-flash-lite",
       "fallbacks": [
-        "openai/gpt-4.1-mini"
+        "google/gemini-3.8-flash",
+        "openai/gpt-6-luna"
       ],
       "temperature": 0.9,
       "maxTokens": 800,
@@ -52,9 +65,10 @@
       "structured": "greetingVariationsSchema"
     },
     "style_derivation": {
-      "primary": "google/gemini-2.5-flash",
+      "primary": "google/gemini-3.5-flash-lite",
       "fallbacks": [
-        "openai/gpt-4.1-mini"
+        "google/gemini-3.8-flash",
+        "openai/gpt-6-luna"
       ],
       "temperature": 0.4,
       "maxTokens": 400,
@@ -63,9 +77,10 @@
       "structured": "styleDerivationSchema"
     },
     "item_image": {
-      "primary": "google/gemini-2.5-flash-image",
+      "primary": "google/gemini-3.1-flash-lite-image",
       "fallbacks": [
-        "openai/gpt-image-1"
+        "google/gemini-3.1-flash-image",
+        "google/gemini-3-pro-image"
       ],
       "temperature": 1,
       "maxTokens": 0,
@@ -74,9 +89,10 @@
       "structured": null
     },
     "layout_composition": {
-      "primary": "google/gemini-2.5-flash",
+      "primary": "google/gemini-3.5-flash-lite",
       "fallbacks": [
-        "openai/gpt-4.1-mini"
+        "google/gemini-3.8-flash",
+        "openai/gpt-6-luna"
       ],
       "temperature": 0.3,
       "maxTokens": 1200,
@@ -85,9 +101,10 @@
       "structured": "layoutCompositionSchema"
     },
     "layout_critique": {
-      "primary": "google/gemini-2.5-flash",
+      "primary": "google/gemini-3.5-flash-lite",
       "fallbacks": [
-        "openai/gpt-4.1-mini"
+        "google/gemini-3.8-flash",
+        "openai/gpt-6-luna"
       ],
       "temperature": 0.2,
       "maxTokens": 400,
@@ -97,9 +114,10 @@
       "enabled": true
     },
     "layout_montage": {
-      "primary": "google/gemini-2.5-flash",
+      "primary": "google/gemini-3.5-flash-lite",
       "fallbacks": [
-        "openai/gpt-4.1-mini"
+        "google/gemini-3.8-flash",
+        "openai/gpt-6-luna"
       ],
       "temperature": 0.3,
       "maxTokens": 1200,
@@ -109,9 +127,10 @@
       "enabled": true
     },
     "montage_prompt": {
-      "primary": "google/gemini-2.5-flash",
+      "primary": "google/gemini-3.5-flash-lite",
       "fallbacks": [
-        "openai/gpt-4.1-mini"
+        "google/gemini-3.8-flash",
+        "openai/gpt-6-luna"
       ],
       "temperature": 0.8,
       "maxTokens": 1200,
@@ -120,10 +139,10 @@
       "structured": "montagePromptSchema"
     },
     "montage_image": {
-      "primary": "google/gemini-2.5-flash-image",
+      "primary": "google/gemini-3.1-flash-lite-image",
       "fallbacks": [
         "google/gemini-3.1-flash-image",
-        "openai/gpt-5-image-mini"
+        "google/gemini-3-pro-image"
       ],
       "temperature": 1,
       "maxTokens": 0,

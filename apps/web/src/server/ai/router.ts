@@ -48,8 +48,8 @@ import {
  * Budget math (measured costs, worst case):
  *   - text tasks (montage_prompt / greeting / validation / moderation):
  *     ≈ $0.001–0.005 per call;
- *   - image tasks (item_image / montage_image) on google/gemini-2.5-flash-image:
- *     ≈ $0.03–0.04 per image (openai/gpt-image-1 fallback up to ≈ $0.19).
+ *   - image tasks (item_image / montage_image) on google/gemini-3.1-flash-lite-image:
+ *     ≈ $0.03–0.04 per image (gemini-3-pro-image fallback up to ≈ $0.19).
  *   - Per team per round: up to 25 sticker images (cap 25/team) + 1
  *     montage_prompt + 1 montage_image ≈ 25 × $0.04 + $0.05 ≈ $1.10; the
  *     continuous montage loop can add one more montage_image per validated
@@ -74,7 +74,7 @@ export const DEFAULT_AI_BUDGET_PER_GAME_USD = 50;
 export const DEFAULT_CALL_ESTIMATE_USD = 0.01;
 /**
  * Optimistic pre-call reserve for an image-generation call, in USD. Realistic
- * gemini-2.5-flash-image cost is $0.03–0.04 (gpt-image-1 fallback up to
+ * gemini-3.1-flash-lite-image cost is $0.03–0.04 (gemini-3-pro-image fallback up to
  * ~$0.19) — see the budget math on DEFAULT_AI_BUDGET_PER_GAME_USD.
  */
 export const DEFAULT_IMAGE_CALL_ESTIMATE_USD = 0.05;

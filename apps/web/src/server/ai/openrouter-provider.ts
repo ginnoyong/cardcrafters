@@ -59,7 +59,7 @@ interface ImagesEndpointResponse {
  * Message content part — plain text, or an image (data URL / https URL) for
  * VISION tasks. layout_critique sends the rendered card PNG as a base64 data
  * URL alongside the prompt text; OpenRouter forwards the part to the
- * vision-capable model (google/gemini-2.5-flash primary).
+ * vision-capable model (google/gemini-3.5-flash-lite primary).
  */
 type ContentPart =
   | { type: "text"; text: string }
@@ -172,11 +172,11 @@ export class OpenRouterProvider implements AiProvider {
       const text = await res.text().catch(() => "");
       const status = res.status;
       // Image models served ONLY via the dedicated images API (e.g.
-      // openai/gpt-image-1) reject /chat/completions with an HTTP 404 whose
+      // legacy gpt-image-1) reject /chat/completions with an HTTP 404 whose
       // body names the /api/v1/images endpoint. That model is still a valid
       // fallback — retry the SAME model/attempt against the images endpoint
       // instead of failing the whole chain (this is what killed real stickers:
-      // the gpt-image-1 fallback burned every attempt on the wrong endpoint).
+      // the fallback burned every attempt on the wrong endpoint).
       if (
         (task === "item_image" || task === "montage_image") &&
         status === 404 &&
@@ -268,7 +268,7 @@ export class OpenRouterProvider implements AiProvider {
 
   /**
    * Item-image fallback for models that are served ONLY via the unified
-   * images API (POST /api/v1/images — e.g. openai/gpt-image-1). Same model,
+   * images API (POST /api/v1/images — e.g. gpt-image-* models). Same model,
    * same prompt, same attempt budget: this replaces a chat/completions call
    * that OpenRouter rejected with 404 "Use the /api/v1/images endpoint".
    * Images come back as base64 (b64_json) with an optional media_type.
@@ -285,7 +285,7 @@ export class OpenRouterProvider implements AiProvider {
     // 5:7 portrait — a square poster gets center-cropped to the card ratio at
     // the source (gradePoster's cropToCardRatio), which cuts the greeting
     // title's outer glyphs when the model painted it full-width. Requesting
-    // the portrait size natively (gpt-image-1's 1024×1536 = 2:3) shrinks that
+    // the portrait size natively (gpt-image-* native 1024×1536 = 2:3) shrinks that
     // side crop dramatically. montage_image ONLY — item_image stickers must
     // stay square (transparent square canvas). OpenRouter ignores unsupported
     // params rather than rejecting them, so models without a size knob are
