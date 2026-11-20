@@ -8,10 +8,12 @@
  * layout:updated — the presenter socket joins every team room).
  *
  * Scoring/results phases (big-screen duty):
- *  - SCORING: an ANONYMOUS single-card stage — one card at a time (poster
+ *  - SCORING: a team-NAMED single-card stage — one card at a time (poster
  *    ↔ sticker flip view) with wrap-around prev/next and a live tally
- *    ("Card B · 7.5 avg · 3 votes"); the team stage is suppressed (names
- *    would leak the card↔team mapping — server-side rule).
+ *    ("Llama Legends · 7.5 avg · 3 votes"); the team stage is suppressed
+ *    (cycling team→card side by side would leak the card↔team mapping —
+ *    server-side rule), but the card itself carries its real teamName
+ *    (decision 2a — team names are public from scoring onward).
  *  - REVEAL/RESULTS: the one-at-a-time stage shows the viewed team's TWO
  *    cards SIDE BY SIDE (components/PresenterTeamStage.tsx: AI-montage
  *    poster + sticker CardCanvas, each with a prompt-transparency
@@ -151,10 +153,11 @@ function PresenterBoard({
       // and never reach the presenter.
       // -------------------------------------------------------------------
       // Scoring/results events. The presenter's scoring:started carries
-      // ANONYMOUS cards only (no teamId, no yourTeamCardId — the server
-      // strips the mapping for this surface); scores:update rides the whole
-      // game room (anonymous per-card tallies); winnerAnnounced carries the
-      // winner + People's Choice + public standings for the results board.
+      // team-NAMED cards (teamName per decision 2a — never teamId during
+      // SCORING, and no yourTeamCardId for this surface); scores:update
+      // rides the whole game room (anonymous per-card tallies);
+      // winnerAnnounced carries the winner + People's Choice + public
+      // standings for the results board.
       // -------------------------------------------------------------------
       onEvent<Record<string, unknown>>(socket, "scoring:started", (payload) =>
         dispatch({ type: "scoringStarted", payload }),
@@ -188,6 +191,16 @@ function PresenterBoard({
       setError("Could not reach the game server — please try again.");
     }
   }, []);
+
+  // Return to the GM console — shared by EVERY presenter phase's Return
+  // button (scoring stage, REVEAL stage, RESULTS stage; the JUDGING stage's
+  // Return lives inside TeamJudgeCard's actions node). history.length is
+  // unreliable for a fresh _blank tab (Chromium reports 2 for the initial
+  // about:blank entry, so back() can land on a blank page) — the coded GM
+  // URL is the deterministic path back.
+  const returnToGm = useCallback((): void => {
+    window.location.assign(`/gm?code=${encodeURIComponent(code)}`);
+  }, [code]);
 
   // Keep the reveal on screen for another 30 s (reveal:extend — same socket,
   // same ack shape as reveal:ack; the server only honours it during REVEAL).
@@ -286,6 +299,10 @@ function PresenterBoard({
   // wrap-around steps below keep the index in range otherwise.
   const clampedScoringIndex = scoringCount > 0 ? Math.min(scoringCardIndex, scoringCount - 1) : 0;
   const scoringCard = scoringCards[clampedScoringIndex] ?? null;
+  // Decision 2a: the card's real team name (the server now carries teamName
+  // on the presenter's scoring payload) — shown instead of the "Card B"
+  // label; falls back to the label when a payload somehow lacks it.
+  const scoringCardName = scoringCard ? (scoringCard.teamName ?? scoringCard.label) : null;
   // Flip resets whenever the shown card changes (index steps, round swaps).
   useEffect(() => {
     setScoringCardFlipped(false);
@@ -382,6 +399,28 @@ function PresenterBoard({
               >
                 Next →
               </button>
+              {/* Return to the GM console — on every stage phase (the JUDGING
+                  phase's Return lives inside TeamJudgeCard's actions node). */}
+              {snapshot.phase === PHASE.REVEAL ? (
+                <button
+                  type="button"
+                  className="cc-btn"
+                  data-testid="presenter-reveal-return"
+                  onClick={returnToGm}
+                >
+                  Return
+                </button>
+              ) : null}
+              {snapshot.phase === PHASE.RESULTS ? (
+                <button
+                  type="button"
+                  className="cc-btn"
+                  data-testid="presenter-results-return"
+                  onClick={returnToGm}
+                >
+                  Return
+                </button>
+              ) : null}
             </div>
           </div>
           {snapshot.phase === PHASE.JUDGING ? (
@@ -473,12 +512,14 @@ function PresenterBoard({
       ) : null}
       {!snapshot ? <p className="cc-hint">Waiting for the first sync…</p> : null}
 
-      {/* SCORING: the anonymous single-card stage — replaces the team stage
-          (whose names would leak the card↔team mapping) and the old chip
-          console. Poster-first: the click-to-flip button swaps between the
-          AI montage poster and the composed sticker card. The card↔team
-          mapping NEVER reaches the big screen before the reveal (the server
-          strips it from every presenter payload). */}
+      {/* SCORING: the team-named single-card stage — replaces the team stage
+          (cycling team→card side by side would leak the card↔team mapping)
+          and the old chip console. Decision 2a: the card's REAL team name is
+          public from scoring onward and shows in the stage header (the
+          card↔teamId mapping itself still never rides the presenter payload
+          during SCORING — the server strips it). Poster-first: the
+          click-to-flip button swaps between the AI montage poster and the
+          composed sticker card. */}
       {snapshot?.phase === PHASE.SCORING && scoringCard ? (
         <section
           aria-label="scoring stage"
@@ -492,7 +533,7 @@ function PresenterBoard({
             </p>
           </div>
           <div className="cc-present-stage-header">
-            <h2>{scoringCard.label}</h2>
+            <h2>{scoringCardName}</h2>
             <span className="cc-badge">
               {clampedScoringIndex + 1} of {scoringCount}
             </span>
@@ -515,19 +556,26 @@ function PresenterBoard({
               >
                 Next →
               </button>
+              <button
+                type="button"
+                className="cc-btn"
+                data-testid="presenter-scoring-return"
+                onClick={returnToGm}
+              >
+                Return
+              </button>
             </div>
           </div>
           <button
             type="button"
             className="cc-scoring-stage-card"
             data-testid="presenter-scoring-card"
-            style={{ aspectRatio: `${snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W} / ${snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}` }}
-            aria-label={`${scoringCard.label} — ${scoringCardFlipped ? "sticker card" : "AI montage"} (click to flip)`}
+            aria-label={`${scoringCardName} — ${scoringCardFlipped ? "sticker card" : "AI montage"} (click to flip)`}
             onClick={() => setScoringCardFlipped((f) => !f)}
           >
             <img
               src={`/api/games/${code}/scoring-card/${scoringCard.cardId}${scoringCardFlipped ? "" : "?variant=poster"}`}
-              alt={`${scoringCard.label} — ${scoringCardFlipped ? "sticker card" : "AI montage poster"}`}
+              alt={`${scoringCardName} — ${scoringCardFlipped ? "sticker card" : "AI montage poster"}`}
               draggable={false}
             />
           </button>

@@ -206,8 +206,9 @@ export interface SyncFullPayload extends Record<string, unknown> {
    *    far) and ratedY (total expected = activePlayers × (teams − 1));
    *  - players: team-NAMED cards (teamName, per user decision 2a — but still
    *    no teamId) + their own team's cardId;
-   *  - presenter: ANONYMOUS cards only (no teamName, no teamId, no
-   *    yourTeamCardId).
+   *  - presenter: team-NAMED cards (teamName per decision 2a — team names
+   *    are public from scoring onward) but still no teamId during SCORING
+   *    (the mapping rides along from JUDGING onward) and no yourTeamCardId.
    * The anonymous `scores` tallies ride along for all three audiences.
    * Absent when no scoring order exists for the current round.
    */
@@ -388,20 +389,23 @@ export async function buildSyncFull(
           return cardId ? [{ cardId, value: s.value }] : [];
         });
     } else {
-      // Presenter (and any unknown identity): anonymous cards + the same
+      // Presenter (and any unknown identity): team-NAMED cards (teamName
+      // per user decision 2a — team names are public from scoring onward,
+      // the big screen shows them during the rating stage) + the same
       // anonymous tallies (computed above) — the presenter scoreboard must
       // survive a resync exactly like the GM's and the players'.
       // From JUDGING onward the cards also carry teamId: the judging stage
-      // is team-named (team names render on the big screen), so the
-      // card->team mapping is already public here — and the judge card
-      // needs it to light up its live tally. During SCORING the mapping
-      // stays stripped (the rating stage shows anonymous labels only).
+      // is team-named (the judge card needs teamId to light up its live
+      // tally), so the card->team mapping is already public here. During
+      // SCORING the teamId mapping stays stripped (only the NAME is public
+      // — the tally board stays cardId-keyed).
       const revealMapping = state.phase !== PHASE.SCORING;
       scoring = {
         round,
         cards: order.cards.map((c) => ({
           cardId: c.cardId,
           label: c.label,
+          teamName: c.teamName,
           ...(revealMapping ? { teamId: c.teamId } : {}),
         })),
       };

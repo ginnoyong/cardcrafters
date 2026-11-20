@@ -810,7 +810,7 @@ describe("reconnect state preservation (refresh regression)", () => {
 // ---------------------------------------------------------------------------
 // Scoring phase end-to-end (team-named 1-10 ratings → judging → results).
 // Exercises the WS surface: scoring:started (players get teamName, never
-// teamId; presenter copies stay anonymous), score:submit acks + guards, live
+// teamId; presenter copies carry teamName per decision 2a), score:submit acks + guards, live
 // anonymous scores:update, sync:full scoring/myScores shapes, then
 // judging:winner → reveal:ack → RESULTS.
 // ---------------------------------------------------------------------------
@@ -1182,49 +1182,65 @@ describe("presenter scoring tallies (sync:full + scores:update)", () => {
     expect(stop.ok).toBe(true);
     expect(stop.phase).toBe("SCORING");
 
-    // Presenter resync during SCORING → sync:full carries the anonymous
-    // scoring cards + the (currently empty) tallies — cardId-keyed, no
-    // teamId anywhere in the tallies.
+    // Presenter resync during SCORING → sync:full carries the team-NAMED
+    // scoring cards (real teamName per decision 2a — team names are public
+    // from scoring onward) + the (currently empty) tallies — cardId-keyed,
+    // and still no teamId anywhere (the mapping itself stays stripped).
     const resynced = new Promise<SyncFullEvent>((resolve) => presenter.once("sync:full", resolve));
     await emitAck(presenter, "sync:resync", {});
     const raw = await resynced;
-    const scoring = raw.scoring as { cards: Array<{ cardId: string; label: string }> };
+    const scoring = raw.scoring as { cards: Array<{ cardId: string; label: string; teamName: string }> };
     expect(Array.isArray(scoring.cards)).toBe(true);
     expect(scoring.cards).toHaveLength(3);
     for (const c of scoring.cards) {
+      expect(typeof c.teamName).toBe("string");
+      expect((c.teamName as string).length).toBeGreaterThan(0);
       expect(c).not.toHaveProperty("teamId");
-      expect(c).not.toHaveProperty("teamName");
     }
     expect(Array.isArray(raw.scores)).toBe(true);
     const tallies = raw.scores as Array<Record<string, unknown>>;
     for (const t of tallies) {
       expect(t).not.toHaveProperty("teamId");
     }
-    // The client reducer accepts the presenter shape (anonymous cards +
-    // tallies).
+    // The client reducer accepts the presenter shape (team-named cards +
+    // tallies) and keeps the teamName passthrough while dropping teamId.
     const snap = normalizeSyncFull(raw, {}, null);
     expect(snap.scoring?.cards.every((c) => !("teamId" in c))).toBe(true);
+    expect(snap.scoring?.cards.every((c) => typeof c.teamName === "string" && c.teamName.length > 0)).toBe(true);
 
     // A player submits a score → the presenter receives the live anonymous
-    // scores:update (cardId-keyed, no teamId).
-    const cardB = scoring.cards[1]!.cardId;
+    // scores:update (cardId-keyed, no teamId). Rate a card that is NOT the
+    // player's own team's card (the Fisher–Yates shuffle varies per gameId —
+    // a fixed index can accidentally map to the player's own team). Alex's
+    // own cardId comes from alex's own sync:full (yourTeamCardId).
+    const alexResynced = new Promise<SyncFullEvent>((resolve) => alex.once("sync:full", resolve));
+    await emitAck(alex, "sync:resync", {});
+    const alexRaw = await alexResynced;
+    const alexScoring = alexRaw.scoring as { yourTeamCardId?: string };
+    const ownCardId = alexScoring?.yourTeamCardId;
+    const rateable = scoring.cards.find(
+      (c: Record<string, unknown>) => c.cardId !== ownCardId,
+    ) as { cardId: string };
+    expect(rateable).toBeDefined();
+    expect(rateable.cardId).not.toBe(ownCardId);
     const updatePromise = waitFor<{ cards: Array<Record<string, unknown>> }>(presenter, "scores:update");
-    const submit = await emitAck<{ ok: boolean }>(alex, "score:submit", { cardId: cardB, score: 8 });
+    const submit = await emitAck<{ ok: boolean }>(alex, "score:submit", { cardId: rateable.cardId, score: 8 });
+    if (!submit.ok) console.log('DEBUG submit:', JSON.stringify(submit));
     expect(submit.ok).toBe(true);
     const update = await updatePromise;
-    expect(update.cards).toEqual([{ cardId: cardB, avg: 8, count: 1 }]);
+    expect(update.cards).toEqual([{ cardId: rateable.cardId, avg: 8, count: 1 }]);
     expect(update.cards[0]).not.toHaveProperty("teamId");
 
     // Resync again → the tally survives the resync (the wipe-under-test).
     const resynced2 = new Promise<SyncFullEvent>((resolve) => presenter.once("sync:full", resolve));
     await emitAck(presenter, "sync:resync", {});
     const raw2 = await resynced2;
-    expect(raw2.scores).toEqual([{ cardId: cardB, avg: 8, count: 1 }]);
+    expect(raw2.scores).toEqual([{ cardId: rateable.cardId, avg: 8, count: 1 }]);
     for (const t of raw2.scores as Array<Record<string, unknown>>) {
       expect(t).not.toHaveProperty("teamId");
     }
     const snap2 = normalizeSyncFull(raw2, {}, null);
-    expect(snap2.scores[cardB]).toEqual({ avg: 8, count: 1 });
+    expect(snap2.scores[rateable.cardId]).toEqual({ avg: 8, count: 1 });
 
     presenter.close();
     alex.close();
@@ -1257,7 +1273,8 @@ describe("presenter scoring tallies (sync:full + scores:update)", () => {
     const stop = await emitAck<{ ok: boolean; phase?: string }>(gm, "gm:stopBuild", {});
     expect(stop.ok).toBe(true);
 
-    // Presenter resync during SCORING: cards still anonymous.
+    // Presenter resync during SCORING: cards carry teamName (decision 2a)
+    // but still no teamId (the mapping itself stays stripped).
     const resynced = new Promise<SyncFullEvent>((resolve) => presenter.once("sync:full", resolve));
     await emitAck(presenter, "sync:resync", {});
     const raw = await resynced;

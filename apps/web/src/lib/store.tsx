@@ -170,10 +170,12 @@ export function parseCritique(raw: unknown): ClientCritique | null {
 }
 
 /** One card in the round's scoring order ("Card A"…).
- *  `teamName` rides on player + GM copies (player-side anonymity dropped per
- *  user decision 2a — the scoring UI shows real team names; presenter copies
- *  stay anonymous and carry neither teamName nor teamId). `teamId` is present
- *  ONLY on GM snapshots (the card↔team mapping is server/GM-side). */
+ *  `teamName` rides on player + GM + presenter copies (anonymity dropped per
+ *  user decision 2a — team names are public from scoring onward, including
+ *  on the presenter's big-screen rating stage). `teamId` is present ONLY on
+ *  GM snapshots during SCORING (the card↔team mapping is server/GM-side);
+ *  presenter copies gain teamId from JUDGING onward (public mapping, the
+ *  judge card needs it for the tally lookup). */
 export interface ClientScoringCard {
   cardId: string;
   label: string;
@@ -183,7 +185,8 @@ export interface ClientScoringCard {
 }
 
 /** The SCORING phase slice: the round's team-named card order for players
- *  (decision 2a); presenter snapshots stay anonymous card orders. */
+ *  and the presenter (decision 2a — team names are public from scoring
+ *  onward). */
 export interface ClientScoring {
   round: number;
   cards: ClientScoringCard[];
@@ -404,9 +407,10 @@ function trimActivity(entries: ClientActivityEntry[]): ClientActivityEntry[] {
 /**
  * Parse a scoring:started / sync:full `cards` array into ClientScoringCard[]
  * (null when the payload is malformed so callers keep their previous state).
- * `teamName` is kept when present and non-empty (player + GM copies per user
- * decision 2a); `teamId` is kept ONLY when present (GM copies) — player and
- * presenter payloads never carry it and the parsed shape mirrors that exactly.
+ * `teamName` is kept when present and non-empty (player + GM + presenter
+ * copies per user decision 2a — team names are public from scoring onward);
+ * `teamId` is kept ONLY when present (GM copies during SCORING, presenter
+ * copies from JUDGING onward) and the parsed shape mirrors that exactly.
  */
 export function parseScoringCards(raw: unknown): ClientScoringCard[] | null {
   if (!Array.isArray(raw)) return null;

@@ -480,7 +480,9 @@ export class GameHub {
         // submission and the standings), then announce scoring per audience —
         // players see team-NAMED cards + their own card id (player anonymity
         // dropped per user decision 2a), the GM sees the team mapping, and
-        // the presenter still sees anonymous cards only.
+        // the presenter sees team-NAMED cards too (decision 2a — team names
+        // are public from scoring onward; the teamId mapping still never
+        // rides the presenter copy during SCORING).
         // (a) GM-only heads-up: the final polish window begins.
         this.emitToRooms(gameId, state.round, "montage:started", {}, [gmRoom(gameId)]);
         // (b) Fail-open hook: scoring MUST still start even if the polish pass fails.
@@ -513,13 +515,14 @@ export class GameHub {
         this.emitToRooms(gameId, state.round, "scoring:started", { cards: order.cards }, [
           gmRoom(gameId),
         ]);
-        // Presenter copy: ANONYMOUS only (never leak the team mapping to the
-        // big screen before the reveal).
+        // Presenter copy: team-NAMED (teamName per decision 2a) but still
+        // anonymous at the MAPPING level — teamId never leaks to the big
+        // screen before the reveal.
         this.emitToRooms(
           gameId,
           state.round,
           "scoring:started",
-          { cards: order.cards.map((c) => ({ cardId: c.cardId, label: c.label })) },
+          { cards: order.cards.map((c) => ({ cardId: c.cardId, label: c.label, teamName: c.teamName })) },
           [presenterRoom(gameId)],
         );
         return;
