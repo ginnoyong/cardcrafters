@@ -964,6 +964,25 @@ function Console({ game }: { game: CreatedGame }) {
                             Pick winner
                           </button>
                         ) : null}
+                        {/* Per-team image exports (code-as-capability GET
+                            endpoints; the route's SCORING/JUDGING/RESULTS
+                            phase guard protects non-exportable phases). */}
+                        <a
+                          className="cc-btn cc-btn-small"
+                          href={`/api/games/${game.code}/export/${team.id}/poster`}
+                          download
+                          data-testid={`gm-export-poster-${team.id}`}
+                        >
+                          ⬇ Poster
+                        </a>
+                        <a
+                          className="cc-btn cc-btn-small"
+                          href={`/api/games/${game.code}/export/${team.id}/sticker`}
+                          download
+                          data-testid={`gm-export-sticker-${team.id}`}
+                        >
+                          ⬇ Sticker card
+                        </a>
                       </>
                     }
                   />

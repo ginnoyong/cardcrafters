@@ -357,6 +357,126 @@ export async function handleApiRequest(
     return true;
   }
 
+/**
+ * Sanitize a team name into a filename fragment: lowercase, [a-z0-9] kept,
+ * everything else (and runs of them) collapsed to single dashes. Bounded so
+ * pathological names can't produce absurd headers.
+ */
+function sanitizeFileNamePart(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 64) || "team"
+  );
+}
+
+// GET /api/games/:code/export/:teamId/poster and …/sticker — per-team image
+// exports for the GM judge boxes. Auth follows the same code-as-capability
+// model as the rest of the GM surface: the game code in the URL IS the
+// credential (anyone who knows the code can already run the game), so no
+// extra token — every downstream guard (phase gate, team membership) still
+// applies. Phase-gated at SCORING/JUDGING/RESULTS (409 "not_exportable"
+// otherwise) — before SCORING the card is still being built and the poster
+// may not exist. The poster route serves the CURRENT RUNTIME round's READY
+// montage poster file as-is (no re-encode); anything missing falls back to
+// the composed renderTeamCardPng render (fail-open, same as the scoring-card
+// poster branch). The sticker route always serves the composed finalPass
+// render. Both are attachment downloads (Content-Disposition). No zip
+// endpoint — one file per team per format.
+const exportMatch = /^\/api\/games\/([A-Za-z0-9]+)\/export\/([A-Za-z0-9-]+)\/(poster|sticker)$/.exec(
+  path,
+);
+if (req.method === "GET" && exportMatch) {
+  const code = exportMatch[1]!;
+  const teamId = exportMatch[2]!;
+  const kind = exportMatch[3]!;
+  const game = await hub.gameByCode(code);
+  if (!game) {
+    sendJson(res, 404, { ok: false, error: "unknown_code", code });
+    return true;
+  }
+  // Team guard: the requested teamId must belong to THIS game (never leak
+  // another game's team image).
+  const teams = await repo.listTeams(game.id);
+  const team = teams.find((t) => t.id === teamId);
+  if (!team) {
+    sendJson(res, 404, { ok: false, error: "unknown_team", teamId });
+    return true;
+  }
+  const state = await hub.runtimeState(game.id);
+  if (state.phase !== "SCORING" && state.phase !== "JUDGING" && state.phase !== "RESULTS") {
+    sendJson(res, 409, { ok: false, error: "not_exportable", phase: state.phase });
+    return true;
+  }
+  const namePart = sanitizeFileNamePart(team.name);
+  if (kind === "sticker") {
+    let png: Buffer;
+    try {
+      // Same settings as the scoring-card composed render (finalPass +
+      // grading, native width) — the sticker card as rendered for rating.
+      png = await renderTeamCardPng(repo, game, teamId, { runtimeRound: state.round });
+    } catch (err) {
+      sendJson(res, 500, {
+        ok: false,
+        error: err instanceof Error ? err.message : "card render failed",
+      });
+      return true;
+    }
+    res.writeHead(200, {
+      "content-type": "image/png",
+      "cache-control": "no-store",
+      "content-disposition": `attachment; filename="${namePart}-card.png"`,
+    });
+    res.end(png);
+    return true;
+  }
+  // kind === "poster": serve the CURRENT RUNTIME round's READY montage
+  // poster file byte-for-byte (no re-encode, no upscale). The imageUrl →
+  // fs mapping is identical to the scoring-card poster branch. Any miss
+  // (no row / FALLBACK / no imageUrl / file gone) falls back to the
+  // composed render.
+  let bytes: Buffer | null = null;
+  let ext = "png";
+  const montage = await repo.getMontageState(teamId, state.round);
+  if (montage && montage.status === "READY" && montage.imageUrl) {
+    try {
+      const fsPath = nodePath.join(
+        DEFAULT_MONTAGE_DIR,
+        game.id,
+        teamId,
+        nodePath.basename(montage.imageUrl),
+      );
+      await stat(fsPath); // throws if the file is gone → composed fallback
+      const pathExt = nodePath.extname(fsPath).toLowerCase();
+      ext = pathExt === ".jpg" || pathExt === ".jpeg" ? "jpg" : "png";
+      bytes = await readFile(fsPath);
+    } catch {
+      // Poster file unreadable — fall back to the composed render below.
+    }
+  }
+  if (!bytes) {
+    try {
+      bytes = await renderTeamCardPng(repo, game, teamId, { runtimeRound: state.round });
+      ext = "png";
+    } catch (err) {
+      sendJson(res, 500, {
+        ok: false,
+        error: err instanceof Error ? err.message : "poster export failed",
+      });
+      return true;
+    }
+  }
+  res.writeHead(200, {
+    "content-type": ext === "jpg" ? "image/jpeg" : "image/png",
+    "cache-control": "no-store",
+    "content-disposition": `attachment; filename="${namePart}-poster.${ext}"`,
+  });
+  res.end(bytes);
+  return true;
+}
+
   // GET /api/games/:code — game summary (presenter/players/GM polling).
   const match = /^\/api\/games\/([A-Za-z0-9]+)$/.exec(path);
   if (req.method === "GET" && match) {

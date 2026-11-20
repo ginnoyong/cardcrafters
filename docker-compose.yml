@@ -25,26 +25,5 @@ services:
       timeout: 5s
       retries: 12
 
-  app:
-    # Profile-gated: plain `docker compose up -d` starts ONLY postgres/redis.
-    # Local dev runs the app via `npm run dev` (the container image goes stale
-    # fast and squats port 3000 — start it explicitly with
-    # `docker compose --profile full up -d app` only when you want it).
-    profiles: ["full"]
-    build: .
-    environment:
-      DATABASE_URL: postgres://cardcrafters:cardcrafters@postgres:5432/cardcrafters
-      REDIS_URL: redis://redis:6379
-      PORT: "3000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    ports:
-      # Host port remapped to 3100: even an explicitly started container can
-      # never squat 3000 (local dev is `npm run dev` on 3000).
-      - "3100:3000"
-
 volumes:
   pgdata:

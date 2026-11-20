@@ -15,9 +15,11 @@ Each card is a movie-poster-style composition: a dominant focal sticker (~60% of
 ## Running locally
 
 ```bash
-docker compose up -d postgres redis && sleep 8 && docker compose ps   # postgres + redis healthy (do NOT start the app service — run npm run dev instead)
-npm run dev
+docker compose up -d && sleep 8 && docker compose ps   # postgres + redis healthy
+npm run dev                                            # run the app on localhost:3000
 ```
+
+Note: the `Dockerfile` is currently unused (compose only provides postgres + redis; the app runs via `npm run dev`).
 
 | URL | What it is |
 |---|---|
