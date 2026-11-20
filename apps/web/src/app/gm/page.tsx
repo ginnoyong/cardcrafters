@@ -1183,11 +1183,16 @@ export default function GmPage() {
   const [scoringMinutes, setScoringMinutes] = useState("5");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Resume-from-URL in flight (?code= present): the setup form must NOT
+  // flash while the game summary loads — show a reconnecting placeholder
+  // instead until the console mounts (or an error surfaces).
+  const [resuming, setResuming] = useState(false);
 
   // Resume an existing game from ?code= (reload/share of the console URL).
   useEffect(() => {
     const code = new URLSearchParams(window.location.search).get("code");
     if (!code) return;
+    setResuming(true);
     void (async () => {
       try {
         const res = await fetch(`/api/games/${encodeURIComponent(code)}?full=1`);
@@ -1199,6 +1204,8 @@ export default function GmPage() {
         setGame({ code: body.code, teams: body.teams });
       } catch {
         setError("Could not load the game summary.");
+      } finally {
+        setResuming(false);
       }
     })();
   }, []);
@@ -1257,6 +1264,13 @@ export default function GmPage() {
               phase — hidden during BUILD); see Console's return JSX. */}
           <Console game={game} />
         </GameStoreProvider>
+      ) : resuming ? (
+        /* Deep-link/resume in flight: hold this placeholder instead of the
+           setup form so the presenter's Return button lands straight on the
+           live console (no setup-screen flash). */
+        <p className="cc-hint" role="status">
+          Reconnecting to the game…
+        </p>
       ) : (
         <form
           className="cc-card cc-setup"

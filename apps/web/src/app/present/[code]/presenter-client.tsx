@@ -221,6 +221,10 @@ function PresenterBoard({
   // shrinks (a team leaves / round reset) so the stage never shows empty.
   const teamCount = snapshot?.teams.length ?? 0;
   const [stageIndex, setStageIndex] = useState(0);
+  // Judging: pending flag while the Pick winner ack is in flight (prevents
+  // double-picks from rapid clicks; the phase change to REVEAL unmounts the
+  // button anyway).
+  const [pickingWinner, setPickingWinner] = useState(false);
   // Focus latch (?team=<id> deep link from the GM judging "View" link): once
   // the snapshot lands and the focused team exists, the stage renders THAT
   // team regardless of stageIndex — latched, i.e. it stays put while
@@ -398,34 +402,63 @@ function PresenterBoard({
             </div>
           </div>
           {snapshot.phase === PHASE.JUDGING ? (
-            /* JUDGING: the shared judge card (full-screen variant). No
-               cardLabel exists on presenter payloads (the JUDGING
-               phaseChanged carries no scoring order) — TeamJudgeCard falls
-               back to the team's label. tally=null here too: the JUDGING
-               stage is team-named, so the anonymous tallies have no row to
-               light up on this surface. */
+            /* JUDGING: the shared judge card (full-screen variant). The
+               scoring cards carry teamId from JUDGING onward (the mapping is
+               public on this team-named surface), so the card->tally lookup
+               lights up the live votes/scores — and the stage carries a
+               Pick winner button (the big screen can crown the winner;
+               REVEAL follows via the winnerAnnounced broadcast). */
             <TeamJudgeCard
               team={stageTeam}
               cardLabel={null}
-              tally={null}
+              tally={
+                snapshot.scoring?.cards.find((c) => c.teamId === stageTeam.id)
+                  ? (snapshot.scores[
+                      snapshot.scoring.cards.find((c) => c.teamId === stageTeam.id)!.cardId
+                    ] ?? null)
+                  : null
+              }
               cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
               cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
               testId={`presenter-judge-${stageTeam.id}`}
               actions={
-                <button
-                  type="button"
-                  className="cc-btn"
-                  data-testid="presenter-judge-return"
-                  onClick={() => {
-                    // history.length is unreliable for a fresh _blank tab
-                    // (Chromium reports 2 for the initial about:blank entry,
-                    // so back() can land on a blank page). The coded GM URL
-                    // is the deterministic path back.
-                    window.location.assign(`/gm?code=${encodeURIComponent(code)}`);
-                  }}
-                >
-                  Return
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="cc-btn cc-btn-primary"
+                    data-testid="presenter-judge-pick"
+                    disabled={pickingWinner}
+                    onClick={() => {
+                      if (pickingWinner) return;
+                      setPickingWinner(true);
+                      socketRef.current?.emit(
+                        "judging:winner",
+                        { teamId: stageTeam.id },
+                        (ack: { ok?: boolean; code?: string } | undefined) => {
+                          // On failure restore the button (REVEAL unmounts it
+                          // on success via the phase change).
+                          if (!ack?.ok) setPickingWinner(false);
+                        },
+                      );
+                    }}
+                  >
+                    {pickingWinner ? "Picking…" : "Pick winner"}
+                  </button>
+                  <button
+                    type="button"
+                    className="cc-btn"
+                    data-testid="presenter-judge-return"
+                    onClick={() => {
+                      // history.length is unreliable for a fresh _blank tab
+                      // (Chromium reports 2 for the initial about:blank entry,
+                      // so back() can land on a blank page). The coded GM URL
+                      // is the deterministic path back.
+                      window.location.assign(`/gm?code=${encodeURIComponent(code)}`);
+                    }}
+                  >
+                    Return
+                  </button>
+                </>
               }
             />
           ) : (

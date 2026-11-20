@@ -1230,6 +1230,80 @@ describe("presenter scoring tallies (sync:full + scores:update)", () => {
     alex.close();
     gm.close();
   });
+
+  it("(s3) presenter judging: cards carry teamId (tally lookup) + Pick winner works", { timeout: 20_000 }, async () => {
+    // Theme moves LOBBY → GREETINGS so a player may join.
+    await hub.applyEvent(gameId, { type: "gm:setTheme", theme: "Judge party", now: Date.now() });
+
+    const gm = connect({ role: "gm" });
+    await emitAck(gm, "join", { role: "gm", joinToken: gameCode });
+    const presenter = connect();
+    const presAck = await emitAck<{ ok: boolean }>(presenter, "join", {
+      role: "presenter",
+      joinToken: gameCode,
+    });
+    expect(presAck.ok).toBe(true);
+    const alex = connect();
+    const alexAck = await emitAck<{ ok: boolean; identity: { playerId: string; teamId: string } }>(
+      alex,
+      "join",
+      { role: "player", joinToken: joinTokenA, nickname: "Alex" },
+    );
+    expect(alexAck.ok).toBe(true);
+    const teamAId = alexAck.identity.teamId;
+
+    const approve = await emitAck<{ ok: boolean }>(gm, "gm:approveGreetings", {});
+    expect(approve.ok).toBe(true);
+    const stop = await emitAck<{ ok: boolean; phase?: string }>(gm, "gm:stopBuild", {});
+    expect(stop.ok).toBe(true);
+
+    // Presenter resync during SCORING: cards still anonymous.
+    const resynced = new Promise<SyncFullEvent>((resolve) => presenter.once("sync:full", resolve));
+    await emitAck(presenter, "sync:resync", {});
+    const raw = await resynced;
+    const scoring = raw.scoring as { cards: Array<Record<string, unknown>> };
+    for (const c of scoring.cards) {
+      expect(c).not.toHaveProperty("teamId");
+    }
+
+    // Advance to JUDGING (scores lock; the mapping goes public on the big
+    // screen) → presenter resync: cards NOW carry teamId.
+    const stopScoring = await emitAck<{ ok: boolean; phase?: string }>(gm, "gm:stopScoring", {});
+    expect(stopScoring.ok).toBe(true);
+    expect(stopScoring.phase).toBe("JUDGING");
+    const resynced2 = new Promise<SyncFullEvent>((resolve) => presenter.once("sync:full", resolve));
+    await emitAck(presenter, "sync:resync", {});
+    const raw2 = await resynced2;
+    const scoring2 = raw2.scoring as { cards: Array<{ cardId: string; teamId?: string }> };
+    expect(scoring2.cards).toHaveLength(3);
+    for (const c of scoring2.cards) {
+      expect(typeof c.teamId).toBe("string");
+    }
+    // The client reducer accepts the judging shape (cards with teamId).
+    const snap = normalizeSyncFull(raw2, {}, null);
+    expect(snap.scoring?.cards.every((c) => typeof c.teamId === "string")).toBe(true);
+
+    // Presenter picks the winner for team A → judging:winner accepted from
+    // the presenter role, phase advances to REVEAL, winnerAnnounced carries
+    // the winner team id. (The waitFor registers BEFORE the pick — the
+    // broadcast fires inside applyEvent, before the ack resolves.)
+    const announcedPromise = waitFor<{ winnerTeamId: string }>(presenter, "winnerAnnounced");
+    const winnerAck = await emitAck<{ ok: boolean; phase?: string }>(presenter, "judging:winner", {
+      teamId: teamAId,
+    });
+    expect(winnerAck.ok).toBe(true);
+    expect(winnerAck.phase).toBe("REVEAL");
+    const announced = await announcedPromise;
+    expect(announced.winnerTeamId).toBe(teamAId);
+
+    // Players are still forbidden from picking the winner.
+    const playerPick = await emitAck<{ ok: boolean }>(alex, "judging:winner", { teamId: teamAId });
+    expect(playerPick.ok).toBe(false);
+
+    presenter.close();
+    gm.close();
+    alex.close();
+  });
 });
 
 // ---------------------------------------------------------------------------

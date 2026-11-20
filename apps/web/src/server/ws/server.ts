@@ -388,12 +388,22 @@ export async function buildSyncFull(
           return cardId ? [{ cardId, value: s.value }] : [];
         });
     } else {
-      // Presenter (and any unknown identity): anonymous cards only, plus the
-      // same anonymous tallies (computed above) — the presenter scoreboard
-      // must survive a resync exactly like the GM's and the players'.
+      // Presenter (and any unknown identity): anonymous cards + the same
+      // anonymous tallies (computed above) — the presenter scoreboard must
+      // survive a resync exactly like the GM's and the players'.
+      // From JUDGING onward the cards also carry teamId: the judging stage
+      // is team-named (team names render on the big screen), so the
+      // card->team mapping is already public here — and the judge card
+      // needs it to light up its live tally. During SCORING the mapping
+      // stays stripped (the rating stage shows anonymous labels only).
+      const revealMapping = state.phase !== PHASE.SCORING;
       scoring = {
         round,
-        cards: order.cards.map((c) => ({ cardId: c.cardId, label: c.label })),
+        cards: order.cards.map((c) => ({
+          cardId: c.cardId,
+          label: c.label,
+          ...(revealMapping ? { teamId: c.teamId } : {}),
+        })),
       };
     }
   }
@@ -1107,8 +1117,11 @@ export function registerSocketHandlers(
     // ---------------------------------------------------------------------
     socket.on("judging:winner", async (raw: unknown, ack?: unknown) => {
       const identity = data.identity;
-      if (!identity || identity.role !== "gm") {
-        ackFail(ack, "forbidden", "GM only");
+      // GM or presenter: the presenter's judging stage carries a Pick winner
+      // button (the big screen can crown the winner) — same trust level as
+      // reveal:ack. Players are forbidden.
+      if (!identity || identity.role === "player") {
+        ackFail(ack, "forbidden", "GM or presenter only");
         return;
       }
       const parsed = judgePickSchema.safeParse(raw);
