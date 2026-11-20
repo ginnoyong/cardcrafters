@@ -27,6 +27,31 @@ Note: the `Dockerfile` is currently unused (compose only provides postgres + red
 | `http://localhost:3000/present/<code>` | Presenter screen — live cards, scoreboard, 3D reveal |
 | `http://localhost:3000/join/<token>` | Player phone — QR codes on the GM console link here |
 
+## Demo bots
+
+`apps/web/scripts/demo-bots.mjs` drives a complete game over the real socket surface — every bot is a headless player that joins, submits prompts, waits for montage posters, and rates other teams' cards. Use it to smoke-test a running server without a room full of phones.
+
+```bash
+node apps/web/scripts/demo-bots.mjs --url http://localhost:3000 --team-count 2 --players-per-team 3
+node apps/web/scripts/demo-bots.mjs --code ABC123        # join an EXISTING game (a human GM drives)
+node apps/web/scripts/demo-bots.mjs --url http://localhost:3210 --no-gm-drive
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--url` | `http://localhost:3000` | Server base URL |
+| `--team-count` | `2` | Teams in a fresh game (ignored with `--code`) |
+| `--players-per-team` | `3` | Bots per team |
+| `--prompts-per-bot` | `2` | Sticker prompts per bot (≤ 25 items/card cap) |
+| `--code` | — | Join an existing game code instead of creating one |
+| `--theme` | `Demo bots theme` | Theme for a fresh game |
+| `--stagger-ms` | `300` | Delay between bot joins |
+| `--submit-gap-ms` | `5200` | Per-bot submit spacing (must be > 5000ms cooldown) |
+| `--rate` / `--no-rate` | `rate` | Whether bots rate other teams' cards |
+| `--gm-drive` / `--no-gm-drive` | on for fresh games | One bot drives the GM console (theme → approve → scoring → judging → reveal) |
+
+> ⚠️ In **live AI mode** (`AI_MODE=live`) bots spend real money — every prompt and montage is a paid provider call. **Mock mode** (`AI_MODE=mock`) is free and fully deterministic.
+
 ## AI configuration
 
 Set `AI_MODE=mock` for deterministic offline play (procedural stickers + canned montage posters), or configure provider keys in `.env` for live generation (`AI_MODE=live`). Task registry, pricing, and prompt templates live in `config/ai-tasks.json` and `config/prompts/`.
