@@ -481,12 +481,18 @@ describe("GET /api/games/:code/scoring-card/:cardId?token= (player rating card P
     expect(body.error).toBe("unknown_code");
   });
 
-  it("missing token → 403 invalid_token (the anonymous card stays unmapped)", async () => {
+  it("tokenless (presenter) → 200 PNG — the game code is the capability", async () => {
     const { code, firstCardId } = await createGameInScoring();
     const res = await fetch(base(`/api/games/${code}/scoring-card/${firstCardId}`));
-    expect(res.status).toBe(403);
-    const body = (await res.json()) as { ok: boolean; error: string };
-    expect(body.error).toBe("invalid_token");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    expect(res.headers.get("cache-control")).toContain("no-store");
+    const buf = Buffer.from(await res.arrayBuffer());
+    // PNG magic bytes — a real, decodable image came back (same shape the
+    // token'd path serves).
+    expect(buf.length).toBeGreaterThan(100);
+    expect(buf[0]).toBe(0x89);
+    expect(buf.subarray(1, 4).toString("ascii")).toBe("PNG");
   });
 
   it("unknown token → 403; a token from ANOTHER game → 403 (never leaks cards)", async () => {
@@ -529,6 +535,31 @@ describe("GET /api/games/:code/scoring-card/:cardId?token= (player rating card P
     expect(res.status).toBe(404);
     const body = (await res.json()) as { ok: boolean; error: string };
     expect(body.error).toBe("unknown_card");
+  });
+
+  it("tokenless + SCORING + unknown cardId → 404 unknown_card (downstream guards kept)", async () => {
+    const { code } = await createGameInScoring();
+    const res = await fetch(base(`/api/games/${code}/scoring-card/card-zzz`));
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.error).toBe("unknown_card");
+  });
+
+  it("tokenless outside SCORING/JUDGING → 409 not_scoring (phase gate kept)", async () => {
+    // A fresh game sits in GREETINGS — no token, same 409 as with one.
+    const res = await fetch(base("/api/games"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ teamCount: 2, theme: "Tokenless Too Early" }),
+    });
+    const body = (await res.json()) as { code: string };
+    const resEarly = await fetch(
+      base(`/api/games/${body.code}/scoring-card/card-a`),
+    );
+    expect(resEarly.status).toBe(409);
+    const err = (await resEarly.json()) as { ok: boolean; error: string; phase: string };
+    expect(err.error).toBe("not_scoring");
+    expect(err.phase).toBe("GREETINGS");
   });
 
   it("SCORING → 200 image/png (paper card render behind the anonymous cardId)", async () => {
@@ -759,5 +790,94 @@ describe("GET /api/games/:code/scoring-card/:cardId?token= (player rating card P
     const resGone = await fetch(posterUrl);
     expect(resGone.status).toBe(200);
     expect(Buffer.compare(Buffer.from(await resGone.arrayBuffer()), defaultBytes)).toBe(0);
+  });
+
+  /**
+   * Tokenless ?variant=poster (the presenter's poster-first flip URL): the
+   * seeded READY montage file must be served byte-identically WITHOUT a
+   * token — same poster bytes the players' tokens already get.
+   */
+  it("tokenless ?variant=poster → serves the persisted poster (presenter flip view)", async () => {
+    const { code, gameId, firstCardId } = await createGameInScoring();
+    const game = (await srv.repo.getGame(gameId))!;
+    const card = game.scoringOrder!.cards.find((c) => c.cardId === firstCardId)!;
+    const { bytes } = await seedReadyMontage(gameId, card.teamId, game.round);
+    const res = await fetch(
+      base(`/api/games/${code}/scoring-card/${firstCardId}?variant=poster`),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    expect(Buffer.compare(Buffer.from(await res.arrayBuffer()), bytes)).toBe(0);
+  });
+
+  /**
+   * Tokenless composed render end-to-end (same seed as the token'd test
+   * above): the presenter's sticker-card flip side must decode to a REAL,
+   * non-paper pixel-variance render — the stickers actually drawn.
+   */
+  it("tokenless SCORING → decodes to a non-paper pixel-variance render", async () => {
+    const { code, gameId, firstCardId } = await createGameInScoring();
+    const game = (await srv.repo.getGame(gameId))!;
+    const card = game.scoringOrder!.cards.find((c) => c.cardId === firstCardId)!;
+    const teamId = card.teamId;
+    const round = game.round;
+
+    // Same seed as the token'd e2e test: a READY item with a REAL sticker
+    // PNG + a persisted centered hero layout placement.
+    const sticker = await writeSticker(DEFAULT_ITEMS_DIR, `seed-${gameId}-item-tl`, "red balloon");
+    const item = await srv.repo.createItem({
+      teamId,
+      playerId: "seed-player",
+      round,
+      promptRaw: "a red balloon",
+      status: "GENERATING",
+    });
+    await srv.repo.updateItem(item.id, {
+      status: "READY",
+      imageUrl: sticker.imageUrl,
+      width: sticker.width,
+      height: sticker.height,
+      placedAt: Date.now(),
+    });
+    const cardBox = cardBoxNormalized(RATIO_W, RATIO_H);
+    const k = baseFit(cardBox);
+    const pxPerUnit = STAGE_W / cardBox.w;
+    const heroDisplayPx = 0.65 * STAGE_W;
+    const heroScale = heroDisplayPx / (REF_SIZE * k * pxPerUnit);
+    const heroCx = Math.round((cardBox.w / 2) * pxPerUnit);
+    const heroCy = Math.round(550 * (STAGE_H / cardBox.h));
+    await srv.repo.upsertLayoutState(teamId, round, {
+      version: 2,
+      source: "montage",
+      placements: [{ itemId: item.id, x: cardBox.w / 2, y: 550, scale: heroScale, rotation: 0, zIndex: 0 }],
+      greetingStyle: null,
+      critique: null,
+    });
+
+    // Tokenless fetch (the presenter URL) — must behave identically.
+    const res = await fetch(base(`/api/games/${code}/scoring-card/${firstCardId}`));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    const fetched = Buffer.from(await res.arrayBuffer());
+
+    // Decode + non-paper pixel variance (blank/paper-only render = the bug
+    // under test): thousands of non-paper pixels + sticker pixels inside
+    // the mapped hero window.
+    const meta = await sharp(fetched).metadata();
+    const width = meta.width!;
+    const raw = await sharp(fetched).ensureAlpha().raw().toBuffer();
+    let nonPaper = 0;
+    for (let i = 0; i < raw.length; i += 4) {
+      if (!isPaper([raw[i]!, raw[i + 1]!, raw[i + 2]!, raw[i + 3]!])) nonPaper++;
+    }
+    expect(nonPaper).toBeGreaterThan(20_000);
+    const sampled = [
+      pixelAt(raw, heroCx, heroCy + 40, width),
+      pixelAt(raw, heroCx - 20, heroCy, width),
+      pixelAt(raw, heroCx + 20, heroCy, width),
+      pixelAt(raw, heroCx, heroCy - 20, width),
+      pixelAt(raw, heroCx, heroCy + 20, width),
+    ];
+    expect(sampled.some((px) => !isPaper(px))).toBe(true);
   });
 });

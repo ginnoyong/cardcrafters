@@ -1149,6 +1149,90 @@ describe("scoring phase end-to-end", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Presenter scoring tallies — sync:full during SCORING carries the SAME
+// anonymous tallies the GM gets (cardId-keyed, never a teamId), so the big
+// screen's scoreboard survives a resync; a player's score:submit reaches
+// the presenter as a live scores:update.
+// ---------------------------------------------------------------------------
+
+describe("presenter scoring tallies (sync:full + scores:update)", () => {
+  it("(s2) presenter resync carries anonymous tallies; score:submit arrives as scores:update", { timeout: 15_000 }, async () => {
+    // Theme moves LOBBY → GREETINGS so a player may join.
+    await hub.applyEvent(gameId, { type: "gm:setTheme", theme: "Tally party", now: Date.now() });
+
+    const gm = connect({ role: "gm" });
+    await emitAck(gm, "join", { role: "gm", joinToken: gameCode });
+    const presenter = connect();
+    const presAck = await emitAck<{ ok: boolean }>(presenter, "join", {
+      role: "presenter",
+      joinToken: gameCode,
+    });
+    expect(presAck.ok).toBe(true);
+    const alex = connect();
+    const alexAck = await emitAck<{ ok: boolean; identity: { playerId: string; teamId: string } }>(
+      alex,
+      "join",
+      { role: "player", joinToken: joinTokenA, nickname: "Alex" },
+    );
+    expect(alexAck.ok).toBe(true);
+
+    const approve = await emitAck<{ ok: boolean }>(gm, "gm:approveGreetings", {});
+    expect(approve.ok).toBe(true);
+    const stop = await emitAck<{ ok: boolean; phase?: string }>(gm, "gm:stopBuild", {});
+    expect(stop.ok).toBe(true);
+    expect(stop.phase).toBe("SCORING");
+
+    // Presenter resync during SCORING → sync:full carries the anonymous
+    // scoring cards + the (currently empty) tallies — cardId-keyed, no
+    // teamId anywhere in the tallies.
+    const resynced = new Promise<SyncFullEvent>((resolve) => presenter.once("sync:full", resolve));
+    await emitAck(presenter, "sync:resync", {});
+    const raw = await resynced;
+    const scoring = raw.scoring as { cards: Array<{ cardId: string; label: string }> };
+    expect(Array.isArray(scoring.cards)).toBe(true);
+    expect(scoring.cards).toHaveLength(3);
+    for (const c of scoring.cards) {
+      expect(c).not.toHaveProperty("teamId");
+      expect(c).not.toHaveProperty("teamName");
+    }
+    expect(Array.isArray(raw.scores)).toBe(true);
+    const tallies = raw.scores as Array<Record<string, unknown>>;
+    for (const t of tallies) {
+      expect(t).not.toHaveProperty("teamId");
+    }
+    // The client reducer accepts the presenter shape (anonymous cards +
+    // tallies).
+    const snap = normalizeSyncFull(raw, {}, null);
+    expect(snap.scoring?.cards.every((c) => !("teamId" in c))).toBe(true);
+
+    // A player submits a score → the presenter receives the live anonymous
+    // scores:update (cardId-keyed, no teamId).
+    const cardB = scoring.cards[1]!.cardId;
+    const updatePromise = waitFor<{ cards: Array<Record<string, unknown>> }>(presenter, "scores:update");
+    const submit = await emitAck<{ ok: boolean }>(alex, "score:submit", { cardId: cardB, score: 8 });
+    expect(submit.ok).toBe(true);
+    const update = await updatePromise;
+    expect(update.cards).toEqual([{ cardId: cardB, avg: 8, count: 1 }]);
+    expect(update.cards[0]).not.toHaveProperty("teamId");
+
+    // Resync again → the tally survives the resync (the wipe-under-test).
+    const resynced2 = new Promise<SyncFullEvent>((resolve) => presenter.once("sync:full", resolve));
+    await emitAck(presenter, "sync:resync", {});
+    const raw2 = await resynced2;
+    expect(raw2.scores).toEqual([{ cardId: cardB, avg: 8, count: 1 }]);
+    for (const t of raw2.scores as Array<Record<string, unknown>>) {
+      expect(t).not.toHaveProperty("teamId");
+    }
+    const snap2 = normalizeSyncFull(raw2, {}, null);
+    expect(snap2.scores[cardB]).toEqual({ avg: 8, count: 1 });
+
+    presenter.close();
+    alex.close();
+    gm.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // reveal:extend — GM/presenter keep the REVEAL on screen for another 30 s.
 // The ack carries { phase, phaseEndsAt } and the reset countdown is visible
 // to clients through the next sync:full (sync:resync). Outside REVEAL the

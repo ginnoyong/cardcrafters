@@ -1127,10 +1127,11 @@ function normalizeSnapshot(
         : {}),
     };
   }
-  // Live tallies from a scores:update ride along on resync snapshots? No —
-  // sync:full never carries `scores`; the map starts empty and rebuilds from
-  // the next broadcast (kept defensive anyway).
-  const scores = parseScoreTallies(raw.scores) ?? {};
+  // Live tallies: sync:full now carries the anonymous `scores` tallies for
+  // ALL roles (GM/player/presenter — ws buildSyncFull), so a resync restores
+  // the scoreboard instead of wiping it. prev-preservation still covers
+  // older server payloads that omit `scores`.
+  const scores = parseScoreTallies(raw.scores) ?? (prevUsable ? prev!.scores : {});
   // THIS player's ratings: the wire carries an array of {cardId, value}
   // (server-side team→card resolution); the client stores a Record.
   const myScores: Record<string, number> = {};

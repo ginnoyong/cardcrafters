@@ -8,8 +8,10 @@
  * layout:updated — the presenter socket joins every team room).
  *
  * Scoring/results phases (big-screen duty):
- *  - SCORING: an ANONYMOUS live scoreboard ("Card B · 7.5 avg · 3 votes") —
- *    the card↔team mapping never reaches this surface (server-side rule).
+ *  - SCORING: an ANONYMOUS single-card stage — one card at a time (poster
+ *    ↔ sticker flip view) with wrap-around prev/next and a live tally
+ *    ("Card B · 7.5 avg · 3 votes"); the team stage is suppressed (names
+ *    would leak the card↔team mapping — server-side rule).
  *  - REVEAL: the 3D reveal moment (Three.js floating card, components/
  *    Reveal3D.tsx) — the winning card materializes and floats; without WebGL
  *    / with reduced motion it falls back to the same static "The winner is…
@@ -248,10 +250,14 @@ function PresenterBoard({
     : -1;
   const latched = focusedIndex >= 0;
   const stageTeam = snapshot?.teams[latched ? focusedIndex : clampedStageIndex] ?? null;
+  // SCORING is EXCLUDED from the team stage: the team names would leak which
+  // team made which card while the room is rating. SCORING renders the
+  // anonymous single-card stage below instead (JUDGING/REVEAL/RESULTS only
+  // here).
   const showStage =
     !!snapshot &&
     !!stageTeam &&
-    [PHASE.SCORING, PHASE.JUDGING, PHASE.REVEAL, PHASE.RESULTS].includes(
+    [PHASE.JUDGING, PHASE.REVEAL, PHASE.RESULTS].includes(
       snapshot.phase as (typeof PHASE)[keyof typeof PHASE],
     );
   const stepStage = useCallback(
@@ -276,6 +282,35 @@ function PresenterBoard({
     [teamCount, focusTeamId, snapshot],
   );
 
+  // -----------------------------------------------------------------------
+  // SCORING: anonymous single-card stage. One card at a time (poster-first
+  // flip view), wrap-around prev/next, live tally underneath — the team
+  // stage above is suppressed during SCORING (names would leak the
+  // card↔team mapping).
+  // -----------------------------------------------------------------------
+  const scoringCards = snapshot?.scoring?.cards ?? [];
+  const scoringCount = scoringCards.length;
+  const [scoringCardIndex, setScoringCardIndex] = useState(0);
+  const [scoringCardFlipped, setScoringCardFlipped] = useState(false);
+  // Clamp when the card count shrinks (round reset / scoring aborted); the
+  // wrap-around steps below keep the index in range otherwise.
+  const clampedScoringIndex = scoringCount > 0 ? Math.min(scoringCardIndex, scoringCount - 1) : 0;
+  const scoringCard = scoringCards[clampedScoringIndex] ?? null;
+  // Flip resets whenever the shown card changes (index steps, round swaps).
+  useEffect(() => {
+    setScoringCardFlipped(false);
+  }, [clampedScoringIndex]);
+  const stepScoringCard = useCallback(
+    (delta: number) => {
+      setScoringCardIndex((i) => {
+        if (scoringCount <= 0) return 0;
+        const base = Math.min(i, scoringCount - 1);
+        return (base + delta + scoringCount) % scoringCount;
+      });
+    },
+    [scoringCount],
+  );
+
   return (
     <main className="cc-main">
       <header className="cc-header">
@@ -296,8 +331,9 @@ function PresenterBoard({
       {/* BUILD (and the pre-build LOBBY/GREETINGS phases): live card grid —
           one read-only mini canvas per team, right under the team overview
           cards (greeting + empty canvas; live items + layout). From SCORING
-          onward this grid is REPLACED by the one-at-a-time stage below. */}
-      {snapshot && snapshot.teams.length > 0 && !showStage ? (
+          onward this grid is REPLACED: SCORING by the anonymous scoring
+          stage below, JUDGING/REVEAL/RESULTS by the one-at-a-time stage. */}
+      {snapshot && snapshot.teams.length > 0 && !showStage && snapshot.phase !== PHASE.SCORING ? (
         <section aria-label="live cards" className="cc-mini-grid">
           {snapshot.teams.map((team) => {
             const readyCount = team.items.filter((i) => i.status === "ready").length;
@@ -365,8 +401,9 @@ function PresenterBoard({
             /* JUDGING: the shared judge card (full-screen variant). No
                cardLabel exists on presenter payloads (the JUDGING
                phaseChanged carries no scoring order) — TeamJudgeCard falls
-               back to the team's label. tally=null: the presenter never
-               receives scores. */
+               back to the team's label. tally=null here too: the JUDGING
+               stage is team-named, so the anonymous tallies have no row to
+               light up on this surface. */
             <TeamJudgeCard
               team={stageTeam}
               cardLabel={null}
@@ -407,30 +444,75 @@ function PresenterBoard({
       ) : null}
       {!snapshot ? <p className="cc-hint">Waiting for the first sync…</p> : null}
 
-      {/* SCORING: anonymous live scoreboard — card labels + running averages
-          only. The card↔team mapping NEVER reaches the big screen before the
-          reveal (server strips it from every presenter payload). */}
-      {snapshot?.phase === PHASE.SCORING && (snapshot.scoring?.cards.length ?? 0) > 0 ? (
-        <section className="cc-card cc-scoring-console" aria-label="scoring progress" data-testid="presenter-scoring">
-          <h3>Rate the cards</h3>
-          <p className="cc-hint" aria-live="polite">
-            Players are rating the cards from 1 to 10 — scores update live.
+      {/* SCORING: the anonymous single-card stage — replaces the team stage
+          (whose names would leak the card↔team mapping) and the old chip
+          console. Poster-first: the click-to-flip button swaps between the
+          AI montage poster and the composed sticker card. The card↔team
+          mapping NEVER reaches the big screen before the reveal (the server
+          strips it from every presenter payload). */}
+      {snapshot?.phase === PHASE.SCORING && scoringCard ? (
+        <section
+          aria-label="scoring stage"
+          className="cc-scoring-stage"
+          data-testid="presenter-scoring"
+        >
+          <div className="cc-scoring-stage-heading">
+            <h3>Rate the cards</h3>
+            <p className="cc-hint" aria-live="polite">
+              Players are rating the cards from 1 to 10 — scores update live.
+            </p>
+          </div>
+          <div className="cc-present-stage-header">
+            <h2>{scoringCard.label}</h2>
+            <span className="cc-badge">
+              {clampedScoringIndex + 1} of {scoringCount}
+            </span>
+            <div className="cc-present-stage-actions">
+              <button
+                type="button"
+                className="cc-btn"
+                data-testid="presenter-scoring-prev"
+                aria-label={`Previous card (${(((clampedScoringIndex - 1 + scoringCount) % scoringCount) + 1)} of ${scoringCount})`}
+                onClick={() => stepScoringCard(-1)}
+              >
+                ← Prev
+              </button>
+              <button
+                type="button"
+                className="cc-btn"
+                data-testid="presenter-scoring-next"
+                aria-label={`Next card (${(((clampedScoringIndex + 1) % scoringCount) + 1)} of ${scoringCount})`}
+                onClick={() => stepScoringCard(1)}
+              >
+                Next →
+              </button>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="cc-scoring-stage-card"
+            data-testid="presenter-scoring-card"
+            style={{ aspectRatio: `${snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W} / ${snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}` }}
+            aria-label={`${scoringCard.label} — ${scoringCardFlipped ? "sticker card" : "AI montage"} (click to flip)`}
+            onClick={() => setScoringCardFlipped((f) => !f)}
+          >
+            <img
+              src={`/api/games/${code}/scoring-card/${scoringCard.cardId}${scoringCardFlipped ? "" : "?variant=poster"}`}
+              alt={`${scoringCard.label} — ${scoringCardFlipped ? "sticker card" : "AI montage poster"}`}
+              draggable={false}
+            />
+          </button>
+          <p className="cc-scoring-stage-hint">
+            {scoringCardFlipped ? "Sticker card · click to flip" : "AI montage · click to flip"}
           </p>
-          <ul className="cc-score-chips">
-            {snapshot.scoring!.cards.map((card) => {
-              const tally = snapshot.scores[card.cardId];
-              return (
-                <li key={card.cardId} className="cc-score-chip">
-                  <span className="cc-score-chip-team">{card.label}</span>
-                  <span className="cc-score-chip-score" aria-live="polite">
-                    {tally
-                      ? `${tally.avg} avg · ${tally.count} vote${tally.count === 1 ? "" : "s"}`
-                      : "no votes yet"}
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
+          <p className="cc-scoring-stage-tally" aria-live="polite" data-testid="presenter-scoring-tally">
+            {(() => {
+              const tally = snapshot.scores[scoringCard.cardId];
+              return tally
+                ? `${tally.avg} avg · ${tally.count} vote${tally.count === 1 ? "" : "s"}`
+                : "no votes yet";
+            })()}
+          </p>
         </section>
       ) : null}
 

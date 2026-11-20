@@ -777,6 +777,34 @@ describe("sync:full prev-preservation (omitted fields keep prev state)", () => {
     expect(s.teams[0]!.items).toEqual([prevItem]);
     expect(s.teams[1]!.items).toEqual([]);
   });
+
+  it("omitted scores → prev tallies preserved (resync must not wipe the live scoreboard)", () => {
+    // Prev snapshot with live tallies (as a scores:update / a tallies-bearing
+    // sync:full would have left them).
+    const prev = normalizeSyncFull(
+      baseSnapshot({ scores: [{ cardId: "card-b", avg: 7.25, count: 4 }] }),
+      {},
+      PLAYER_ME,
+    );
+    expect(prev.scores["card-b"]).toEqual({ avg: 7.25, count: 4 });
+    // Resync WITHOUT scores (older server payload / omitted field) → keep.
+    const raw = baseSnapshot();
+    const s = normalizeSyncFull(raw, {}, PLAYER_ME, prev);
+    expect(s.scores["card-b"]).toEqual({ avg: 7.25, count: 4 });
+  });
+
+  it("scores present → replaces prev tallies (never merges stale rows)", () => {
+    const prev = normalizeSyncFull(
+      baseSnapshot({ scores: [{ cardId: "card-b", avg: 7.25, count: 4 }] }),
+      {},
+      PLAYER_ME,
+    );
+    const raw = baseSnapshot({
+      scores: [{ cardId: "card-c", avg: 3, count: 1 }],
+    });
+    const s = normalizeSyncFull(raw, {}, PLAYER_ME, prev);
+    expect(s.scores).toEqual({ "card-c": { avg: 3, count: 1 } });
+  });
 });
 
 // ---------------------------------------------------------------------------

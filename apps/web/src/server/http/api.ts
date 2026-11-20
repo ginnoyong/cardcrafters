@@ -331,14 +331,22 @@ export async function handleApiRequest(
     return true;
   }
   // GET /api/games/:code/scoring-card/:cardId?token=[&variant=poster] — one
-  // scoring card's finished image for the player who is rating it. Auth = a
-  // valid player session token (the card→team mapping stays server-side, but
-  // the player needs the image to rate meaningfully). Only served during
-  // SCORING/JUDGING; cache-control: no-store keeps the phase gate honest.
-  // variant=poster serves the team's AI montage poster when it is READY (the
-  // poster-first scoring UI); anything else falls back to the composed
-  // renderTeamCardPng render. All auth/phase/round/cardId guards run BEFORE
-  // the variant handling.
+  // scoring card's finished image. Two audiences:
+  //  - a PLAYER rating it, authenticated by a valid session token (?token=…);
+  //  - the PRESENTER big screen, TOKENLESS: the game code is the capability
+  //    (same "knowing the code" trade-off as GM auth, documented at the top
+  //    of this file) — the anonymous scoring stage needs the same images the
+  //    players' tokens already serve, and the card→team mapping stays
+  //    server-side either way.
+  // When a token IS supplied it is validated exactly as before (403
+  // invalid_token on any mismatch); a tokenless request skips the player
+  // check but keeps every downstream guard. Only served during
+  // SCORING/JUDGING (409 otherwise) and only for a cardId in the round's
+  // scoring order (404 otherwise); cache-control: no-store keeps the phase
+  // gate honest. variant=poster serves the team's AI montage poster when it
+  // is READY (the poster-first scoring UI); anything else falls back to the
+  // composed renderTeamCardPng render. All phase/round/cardId guards run
+  // BEFORE the variant handling.
   const scoringCardMatch = /^\/api\/games\/([A-Za-z0-9]+)\/scoring-card\/([A-Za-z0-9-]+)$/.exec(
     path,
   );
@@ -351,11 +359,16 @@ export async function handleApiRequest(
       sendJson(res, 404, { ok: false, error: "unknown_code", code });
       return true;
     }
-    const player = await repo.getPlayerBySessionToken(token);
-    if (!player || player.gameId !== game.id || player.removedAt !== null) {
-      sendJson(res, 403, { ok: false, error: "invalid_token" });
-      return true;
+    if (token !== "") {
+      const player = await repo.getPlayerBySessionToken(token);
+      if (!player || player.gameId !== game.id || player.removedAt !== null) {
+        sendJson(res, 403, { ok: false, error: "invalid_token" });
+        return true;
+      }
     }
+    // Tokenless (presenter) access: no player check — the game code in the
+    // URL is the capability. Every guard below (phase gate, scoring-order
+    // membership) still applies.
     const state = await hub.runtimeState(game.id);
     if (state.phase !== "SCORING" && state.phase !== "JUDGING") {
       sendJson(res, 409, { ok: false, error: "not_scoring", phase: state.phase });

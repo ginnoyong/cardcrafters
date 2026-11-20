@@ -192,9 +192,10 @@ export interface SyncFullPayload extends Record<string, unknown> {
   }>;
   myScores?: Array<{ cardId: string; value: number }>;
   /**
-   * Per-card anonymous running tallies ({cardId, avg, count}) — GM snapshots
-   * only, so the judging table survives a refresh (live tallies otherwise
-   * ride on scores:update, which stops once scoring locks at JUDGING).
+   * Per-card anonymous running tallies ({cardId, avg, count}) — EVERY role's
+   * snapshot (GM, player, presenter) when a scoring order exists for the
+   * current round, so any surface's resync (refresh/reconnect) restores the
+   * live tallies (scores:update itself stops once scoring locks at JUDGING).
    * Never carries teamId in the tallies — the card→team mapping stays in
    * `scoring.cards`.
    */
@@ -207,6 +208,7 @@ export interface SyncFullPayload extends Record<string, unknown> {
    *    no teamId) + their own team's cardId;
    *  - presenter: ANONYMOUS cards only (no teamName, no teamId, no
    *    yourTeamCardId).
+   * The anonymous `scores` tallies ride along for all three audiences.
    * Absent when no scoring order exists for the current round.
    */
   scoring?: {
@@ -327,7 +329,7 @@ export async function buildSyncFull(
   }
 
   let myScores: Array<{ cardId: string; value: number }> | undefined;
-  let gmScores: Array<{ cardId: string; avg: number; count: number }> | undefined;
+  let tallies: Array<{ cardId: string; avg: number; count: number }> | undefined;
   let scoring: SyncFullPayload["scoring"];
 
   // Scoring section — present only when a scoring order exists for the
@@ -335,17 +337,24 @@ export async function buildSyncFull(
   const gameRow = await repo.getGame(gameId);
   const order = gameRow?.scoringOrder;
   if (order && order.round === round) {
+    // Anonymous per-card tallies ({cardId, avg, count}) — computed ONCE for
+    // every role (GM, player, presenter): a resync (reconnect / phase
+    // change) must restore the live tallies on all surfaces, not just the
+    // GM console (the client's normalizeSnapshot would otherwise blank its
+    // scores map until the next scores:update). Keyed by cardId ONLY via
+    // the scoring order's team→card map — a teamId never rides along, so
+    // the player/presenter copies stay as anonymous as the GM's.
+    const cardByTeam = new Map(order.cards.map((c) => [c.teamId, c.cardId]));
+    const aggregates = await repo.aggregateScores(gameId, round);
+    tallies = aggregates.flatMap((a) => {
+      const cardId = cardByTeam.get(a.targetTeamId);
+      return cardId ? [{ cardId, avg: Math.round(a.avg * 100) / 100, count: a.count }] : [];
+    });
     if (identity?.role === "gm") {
       // GM: the full card→team mapping plus progress (ratedX / ratedY) and
       // the anonymous per-card tallies (the judging console must survive a
       // refresh — scores:update stops once scoring locks at JUDGING).
       const scores = await repo.listScores(gameId, round);
-      const aggregates = await repo.aggregateScores(gameId, round);
-      const cardByTeam = new Map(order.cards.map((c) => [c.teamId, c.cardId]));
-      gmScores = aggregates.flatMap((a) => {
-        const cardId = cardByTeam.get(a.targetTeamId);
-        return cardId ? [{ cardId, avg: Math.round(a.avg * 100) / 100, count: a.count }] : [];
-      });
       const activePlayers = teamSnapshots.reduce((n, t) => n + t.memberCount, 0);
       scoring = {
         round,
@@ -356,7 +365,9 @@ export async function buildSyncFull(
     } else if (identity?.role === "player") {
       // Players: team-named cards (teamName mirrors beginScoring's player
       // copy — anonymity dropped per user decision 2a; teamId still never
-      // leaves the server) + which card is THEIR OWN team's.
+      // leaves the server) + which card is THEIR OWN team's. The anonymous
+      // tallies ride along (computed above) so a player's resync restores
+      // the live scoreboard too.
       scoring = {
         round,
         cards: order.cards.map((c) => ({
@@ -369,7 +380,6 @@ export async function buildSyncFull(
       // myScores are cardId-keyed for the client — the targetTeamId→cardId
       // mapping happens HERE, server-side, so the raw team id never reaches
       // the player's snapshot.
-      const cardByTeam = new Map(order.cards.map((c) => [c.teamId, c.cardId]));
       const scores = await repo.listScores(gameId, round);
       myScores = scores
         .filter((s) => s.voterPlayerId === identity.playerId)
@@ -378,7 +388,9 @@ export async function buildSyncFull(
           return cardId ? [{ cardId, value: s.value }] : [];
         });
     } else {
-      // Presenter (and any unknown identity): anonymous cards only.
+      // Presenter (and any unknown identity): anonymous cards only, plus the
+      // same anonymous tallies (computed above) — the presenter scoreboard
+      // must survive a resync exactly like the GM's and the players'.
       scoring = {
         round,
         cards: order.cards.map((c) => ({ cardId: c.cardId, label: c.label })),
@@ -400,7 +412,7 @@ export async function buildSyncFull(
     serverNow: Date.now(),
     teams: teamSnapshots,
     myScores,
-    ...(gmScores ? { scores: gmScores } : {}),
+    ...(tallies ? { scores: tallies } : {}),
     scoring,
   };
 }
