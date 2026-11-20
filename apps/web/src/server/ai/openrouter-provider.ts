@@ -435,7 +435,8 @@ export function montageImagePrompt(input: Record<string, unknown>): string {
 function itemImagePrompt(input: Record<string, unknown>): string {
   const subject = String(input.subject ?? input.prompt ?? "");
   const style = String(input.styleSuffix ?? input.imagePromptSuffix ?? "");
-  return `One standalone sticker-style illustration of: ${subject}. The subject must be CENTERED and occupy about 75–85% of the frame, with generous transparent padding on ALL sides (subject must NOT touch the edges). Fully transparent background — no backdrop, no ground shadow, no border, no text.${style ? `\nVisual style: ${style}.` : ""}`;
+  return `One standalone illustration of: ${subject}. The subject must be CENTERED and occupy about 75–85% of the frame, with generous padding on ALL sides (subject must NOT touch the edges). The background must be a PLAIN SOLID WHITE — never transparent, never checkered, never patterned, no backdrop, no ground shadow, no border, no text.${style ? `
+Visual style: ${style}.` : ""}`;
 }
 
 function usageOutKeys(usage: ChatCompletionResponse["usage"]): {
