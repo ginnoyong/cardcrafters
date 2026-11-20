@@ -742,7 +742,7 @@ describe("GET /api/games/:code/scoring-card/:cardId?token= (player rating card P
   });
 });
 
-describe("GET /api/games/:code/export/:teamId/:kind (per-team poster/sticker exports)", () => {
+describe("GET /api/games/:code/export/cards (all-cards zip export)", () => {
   /**
    * Create a game and drive it to SCORING (same steps as the scoring-card
    * helper above, without the player join — exports are code-as-capability).
@@ -761,156 +761,138 @@ describe("GET /api/games/:code/export/:teamId/:kind (per-team poster/sticker exp
     return { code: body.code, gameId: body.gameId, teams };
   }
 
+  /** Drive a SCORING-phase game to RESULTS via hub events (same ladder the
+   *  ws integration tests use): stopScoring → pickWinner → reveal:ack. */
+  async function driveToResults(gameId: string, winnerTeamId: string): Promise<void> {
+    await srv.hub.applyEvent(gameId, { type: "gm:stopScoring", now: Date.now() });
+    await srv.hub.applyEvent(gameId, { type: "gm:pickWinner", teamId: winnerTeamId, now: Date.now() });
+    const acked = await srv.hub.applyEvent(gameId, { type: "reveal:ack", now: Date.now() });
+    if (!acked.ok) throw new Error(`reveal:ack failed: ${acked.reason}`);
+  }
+
+  /** Seed a READY montage row + poster file for a team; returns the bytes. */
+  async function seedPoster(gameId: string, teamId: string, round: number, ext: "png" | "jpg"): Promise<Buffer> {
+    const bytes =
+      ext === "png"
+        ? await sharp({ create: { width: 64, height: 64, channels: 3, background: { r: 20, g: 80, b: 200 } } }).png().toBuffer()
+        : await sharp({ create: { width: 64, height: 64, channels: 3, background: { r: 200, g: 80, b: 20 } } }).jpeg().toBuffer();
+    const fileName = `montage-seed-zip.${ext}`;
+    const dir = path.join(DEFAULT_MONTAGE_DIR, gameId, teamId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, fileName), bytes);
+    seededMontageGameIds.push(gameId);
+    await srv.repo.upsertMontageState(teamId, round, {
+      patch: { status: "READY", imageUrl: `/static/montages/${gameId}/${teamId}/${fileName}` },
+    });
+    return bytes;
+  }
+
   /** Mirror of the endpoint's filename sanitizer (keep in sync). */
   const sanitize = (name: string) =>
     name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "team";
 
-  it("unknown code → 404 unknown_code; wrong teamId for the game → 404 unknown_team", async () => {
-    const resUnknown = await fetch(base("/api/games/ZZZZZZ/export/team-x/poster"));
-    expect(resUnknown.status).toBe(404);
-    expect(((await resUnknown.json()) as { error: string }).error).toBe("unknown_code");
+  const expectPng = (buf: Buffer) => {
+    expect(buf[0]).toBe(0x89);
+    expect(buf.subarray(1, 4).toString("ascii")).toBe("PNG");
+  };
 
-    const { code } = await createGameInScoring();
-    const resForeign = await fetch(base(`/api/games/${code}/export/team-does-not-exist/poster`));
-    expect(resForeign.status).toBe(404);
-    expect(((await resForeign.json()) as { error: string }).error).toBe("unknown_team");
+  it("unknown code → 404 unknown_code", async () => {
+    const res = await fetch(base("/api/games/ZZZZZZ/export/cards"));
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: string }).error).toBe("unknown_code");
   });
 
-  it("phase guard: BUILD (and GREETINGS) → 409 not_exportable", async () => {
+  it("phase guard: GREETINGS / BUILD / SCORING / JUDGING / REVEAL → 409 not_exportable", async () => {
+    // GREETINGS → BUILD.
     const res = await fetch(base("/api/games"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ teamCount: 2, theme: "Too Early To Export" }),
+      body: JSON.stringify({ teamCount: 2, theme: "Too Early To Zip" }),
     });
     const body = (await res.json()) as { gameId: string; code: string };
     await waitForGreetings(srv.repo, srv.hub, body.gameId, 2);
-    const teamId = (await srv.repo.listTeams(body.gameId))[0]!.id;
+    const teams = await srv.repo.listTeams(body.gameId);
+    const teamId = teams[0]!.id;
 
-    // GREETINGS — already not exportable.
-    const resGreetings = await fetch(base(`/api/games/${body.code}/export/${teamId}/sticker`));
-    expect(resGreetings.status).toBe(409);
-    const errGreetings = (await resGreetings.json()) as { ok: boolean; error: string; phase: string };
-    expect(errGreetings.error).toBe("not_exportable");
-    expect(errGreetings.phase).toBe("GREETINGS");
+    const fetchZip = async (code: string) => fetch(base(`/api/games/${code}/export/cards`));
+    const expectGuard = async (res2: Response, phase: string) => {
+      expect(res2.status).toBe(409);
+      const err = (await res2.json()) as { ok: boolean; error: string; phase: string };
+      expect(err.error).toBe("not_exportable");
+      expect(err.phase).toBe(phase);
+    };
 
-    // BUILD — the phase the exports must specifically stay locked out of.
+    await expectGuard(await fetchZip(body.code), "GREETINGS");
     await srv.hub.applyEvent(body.gameId, { type: "gm:approveGreetings", now: Date.now() });
-    const resBuild = await fetch(base(`/api/games/${body.code}/export/${teamId}/poster`));
-    expect(resBuild.status).toBe(409);
-    const errBuild = (await resBuild.json()) as { error: string; phase: string };
-    expect(errBuild.error).toBe("not_exportable");
-    expect(errBuild.phase).toBe("BUILD");
+    await expectGuard(await fetchZip(body.code), "BUILD");
+
+    // SCORING.
+    await srv.hub.applyEvent(body.gameId, { type: "gm:stopBuild", now: Date.now() });
+    await expectGuard(await fetchZip(body.code), "SCORING");
+
+    // JUDGING.
+    await srv.hub.applyEvent(body.gameId, { type: "gm:stopScoring", now: Date.now() });
+    await expectGuard(await fetchZip(body.code), "JUDGING");
+
+    // REVEAL.
+    await srv.hub.applyEvent(body.gameId, { type: "gm:pickWinner", teamId, now: Date.now() });
+    await expectGuard(await fetchZip(body.code), "REVEAL");
   });
 
-  it("poster happy path: READY montage row → serves the persisted PNG bytes with a download disposition", async () => {
+  it("happy path: 2 teams → 200 zip (PK magic), 4 entries, poster bytes identical to disk, sticker entries PNG", async () => {
     const { code, gameId, teams } = await createGameInScoring();
     const game = (await srv.repo.getGame(gameId))!;
-    const team = teams[0]!;
-    const bytes = await sharp({
-      create: { width: 64, height: 64, channels: 3, background: { r: 20, g: 80, b: 200 } },
-    })
-      .png()
-      .toBuffer();
-    const fileName = "montage-seed-export.png";
-    const dir = path.join(DEFAULT_MONTAGE_DIR, gameId, team.id);
-    await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, fileName), bytes);
-    seededMontageGameIds.push(gameId);
-    await srv.repo.upsertMontageState(team.id, game.round, {
-      patch: { status: "READY", imageUrl: `/static/montages/${gameId}/${team.id}/${fileName}` },
-    });
+    const [teamA, teamB] = teams;
+    const posterA = await seedPoster(gameId, teamA!.id, game.round, "png");
+    const posterB = await seedPoster(gameId, teamB!.id, game.round, "png");
+    await driveToResults(gameId, teamA!.id);
 
-    const res = await fetch(base(`/api/games/${code}/export/${team.id}/poster`));
+    const res = await fetch(base(`/api/games/${code}/export/cards`));
     expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toBe("image/png");
+    expect(res.headers.get("content-type")).toBe("application/zip");
     expect(res.headers.get("cache-control")).toContain("no-store");
     const disposition = res.headers.get("content-disposition") ?? "";
     expect(disposition).toContain("attachment");
-    expect(disposition).toContain(sanitize(team.name));
-    expect(disposition).toContain("-poster.png");
-    const fetched = Buffer.from(await res.arrayBuffer());
-    expect(fetched.length).toBeGreaterThan(8);
-    expect(fetched[0]).toBe(0x89);
-    expect(fetched.subarray(1, 4).toString("ascii")).toBe("PNG");
-    // Served AS-IS — byte-identical to the persisted montage file.
-    expect(Buffer.compare(fetched, bytes)).toBe(0);
+    expect(disposition).toContain(`cardcrafters-cards-${code}.zip`);
+
+    const zipBytes = Buffer.from(await res.arrayBuffer());
+    // Zip local-file-header magic.
+    expect(zipBytes[0]).toBe(0x50);
+    expect(zipBytes[1]).toBe(0x4b);
+    expect(zipBytes[2]).toBe(0x03);
+    expect(zipBytes[3]).toBe(0x04);
+
+    const { default: AdmZip } = await import("adm-zip");
+    const zip = new AdmZip(zipBytes);
+    const entries = zip.getEntries();
+    expect(entries.length).toBe(4);
+    const byName = new Map(entries.map((e) => [e.entryName, e.getData()]));
+    for (const team of teams) {
+      const name = sanitize(team.name);
+      expect(byName.has(`${name}-poster.png`)).toBe(true);
+      expect(byName.has(`${name}-card.png`)).toBe(true);
+    }
+    // Posters served AS-IS — byte-identical to the persisted montage files.
+    expect(Buffer.compare(byName.get(`${sanitize(teamA!.name)}-poster.png`)!, posterA)).toBe(0);
+    expect(Buffer.compare(byName.get(`${sanitize(teamB!.name)}-poster.png`)!, posterB)).toBe(0);
+    // Sticker cards are composed renders — valid PNGs.
+    expectPng(byName.get(`${sanitize(teamA!.name)}-card.png`)!);
+    expectPng(byName.get(`${sanitize(teamB!.name)}-card.png`)!);
   });
 
-  it("poster fallback (no row / FALLBACK / file gone) → 200 PNG magic (composed render)", async () => {
+  it("poster fallback (no montage row) → zip still serves composed PNG posters", async () => {
     const { code, gameId, teams } = await createGameInScoring();
-    const game = (await srv.repo.getGame(gameId))!;
-    const team = teams[0]!;
+    await driveToResults(gameId, teams[0]!.id);
 
-    // (a) No montage row at all → composed render, still a valid PNG.
-    const resNoRow = await fetch(base(`/api/games/${code}/export/${team.id}/poster`));
-    expect(resNoRow.status).toBe(200);
-    expect(resNoRow.headers.get("content-type")).toBe("image/png");
-    const fallbackBytes = Buffer.from(await resNoRow.arrayBuffer());
-    expect(fallbackBytes[0]).toBe(0x89);
-    expect(fallbackBytes.subarray(1, 4).toString("ascii")).toBe("PNG");
-
-    // (b) FALLBACK row (imageUrl null) → composed fallback.
-    await srv.repo.upsertMontageState(team.id, game.round, {
-      patch: { status: "FALLBACK", fallbackUsed: true, imageUrl: null },
-    });
-    const resFallback = await fetch(base(`/api/games/${code}/export/${team.id}/poster`));
-    expect(resFallback.status).toBe(200);
-    expect(Buffer.compare(Buffer.from(await resFallback.arrayBuffer()), fallbackBytes)).toBe(0);
-
-    // (c) READY row whose file never landed on disk → composed fallback.
-    await srv.repo.upsertMontageState(team.id, game.round, {
-      patch: {
-        status: "READY",
-        fallbackUsed: false,
-        imageUrl: `/static/montages/${gameId}/${team.id}/montage-gone.png`,
-      },
-    });
-    const resGone = await fetch(base(`/api/games/${code}/export/${team.id}/poster`));
-    expect(resGone.status).toBe(200);
-    expect(Buffer.compare(Buffer.from(await resGone.arrayBuffer()), fallbackBytes)).toBe(0);
-  });
-
-  it("poster with a stored .jpg → content-type image/jpeg + .jpg disposition ext", async () => {
-    const { code, gameId, teams } = await createGameInScoring();
-    const game = (await srv.repo.getGame(gameId))!;
-    const team = teams[0]!;
-    const bytes = await sharp({
-      create: { width: 64, height: 64, channels: 3, background: { r: 200, g: 80, b: 20 } },
-    })
-      .jpeg()
-      .toBuffer();
-    const fileName = "montage-seed-export.jpg";
-    const dir = path.join(DEFAULT_MONTAGE_DIR, gameId, team.id);
-    await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, fileName), bytes);
-    seededMontageGameIds.push(gameId);
-    await srv.repo.upsertMontageState(team.id, game.round, {
-      patch: { status: "READY", imageUrl: `/static/montages/${gameId}/${team.id}/${fileName}` },
-    });
-
-    const res = await fetch(base(`/api/games/${code}/export/${team.id}/poster`));
+    const res = await fetch(base(`/api/games/${code}/export/cards`));
     expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toBe("image/jpeg");
-    const disposition = res.headers.get("content-disposition") ?? "";
-    expect(disposition).toContain("attachment");
-    expect(disposition).toContain(sanitize(team.name));
-    expect(disposition).toContain("-poster.jpg");
-  });
+    const zipBytes = Buffer.from(await res.arrayBuffer());
 
-  it("sticker: 200 PNG magic + attachment disposition with the sanitized team name", async () => {
-    const { code, teams } = await createGameInScoring();
-    const team = teams[0]!;
-    const res = await fetch(base(`/api/games/${code}/export/${team.id}/sticker`));
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toBe("image/png");
-    expect(res.headers.get("cache-control")).toContain("no-store");
-    const disposition = res.headers.get("content-disposition") ?? "";
-    expect(disposition).toContain("attachment");
-    expect(disposition).toContain(sanitize(team.name));
-    expect(disposition).toContain("-card.png");
-    const buf = Buffer.from(await res.arrayBuffer());
-    expect(buf.length).toBeGreaterThan(100);
-    expect(buf[0]).toBe(0x89);
-    expect(buf.subarray(1, 4).toString("ascii")).toBe("PNG");
+    const { default: AdmZip } = await import("adm-zip");
+    const entries = new AdmZip(zipBytes).getEntries();
+    expect(entries.length).toBe(4);
+    for (const entry of entries) {
+      expectPng(entry.getData());
+    }
   });
 });
