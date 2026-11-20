@@ -216,6 +216,9 @@ export class AiRouter {
                   message: `provider threw: ${(cause as Error).message}`,
                 });
           failedAttempts += 1;
+          console.warn(
+            `[ai-router] ${task} attempt ${failedAttempts} via ${model} failed: ${lastError.message}`,
+          );
           await this.log(task, model, "ERROR", {
             latencyMs: 0,
             costUsd: 0,
@@ -238,6 +241,9 @@ export class AiRouter {
             message: `router rejected output: ${checked.error}`,
           });
           failedAttempts += 1;
+          console.warn(
+            `[ai-router] ${task} attempt ${failedAttempts} via ${model} rejected: ${lastError.message}`,
+          );
           await this.log(task, model, "ERROR", {
             latencyMs: result.latencyMs,
             costUsd: result.usage?.costUsd ?? 0,

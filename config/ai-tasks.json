@@ -12,11 +12,17 @@
     "maxTokens 0 means 'omit max_tokens' (used by the image task)."
   ],
   "mode": "auto",
-  "defaults": { "retries": 1, "timeoutMs": 15000 },
+  "defaults": {
+    "retries": 1,
+    "timeoutMs": 15000
+  },
   "tasks": {
     "prompt_validation": {
       "primary": "google/gemini-2.5-flash",
-      "fallbacks": ["openai/gpt-4.1-mini", "openai/gpt-4o-mini"],
+      "fallbacks": [
+        "openai/gpt-4.1-mini",
+        "openai/gpt-4o-mini"
+      ],
       "temperature": 0,
       "maxTokens": 200,
       "timeoutMs": 8000,
@@ -25,7 +31,9 @@
     },
     "moderation": {
       "primary": "openai/gpt-4.1-mini",
-      "fallbacks": ["google/gemini-2.5-flash"],
+      "fallbacks": [
+        "google/gemini-2.5-flash"
+      ],
       "temperature": 0,
       "maxTokens": 150,
       "retries": 1,
@@ -34,7 +42,9 @@
     },
     "greeting_variations": {
       "primary": "google/gemini-2.5-flash",
-      "fallbacks": ["openai/gpt-4.1-mini"],
+      "fallbacks": [
+        "openai/gpt-4.1-mini"
+      ],
       "temperature": 0.9,
       "maxTokens": 800,
       "retries": 1,
@@ -43,7 +53,9 @@
     },
     "style_derivation": {
       "primary": "google/gemini-2.5-flash",
-      "fallbacks": ["openai/gpt-4.1-mini"],
+      "fallbacks": [
+        "openai/gpt-4.1-mini"
+      ],
       "temperature": 0.4,
       "maxTokens": 400,
       "retries": 1,
@@ -52,7 +64,9 @@
     },
     "item_image": {
       "primary": "google/gemini-2.5-flash-image",
-      "fallbacks": ["openai/gpt-image-1"],
+      "fallbacks": [
+        "openai/gpt-image-1"
+      ],
       "temperature": 1,
       "maxTokens": 0,
       "timeoutMs": 60000,
@@ -61,7 +75,9 @@
     },
     "layout_composition": {
       "primary": "google/gemini-2.5-flash",
-      "fallbacks": ["openai/gpt-4.1-mini"],
+      "fallbacks": [
+        "openai/gpt-4.1-mini"
+      ],
       "temperature": 0.3,
       "maxTokens": 1200,
       "retries": 1,
@@ -70,7 +86,9 @@
     },
     "layout_critique": {
       "primary": "google/gemini-2.5-flash",
-      "fallbacks": ["openai/gpt-4.1-mini"],
+      "fallbacks": [
+        "openai/gpt-4.1-mini"
+      ],
       "temperature": 0.2,
       "maxTokens": 400,
       "retries": 1,
@@ -80,7 +98,9 @@
     },
     "layout_montage": {
       "primary": "google/gemini-2.5-flash",
-      "fallbacks": ["openai/gpt-4.1-mini"],
+      "fallbacks": [
+        "openai/gpt-4.1-mini"
+      ],
       "temperature": 0.3,
       "maxTokens": 1200,
       "retries": 1,
@@ -90,7 +110,9 @@
     },
     "montage_prompt": {
       "primary": "google/gemini-2.5-flash",
-      "fallbacks": ["openai/gpt-4.1-mini"],
+      "fallbacks": [
+        "openai/gpt-4.1-mini"
+      ],
       "temperature": 0.8,
       "maxTokens": 1200,
       "retries": 1,
@@ -99,10 +121,13 @@
     },
     "montage_image": {
       "primary": "google/gemini-2.5-flash-image",
-      "fallbacks": ["openai/gpt-image-1"],
+      "fallbacks": [
+        "google/gemini-3.1-flash-image",
+        "openai/gpt-5-image-mini"
+      ],
       "temperature": 1,
       "maxTokens": 0,
-      "retries": 1,
+      "retries": 2,
       "timeoutMs": 60000,
       "structured": null
     }
