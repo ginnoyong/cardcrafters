@@ -289,8 +289,8 @@ describe("AiRouter — openrouter (mocked fetch)", () => {
 // OpenRouter item_image prompt (die-cut sticker look)
 // ---------------------------------------------------------------------------
 
-describe("OpenRouterProvider — item_image prompt (die-cut)", () => {
-  it("synthesizes a die-cut prompt: centered 75–85% subject, transparent padding on all sides + style suffix", async () => {
+describe("OpenRouterProvider — item_image prompt (plain-white bg)", () => {
+  it("synthesizes an item_image prompt: centered 75–85% subject, transparent padding on all sides + style suffix", async () => {
     const tinyPng = await sharp({
       create: { width: 8, height: 8, channels: 4, background: { r: 200, g: 30, b: 30, alpha: 1 } },
     })
@@ -319,8 +319,9 @@ describe("OpenRouterProvider — item_image prompt (die-cut)", () => {
     const text = body.messages[0].content as string;
     expect(text).toContain("a red balloon dog");
     expect(text).toContain("75–85%");
-    expect(text).toContain("transparent padding on ALL sides");
-    expect(text).toContain("Fully transparent background");
+    expect(text).toContain("padding on ALL sides");
+    expect(text).toContain("PLAIN SOLID WHITE");
+    expect(text).toContain("never checkered");
     expect(text).toContain("CENTERED");
     // Style suffix is still inserted.
     expect(text).toContain("flat vector, bold outlines");
