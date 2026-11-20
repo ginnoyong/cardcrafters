@@ -1199,6 +1199,38 @@ label {
   font-weight: 700;
 }
 
+/* Distinct phase-transition colours: each stage gets its own tone so the GM
+   can tell at a glance which phase transition the button triggers. */
+.cc-btn-build {
+  background: #5f8f7d;
+  border-color: #5f8f7d;
+  color: #f4efe6;
+}
+.cc-btn-build:hover:not(:disabled) {
+  background: #6fa08d;
+  border-color: #6fa08d;
+}
+
+.cc-btn-score {
+  background: #b08d57;
+  border-color: #b08d57;
+  color: #f4efe6;
+}
+.cc-btn-score:hover:not(:disabled) {
+  background: #c09d67;
+  border-color: #c09d67;
+}
+
+.cc-btn-judging {
+  background: #8b6b8b;
+  border-color: #8b6b8b;
+  color: #f4efe6;
+}
+.cc-btn-judging:hover:not(:disabled) {
+  background: #9b7b9b;
+  border-color: #9b7b9b;
+}
+
 /* --- Scoring / results (RatingPanel, GM console, presenter board) --------
 
 Same design system: card fills, hairline color-mix borders, var(--radius),

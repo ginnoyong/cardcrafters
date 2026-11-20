@@ -367,7 +367,7 @@ function TeamCard({
             {members.map((m) => (
               <li key={m.id}>
                 <span className="cc-dot-chip is-in" aria-hidden="true" />
-                <span aria-hidden="true">{m.connected ? "●" : "○"}</span> {m.nickname}
+                {m.nickname}
                 <button
                   type="button"
                   className="cc-btn cc-btn-small"
@@ -1000,7 +1000,7 @@ function Console({ game }: { game: CreatedGame }) {
         <section className="cc-start" aria-label="start building">
           <button
             type="button"
-            className="cc-btn cc-btn-primary cc-btn-start"
+            className="cc-btn cc-btn-primary cc-btn-start cc-btn-build"
             disabled={pendingTeams.length > 0}
             onClick={() => void gmAction("gm:approveGreetings", {})}
           >
@@ -1023,7 +1023,7 @@ function Console({ game }: { game: CreatedGame }) {
         <section className="cc-start" aria-label="start scoring" data-testid="gm-start-scoring">
           <button
             type="button"
-            className="cc-btn cc-btn-primary cc-btn-start"
+            className="cc-btn cc-btn-primary cc-btn-start cc-btn-score"
             onClick={() => void gmAction("gm:stopBuild", {})}
           >
             Start scoring
@@ -1050,7 +1050,7 @@ function Console({ game }: { game: CreatedGame }) {
         <section className="cc-start" aria-label="go to judging" data-testid="gm-go-judging">
           <button
             type="button"
-            className="cc-btn cc-btn-primary cc-btn-start"
+            className="cc-btn cc-btn-primary cc-btn-start cc-btn-judging"
             onClick={() => void gmAction("gm:stopScoring", {})}
           >
             Go to judging
