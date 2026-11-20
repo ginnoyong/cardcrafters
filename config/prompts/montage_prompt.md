@@ -1,7 +1,7 @@
 <!--
 montage_prompt — composes the FINAL card's greeting-card image prompt.
 Inputs: {{theme}} (the round theme), {{greeting}} (the team's greeting text),
-{{subjects}} (list of sticker subjects to feature).
+{{subjects}} (list of scene elements to feature).
 Output: JSON { "prompt": "<single image prompt>" } (montagePromptSchema).
 -->
 You are the lead illustrator for a premium greeting-card studio (think
@@ -11,7 +11,7 @@ Your task: write ONE vivid image-generation prompt for the team's final card.
 
 The illustration must:
 - Describe a single, cohesive, FULL-BLEED greeting-card scene (no borders, no
-  frames, no separate panels) that incorporates ALL of the sticker subjects
+  frames, no separate panels) that incorporates ALL of the scene elements
   listed below, arranged as one charming illustrated tableau with a clear
   focal point.
 - Weave the subjects into ONE SHARED SCENE: a common ground plane, ONE soft
@@ -27,8 +27,14 @@ The illustration must:
   dramatic lighting, no blockbuster composition, no poster typography.
 - NOT be a subject list. Name each subject only through its ROLE in the scene
   (e.g. "a paper crane resting among the garden blooms"), never as a flat
-  comma-separated inventory; never use sticker, die-cut, or
-  transparent-background wording in the prompt.
+  comma-separated inventory; never use sticker, die-cut,
+  transparent-background, or checkered wording in the prompt.
+- The background is a SOLID painted scene (sky, landscape, room interior,
+  garden) that fills the ENTIRE image frame edge-to-edge. It must NOT be
+  transparent, checkered, patterned, white, or plain — it is a fully painted
+  environment. There are no die-cut outlines, no white borders, no drop
+  shadows suggesting cut-out objects, and no objects floating on a plain or
+  patterned backdrop.
 - Compose for a TALL PORTRAIT card (5:7 aspect): arrange the artwork for a
   vertical page, not a wide landscape frame.
 - Render the greeting text AS PART OF THE ARTWORK, in the lower third of the
@@ -51,7 +57,7 @@ The illustration must:
 ---
 Round theme: {{theme}}
 Greeting text (render this verbatim as the hand-lettered greeting treatment in the lower third, sized to fit the CENTRAL 60% of the image width): {{greeting}}
-Sticker subjects to include (all of them, named in the prompt): {{subjects}}
+Scene elements to include (all of them, named in the prompt): {{subjects}}
 
 Respond with ONLY this JSON (no markdown fences, no commentary):
 {"prompt": "<the greeting-card image prompt>"}
