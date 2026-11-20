@@ -482,7 +482,13 @@ function TeamMiniCanvas({
             }
           }}
         >
-          {showPoster ? montageBox : stickerBox}
+          {/* BOTH faces stay mounted; the flip toggles CSS `display` instead
+              of conditionally remounting CardCanvas (a remount on every flip
+              sized the fresh Konva stage into a zero-dimension container →
+              blank canvas; persistent mount + ResizeObserver keeps the real
+              size). */}
+          <div style={{ display: flipped ? "none" : undefined }}>{montageBox}</div>
+          <div style={{ display: flipped ? undefined : "none" }}>{stickerBox}</div>
         </div>
       ) : (
         <>
@@ -568,16 +574,10 @@ function WinnerRevealCard({
           }
         }}
       >
-        {flipped ? (
-          <CardCanvas
-            items={team.items}
-            layout={team.layout}
-            greeting={team.greeting.text}
-            cardRatioW={cardRatioW}
-            cardRatioH={cardRatioH}
-            ariaLabel={`${team.name}'s winning sticker card — ${readyCount} stickers placed`}
-          />
-        ) : (
+        {/* BOTH faces stay mounted; CSS-`display` toggle (same fix as
+            TeamMiniCanvas — conditional remount of CardCanvas per flip
+            rendered a blank 0-sized Konva stage). */}
+        <div style={{ display: flipped ? "none" : undefined }}>
           <div
             className="cc-montage cc-winner-sparkle"
             style={{
@@ -594,7 +594,17 @@ function WinnerRevealCard({
               className="cc-montage-img"
             />
           </div>
-        )}
+        </div>
+        <div style={{ display: flipped ? undefined : "none" }}>
+          <CardCanvas
+            items={team.items}
+            layout={team.layout}
+            greeting={team.greeting.text}
+            cardRatioW={cardRatioW}
+            cardRatioH={cardRatioH}
+            ariaLabel={`${team.name}'s winning sticker card — ${readyCount} stickers placed`}
+          />
+        </div>
       </div>
     </div>
   );

@@ -141,16 +141,13 @@ export default function TeamJudgeCard({
                 }
               }}
             >
-              {flipped ? (
-                <CardCanvas
-                  items={team.items}
-                  layout={team.layout}
-                  greeting={team.greeting.text}
-                  cardRatioW={cardRatioW}
-                  cardRatioH={cardRatioH}
-                  ariaLabel={`${team.name} sticker card — ${readyCount} stickers placed`}
-                />
-              ) : (
+              {/* BOTH faces stay mounted (poster first, sticker CardCanvas
+                  second); the flip toggles them with CSS `display` instead of
+                  conditionally remounting CardCanvas. Remounting on every
+                  flip gave the freshly-mounted Konva stage a zero-sized
+                  container (blank canvas); keeping it mounted lets its
+                  ResizeObserver hold/restore the real measured size. */}
+              <div style={{ display: flipped ? "none" : undefined }}>
                 <div
                   className="cc-montage"
                   style={{
@@ -167,7 +164,17 @@ export default function TeamJudgeCard({
                     className="cc-montage-img"
                   />
                 </div>
-              )}
+              </div>
+              <div style={{ display: flipped ? undefined : "none" }}>
+                <CardCanvas
+                  items={team.items}
+                  layout={team.layout}
+                  greeting={team.greeting.text}
+                  cardRatioW={cardRatioW}
+                  cardRatioH={cardRatioH}
+                  ariaLabel={`${team.name} sticker card — ${readyCount} stickers placed`}
+                />
+              </div>
             </div>
           ) : (
             <>

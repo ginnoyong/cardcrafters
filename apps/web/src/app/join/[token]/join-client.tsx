@@ -541,7 +541,13 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                         }
                       }}
                     >
-                      {showPoster ? (
+                      {/* BOTH faces stay mounted; the flip toggles CSS
+                          `display` instead of conditionally remounting
+                          CardCanvas (per-flip remount sized the fresh Konva
+                          stage into a zero-dimension container → blank
+                          canvas; persistent mount keeps the ResizeObserver
+                          size). */}
+                      <div style={{ display: showPoster ? undefined : "none" }}>
                         <div
                           className="cc-montage"
                           style={cardRatioStyle(
@@ -557,7 +563,8 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                             className="cc-montage-img"
                           />
                         </div>
-                      ) : (
+                      </div>
+                      <div style={{ display: showPoster ? "none" : undefined }}>
                         <CardCanvas
                           items={team.items}
                           layout={team.layout}
@@ -569,7 +576,7 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                           onItemTap={handleHighlight}
                           ariaLabel={`your team's card — ${team.items.filter((i) => i.status === "ready").length} stickers placed`}
                         />
-                      )}
+                      </div>
                     </div>
                   ) : (
                     <>
