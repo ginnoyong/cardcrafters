@@ -136,6 +136,27 @@ h3 {
   cursor: pointer;
 }
 
+/* Anchors styled as buttons (the per-team "View" links in the GM judge
+   boxes): strip the UA link chrome (underline, visited color) and center
+   the label so they align with real <button> siblings in the actions row. */
+a.cc-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  text-decoration-line: none;
+  font-weight: 500;
+}
+
+a.cc-btn:hover:not(:disabled),
+a.cc-btn:focus-visible {
+  text-decoration: none;
+}
+
+a.cc-btn:visited {
+  color: var(--text);
+}
+
 .cc-btn:hover:not(:disabled) {
   border-color: var(--accent);
 }
