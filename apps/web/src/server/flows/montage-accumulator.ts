@@ -134,7 +134,7 @@ export async function normalizePosterToCardRatio(
   const targetAspect = cardRatioW / cardRatioH;
   if (Math.abs(nativeAspect - targetAspect) <= POSTER_ASPECT_TOLERANCE) return null;
   return sharp(bytes)
-    .resize(targetW, targetH, { fit: "cover", position: "centre" })
+    .resize(targetW, targetH, { fit: "cover", position: "bottom" })
     .png()
     .toBuffer();
 }
