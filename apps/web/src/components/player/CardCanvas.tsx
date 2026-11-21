@@ -47,6 +47,13 @@ export interface CardCanvasProps {
   onItemTap?: (itemId: string) => void;
   /** Item id to flash-highlight (e.g. after tapping a submission row). */
   highlightItemId?: string | null;
+  /** Bump this when the container's VISIBILITY toggles (e.g. a flip face's
+   *  display:none ↔ visible). ResizeObserver does re-fire on display changes
+   *  in modern browsers, but re-running the measure on the exact commit that
+   *  reveals the face guarantees the Konva stage gets a real size even if an
+   *  observer delivery is missed (older Safari, race with the style commit).
+   *  Cheap: the measure is idempotent. */
+  resizeSignal?: boolean | number;
   ariaLabel?: string;
 }
 
@@ -116,8 +123,10 @@ function usePrefersReducedMotion(): boolean {
   return reduced;
 }
 
-/** Container-width-driven stage size: height = width × ratio, capped ~70vh. */
-function useStageSize(ratioW: number, ratioH: number) {
+/** Container-width-driven stage size: height = width × ratio, capped ~70vh.
+ *  `remeasureKey` re-runs the measure whenever the caller's visibility state
+ *  toggles (see CardCanvasProps.resizeSignal). */
+function useStageSize(ratioW: number, ratioH: number, remeasureKey: boolean | number) {
   const ref = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   useEffect(() => {
@@ -133,7 +142,10 @@ function useStageSize(ratioW: number, ratioH: number) {
         h = maxH;
         w = (h * ratioW) / ratioH;
       }
-      setSize({ w: Math.round(w), h: Math.round(h) });
+      // Identity-stable update: keep the previous object when nothing changed
+      // so RO callbacks (which fire often) don't trigger pointless re-renders.
+      const next = { w: Math.round(w), h: Math.round(h) };
+      setSize((prev) => (prev.w === next.w && prev.h === next.h ? prev : next));
     };
     compute();
     const ro = new ResizeObserver(compute);
@@ -143,7 +155,7 @@ function useStageSize(ratioW: number, ratioH: number) {
       ro.disconnect();
       window.removeEventListener("resize", compute);
     };
-  }, [ratioW, ratioH]);
+  }, [ratioW, ratioH, remeasureKey]);
   return { containerRef: ref, size };
 }
 
@@ -199,9 +211,10 @@ export default function CardCanvas({
   myPlayerId,
   onItemTap,
   highlightItemId = null,
+  resizeSignal = 0,
   ariaLabel = "team card preview",
 }: CardCanvasProps) {
-  const { containerRef, size } = useStageSize(cardRatioW, cardRatioH);
+  const { containerRef, size } = useStageSize(cardRatioW, cardRatioH, resizeSignal);
   const reducedMotion = usePrefersReducedMotion();
   const layerRef = useRef<Konva.Layer | null>(null);
   const nodesRef = useRef(new Map<string, Konva.Image>());

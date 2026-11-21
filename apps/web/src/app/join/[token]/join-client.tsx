@@ -34,6 +34,7 @@ const CardCanvas = dynamic(() => import("@/components/player/CardCanvas"), {
   loading: () => <div className="cc-canvas-wrap">Loading canvas…</div>,
 });
 import ActivityFeed from "@/components/player/ActivityFeed";
+import CardBack from "@/components/CardBack";
 import NoUndoNotice from "@/components/player/NoUndoNotice";
 import PromptBar, { createPromptBarHandle, type PromptBarHandle } from "@/components/player/PromptBar";
 import RatingPanel, { type ScoreSubmitOutcome } from "@/components/player/RatingPanel";
@@ -345,10 +346,11 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
   // NO-UNDO notice: only before the player's FIRST accepted submission
   // (ledger empty) — NoUndoNotice itself also checks the localStorage ack.
   const noUndoNeeded = build && Object.keys(snapshot?.myItems ?? {}).length === 0;
-  // BUILD flip availability: the montage flip face exists only when the AI
-  // poster is actually on screen (ready status + image URL) — while
-  // generating or after a fallback the card stays the sticker CardCanvas and
-  // any stale showPoster=true state falls back to the sticker view.
+  // BUILD flip face content: the flip target is the AI poster only when it
+  // is actually on screen (ready status + image URL) — while generating or
+  // after a fallback the flip target is the CardBack placeholder instead,
+  // so the flip control always has a destination (stale showPoster=true
+  // shows the placeholder, never a broken image).
   const posterReady =
     build && team?.montageStatus === "ready" && Boolean(team?.montageImageUrl);
 
@@ -497,14 +499,15 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
               (sticker-first flip + activity/prompt panel). */}
           {build ? (
             // BUILD single-card stage: ONE flip card — the live sticker
-            // CardCanvas by default (with highlight wiring), the AI-montage
-            // poster when flipped (flipping is only offered while the poster
-            // is actually ready, so a mid-generate fallback falls back to the
-            // sticker view). Under it the toggling panel follows the flip
-            // state: sticker view → the team activity feed with per-entry
-            // "Find on card" buttons; poster view → the exact montage
-            // prompt. Above the stage the prompt bar runs full-width (the
-            // old 2-col inputrow is gone — activity now lives in the panel).
+            // CardCanvas by default (with highlight wiring); the flip target
+            // is the AI-montage poster when ready, else the CardBack
+            // placeholder (greeting on a card back) so the flip always works.
+            // Under it the toggling panel follows the flip state: sticker
+            // view → the team activity feed with per-entry "Find on card"
+            // buttons; poster/placeholder view → the exact montage prompt
+            // (or the "appears when generated" hint). Above the stage the
+            // prompt bar runs full-width (the old 2-col inputrow is gone —
+            // activity now lives in the panel).
             <>
               <PromptBar
                 disabled={!connected}
@@ -518,36 +521,57 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
               {noUndoNeeded ? <NoUndoNotice /> : null}
 
               <section className="cc-build-stage" aria-label="your team's card">
-                <div className={`cc-build-visual${posterReady ? " is-flippable" : ""}`}>
-                  {posterReady ? (
-                    /* Button-like flip control (TeamJudgeCard's exact
-                       role/button/Enter/Space pattern): the label announces
-                       what the NEXT click shows. */
-                    <div
-                      role="button"
-                      tabIndex={0}
-                      aria-pressed={showPoster}
-                      aria-label={
-                        showPoster
-                          ? `show sticker version for ${team.name}`
-                          : `show AI montage version for ${team.name}`
+                <div className="cc-build-visual is-flippable">
+                  {/* Button-like flip control (TeamJudgeCard's exact
+                      role/button/Enter/Space pattern): the label announces
+                      what the NEXT click shows. Sticker-first: the live
+                      CardCanvas is the default face; the flip target is the
+                      ready AI poster, or the CardBack placeholder while the
+                      poster is generating/unavailable — the flip always has
+                      a destination. */}
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={showPoster}
+                    aria-label={
+                      showPoster
+                        ? `show sticker version for ${team.name}`
+                        : posterReady
+                          ? `show AI montage version for ${team.name}`
+                          : `show card back for ${team.name}`
+                    }
+                    data-testid="build-card-flip"
+                    onClick={() => setShowPoster((v) => !v)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setShowPoster((v) => !v);
                       }
-                      data-testid="build-card-flip"
-                      onClick={() => setShowPoster((v) => !v)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          setShowPoster((v) => !v);
-                        }
-                      }}
-                    >
-                      {/* BOTH faces stay mounted; the flip toggles CSS
-                          `display` instead of conditionally remounting
-                          CardCanvas (per-flip remount sized the fresh Konva
-                          stage into a zero-dimension container → blank
-                          canvas; persistent mount keeps the ResizeObserver
-                          size). */}
-                      <div style={{ display: showPoster ? undefined : "none" }}>
+                    }}
+                  >
+                    {/* BOTH faces stay mounted (sticker CardCanvas first —
+                        ONE stable DOM position, it never remounts when the
+                        poster arrives — poster/card-back second); the flip
+                        toggles CSS `display`. A remount sized the fresh
+                        Konva stage into a zero-dimension container → blank
+                        canvas. The canvas re-measures on every flip via its
+                        resizeSignal. */}
+                    <div style={{ display: showPoster ? "none" : undefined }}>
+                      <CardCanvas
+                        items={team.items}
+                        layout={team.layout}
+                        greeting={team.greeting.text}
+                        cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
+                        cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
+                        myPlayerId={identity.playerId}
+                        highlightItemId={highlightItemId}
+                        onItemTap={handleHighlight}
+                        resizeSignal={showPoster}
+                        ariaLabel={`your team's card — ${team.items.filter((i) => i.status === "ready").length} stickers placed`}
+                      />
+                    </div>
+                    <div style={{ display: showPoster ? undefined : "none" }}>
+                      {posterReady ? (
                         <div
                           className="cc-montage"
                           style={cardRatioStyle(
@@ -563,50 +587,32 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                             className="cc-montage-img"
                           />
                         </div>
-                      </div>
-                      <div style={{ display: showPoster ? "none" : undefined }}>
-                        <CardCanvas
-                          items={team.items}
-                          layout={team.layout}
+                      ) : (
+                        <CardBack
                           greeting={team.greeting.text}
+                          montageStatus={team.montageStatus}
                           cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
                           cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
-                          myPlayerId={identity.playerId}
-                          highlightItemId={highlightItemId}
-                          onItemTap={handleHighlight}
-                          ariaLabel={`your team's card — ${team.items.filter((i) => i.status === "ready").length} stickers placed`}
                         />
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      <CardCanvas
-                        items={team.items}
-                        layout={team.layout}
-                        greeting={team.greeting.text}
-                        cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
-                        cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
-                        myPlayerId={identity.playerId}
-                        highlightItemId={highlightItemId}
-                        onItemTap={handleHighlight}
-                        ariaLabel={`your team's card — ${team.items.filter((i) => i.status === "ready").length} stickers placed`}
-                      />
-                      {team.montageStatus === "generating" ? (
-                        <p className="cc-montage-status" aria-live="polite">
-                          Generating poster…
-                        </p>
-                      ) : (
-                        <p className="cc-hint">Poster coming soon…</p>
                       )}
-                    </>
+                    </div>
+                  </div>
+                  {team.montageStatus === "generating" ? (
+                    <p className="cc-montage-status" aria-live="polite">
+                      Generating poster…
+                    </p>
+                  ) : posterReady ? null : (
+                    <p className="cc-hint">Poster coming soon…</p>
                   )}
                 </div>
 
-                {/* Toggling panel: content FOLLOWS the flip state. Guarded
-                    on posterReady too so a mid-view fallback (poster lost)
-                    drops straight back to the activity view. */}
-                {showPoster && posterReady ? (
-                  team.montagePromptText ? (
+                {/* Toggling panel: content FOLLOWS the flip state. When the
+                    flipped face is the poster (or the placeholder) the
+                    montage prompt shows — or the "appears when generated"
+                    hint while/without one; otherwise the team activity feed
+                    with per-entry Find-on-card. */}
+                {showPoster ? (
+                  posterReady && team.montagePromptText ? (
                     <pre
                       className="cc-prompt-view"
                       aria-label={`AI montage prompt for ${team.name}`}

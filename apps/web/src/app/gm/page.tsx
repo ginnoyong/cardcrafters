@@ -36,6 +36,7 @@ import QRCode from "qrcode";
 
 import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W, MAX_TEAMS, PHASE } from "@cardcrafters/shared";
 
+import CardBack from "@/components/CardBack";
 import { PeoplesChoiceBanner, StandingsList, WinnerBanner, teamLabel } from "@/components/Standings";
 import TeamJudgeCard, { JudgeScoreChip } from "@/components/TeamJudgeCard";
 import { minutesToSeconds } from "@/lib/timers";
@@ -416,14 +417,16 @@ function TeamMiniCanvas({
   const [flipped, setFlipped] = useState(false);
 
   const readyCount = team.items.filter((i) => i.status === "ready").length;
-  // The poster face exists only when the AI montage actually landed.
+  // The poster face is the real AI montage only when it actually landed.
   const posterReady = montageStatus === "ready" && !!montageImageUrl;
-  // The flip control exists whenever the poster is on screen (all phases —
-  // BUILD, REVEAL and RESULTS flip the same way, poster ⇄ sticker).
-  const canFlip = posterReady;
-  // What's on screen: the poster by default (when it exists), the composed
-  // CardCanvas when flipped or when there is no poster yet.
-  const showPoster = posterReady && !flipped;
+  // ALWAYS flippable now (all phases — BUILD, REVEAL and RESULTS flip the
+  // same way): with a ready poster the poster is the default face and the
+  // flip target is the sticker CardCanvas; without one the sticker card is
+  // the default and the flip target is the CardBack placeholder — a team
+  // without a poster still gets a real two-face flip. Either way the
+  // sticker CardCanvas lives in the SECOND face slot (one stable DOM
+  // position — it never remounts when the poster arrives).
+  const showingSticker = posterReady ? flipped : !flipped;
 
   const montageBox = (
     <div
@@ -450,6 +453,7 @@ function TeamMiniCanvas({
       greeting={team.greeting.text}
       cardRatioW={cardRatioW}
       cardRatioH={cardRatioH}
+      resizeSignal={flipped}
       ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
     />
   );
@@ -459,51 +463,60 @@ function TeamMiniCanvas({
       <h3>
         {team.name} <span className="cc-muted">({team.label})</span>
       </h3>
-      {canFlip ? (
-        /* Button-like flip control (TeamJudgeCard pattern): one toggle whose
-           label announces what the NEXT click shows. Poster face first,
-           sticker CardCanvas when flipped. */
-        <div
-          className="cc-mini-flip"
-          role="button"
-          tabIndex={0}
-          aria-pressed={flipped}
-          aria-label={
-            flipped
+      {/* Button-like flip control (TeamJudgeCard pattern): one toggle whose
+          label announces what the NEXT click shows. Default face first (the
+          ready poster, or the CardBack placeholder without one), sticker
+          CardCanvas second. */}
+      <div
+        className="cc-mini-flip"
+        role="button"
+        tabIndex={0}
+        aria-pressed={flipped}
+        aria-label={
+          flipped
+            ? posterReady
               ? `show AI montage version for ${team.name}`
               : `show sticker version for ${team.name}`
+            : posterReady
+              ? `show sticker version for ${team.name}`
+              : `show card back for ${team.name}`
+        }
+        data-testid={`gm-mini-flip-${team.id}`}
+        onClick={() => setFlipped((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setFlipped((v) => !v);
           }
-          data-testid={`gm-mini-flip-${team.id}`}
-          onClick={() => setFlipped((v) => !v)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              setFlipped((v) => !v);
-            }
-          }}
-        >
-          {/* BOTH faces stay mounted; the flip toggles CSS `display` instead
-              of conditionally remounting CardCanvas (a remount on every flip
-              sized the fresh Konva stage into a zero-dimension container →
-              blank canvas; persistent mount + ResizeObserver keeps the real
-              size). */}
-          <div style={{ display: flipped ? "none" : undefined }}>{montageBox}</div>
-          <div style={{ display: flipped ? undefined : "none" }}>{stickerBox}</div>
+        }}
+      >
+        {/* BOTH faces stay mounted; the flip toggles CSS `display` instead
+            of conditionally remounting CardCanvas (a remount on every flip
+            sized the fresh Konva stage into a zero-dimension container →
+            blank canvas). The canvas also re-measures on every flip via its
+            resizeSignal. */}
+        <div style={{ display: showingSticker ? "none" : undefined }}>
+          {posterReady ? (
+            montageBox
+          ) : (
+            <CardBack
+              greeting={team.greeting.text}
+              montageStatus={montageStatus ?? null}
+              cardRatioW={cardRatioW}
+              cardRatioH={cardRatioH}
+            />
+          )}
         </div>
-      ) : (
-        <>
-          {showPoster ? montageBox : stickerBox}
-          {/* Montage (poster) accumulator status: while the poster pass is in
-              flight show a small indicator line under the live composed card
-              (same contract as the judge boxes). Fallback/absent keeps the
-              canvas alone. */}
-          {montageStatus === "generating" ? (
-            <p className="cc-montage-status" aria-live="polite">
-              Generating poster…
-            </p>
-          ) : null}
-        </>
-      )}
+        <div style={{ display: showingSticker ? undefined : "none" }}>{stickerBox}</div>
+      </div>
+      {/* Montage (poster) accumulator status: while the poster pass is in
+          flight show a small indicator line under the flip card (same
+          contract as the judge boxes). */}
+      {montageStatus === "generating" ? (
+        <p className="cc-montage-status" aria-live="polite">
+          Generating poster…
+        </p>
+      ) : null}
       <p className="cc-hint" aria-live="polite">
         {readyCount} sticker{readyCount === 1 ? "" : "s"} on the card
       </p>
@@ -602,6 +615,7 @@ function WinnerRevealCard({
             greeting={team.greeting.text}
             cardRatioW={cardRatioW}
             cardRatioH={cardRatioH}
+            resizeSignal={flipped}
             ariaLabel={`${team.name}'s winning sticker card — ${readyCount} stickers placed`}
           />
         </div>

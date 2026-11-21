@@ -32,6 +32,7 @@ import dynamic from "next/dynamic";
 
 import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W } from "@cardcrafters/shared";
 
+import CardBack from "@/components/CardBack";
 import type { ClientTeam } from "@/lib/store";
 
 // Client-only: react-konva throws at module load under Next's bundled React
@@ -86,16 +87,25 @@ export default function TeamJudgeCard({
   cardRatioW?: number;
   cardRatioH?: number;
 }) {
-  // Flip state: false = the AI-montage poster (the card face), true = the
-  // composed sticker CardCanvas. Only meaningful when the poster is ready.
+  // Flip state: false = the default face (the AI-montage poster when it is
+  // ready, otherwise the composed sticker CardCanvas), true = the other face
+  // (sticker card / CardBack placeholder respectively).
   const [flipped, setFlipped] = useState(false);
   // Prompt transparency accordion: collapsed by default (same pattern as the
   // console's TeamCard "View prompt").
   const [showPrompt, setShowPrompt] = useState(false);
 
   const readyCount = team.items.filter((i) => i.status === "ready").length;
-  // The flip control exists only when the AI poster is actually on screen.
+  // The poster face is the real AI montage only when it actually landed.
   const posterReady = team.montageStatus === "ready" && !!team.montageImageUrl;
+  // ALWAYS flippable now: with a ready poster the poster is the default face
+  // and the flip target is the sticker CardCanvas; without one the sticker
+  // card is the default and the flip target is the CardBack placeholder
+  // (greeting text on a card back) — a team without a poster still gets a
+  // real two-face flip instead of a single static card. Either way the
+  // sticker CardCanvas lives in the SECOND face slot (one stable DOM
+  // position — it never remounts when the poster arrives).
+  const showingSticker = posterReady ? flipped : !flipped;
   // Sticker prompts: ONLY the stickers actually on the card (status "ready")
   // — pending/rejected/failed items never made it onto the render.
   const readyItems = team.items.filter((i) => i.status === "ready");
@@ -112,25 +122,28 @@ export default function TeamJudgeCard({
 
       <p className="cc-greeting">“{team.greeting.text}”</p>
 
-      {/* The visual: the ONLY content column (full width). Poster-ready →
+      {/* The visual: the ONLY content column (full width). Always a
           button-like flip control (click/Enter/Space, aria-pressed mirrors
-          the flipped state); otherwise the composed CardCanvas is the static
-          hero (with a "Generating poster…" indicator while the accumulator
-          runs). */}
-      <div className={`cc-judge-visual${posterReady ? " is-flippable" : ""}`}>
-          {posterReady ? (
-            /* Button-like flip control (same role/tabIndex/Enter/Space
+          the flipped state): ready poster ↔ sticker card, or sticker card ↔
+          CardBack placeholder when there is no poster. A "Generating
+          poster…" indicator runs under the flip while the accumulator works. */}
+      <div className="cc-judge-visual is-flippable">
+          {/* Button-like flip control (same role/tabIndex/Enter/Space
                pattern as TeamMiniCanvas's flip cards): one toggle whose
-               label announces what the NEXT click shows. Poster face first,
-               sticker CardCanvas when flipped. */
-            <div
+               label announces what the NEXT click shows. Poster/card-back
+               face first, sticker CardCanvas second. */}
+          <div
               role="button"
               tabIndex={0}
               aria-pressed={flipped}
               aria-label={
                 flipped
-                  ? `show AI montage version for ${team.name}`
-                  : `show sticker version for ${team.name}`
+                  ? posterReady
+                    ? `show AI montage version for ${team.name}`
+                    : `show sticker version for ${team.name}`
+                  : posterReady
+                    ? `show sticker version for ${team.name}`
+                    : `show card back for ${team.name}`
               }
               data-testid={testId ? `${testId}-visual` : undefined}
               onClick={() => setFlipped((v) => !v)}
@@ -141,58 +154,58 @@ export default function TeamJudgeCard({
                 }
               }}
             >
-              {/* BOTH faces stay mounted (poster first, sticker CardCanvas
-                  second); the flip toggles them with CSS `display` instead of
-                  conditionally remounting CardCanvas. Remounting on every
-                  flip gave the freshly-mounted Konva stage a zero-sized
-                  container (blank canvas); keeping it mounted lets its
-                  ResizeObserver hold/restore the real measured size. */}
-              <div style={{ display: flipped ? "none" : undefined }}>
-                <div
-                  className="cc-montage"
-                  style={{
-                    aspectRatio: `${cardRatioW} / ${cardRatioH}`,
-                    "--card-ratio-w": cardRatioW,
-                    "--card-ratio-h": cardRatioH,
-                  } as CSSProperties}
-                  aria-label={`poster for ${team.name}`}
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={team.montageImageUrl ?? ""}
-                    alt={`Finished poster for ${team.name}`}
-                    className="cc-montage-img"
+              {/* BOTH faces stay mounted (poster/card-back first, sticker
+                  CardCanvas second — ONE stable DOM position, so the canvas
+                  never remounts when the poster arrives); the flip toggles
+                  them with CSS `display`. A remount sized the fresh Konva
+                  stage into a zero-dimension container → blank canvas. The
+                  canvas re-measures via its ResizeObserver (which re-fires
+                  when the hidden face is revealed) plus a resizeSignal bump
+                  on every flip as a belt-and-braces re-measure. */}
+              <div style={{ display: showingSticker ? "none" : undefined }}>
+                {posterReady ? (
+                  <div
+                    className="cc-montage"
+                    style={{
+                      aspectRatio: `${cardRatioW} / ${cardRatioH}`,
+                      "--card-ratio-w": cardRatioW,
+                      "--card-ratio-h": cardRatioH,
+                    } as CSSProperties}
+                    aria-label={`poster for ${team.name}`}
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={team.montageImageUrl ?? ""}
+                      alt={`Finished poster for ${team.name}`}
+                      className="cc-montage-img"
+                    />
+                  </div>
+                ) : (
+                  <CardBack
+                    greeting={team.greeting.text}
+                    montageStatus={team.montageStatus}
+                    cardRatioW={cardRatioW}
+                    cardRatioH={cardRatioH}
                   />
-                </div>
+                )}
               </div>
-              <div style={{ display: flipped ? undefined : "none" }}>
+              <div style={{ display: showingSticker ? undefined : "none" }}>
                 <CardCanvas
                   items={team.items}
                   layout={team.layout}
                   greeting={team.greeting.text}
                   cardRatioW={cardRatioW}
                   cardRatioH={cardRatioH}
+                  resizeSignal={flipped}
                   ariaLabel={`${team.name} sticker card — ${readyCount} stickers placed`}
                 />
               </div>
             </div>
-          ) : (
-            <>
-              <CardCanvas
-                items={team.items}
-                layout={team.layout}
-                greeting={team.greeting.text}
-                cardRatioW={cardRatioW}
-                cardRatioH={cardRatioH}
-                ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
-              />
-              {team.montageStatus === "generating" ? (
-                <p className="cc-montage-status" aria-live="polite">
-                  Generating poster…
-                </p>
-              ) : null}
-            </>
-          )}
+          {team.montageStatus === "generating" ? (
+            <p className="cc-montage-status" aria-live="polite">
+              Generating poster…
+            </p>
+          ) : null}
 
           {/* Prompt transparency accordion: content FOLLOWS THE FLIP STATE —
               montage view (default) shows the EXACT image-model prompt the
@@ -211,10 +224,14 @@ export default function TeamJudgeCard({
                 aria-label={`view prompts for ${team.name}`}
                 onClick={() => setShowPrompt((v) => !v)}
               >
-                {showPrompt ? "Hide prompt" : flipped ? "View sticker prompts" : "View montage prompt"}
+                {showPrompt
+                  ? "Hide prompt"
+                  : showingSticker
+                    ? "View sticker prompts"
+                    : "View montage prompt"}
               </button>
               {showPrompt ? (
-                flipped ? (
+                showingSticker ? (
                   <div id={`judge-prompt-${team.id}`} className="cc-judge-prompt-content">
                     <h4 className="cc-judge-prompts-title">Sticker prompts</h4>
                     {readyItems.length > 0 ? (

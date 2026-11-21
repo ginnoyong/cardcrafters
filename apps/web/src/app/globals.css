@@ -543,6 +543,46 @@ label {
   margin-inline: auto;
 }
 
+.cc-card-back {
+  display: grid;
+  place-content: center;
+  gap: 0.35rem;
+  padding: 1rem;
+  text-align: center;
+  border-radius: 14px;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.12);
+  /* Playing-card-back lattice: crossed sage diagonals over the brand accent,
+     brass inner border. Pure CSS — no image needed for a placeholder face. */
+  background:
+    repeating-linear-gradient(
+      45deg,
+      color-mix(in srgb, var(--accent-strong) 35%, transparent) 0 2px,
+      transparent 2px 14px
+    ),
+    repeating-linear-gradient(
+      -45deg,
+      color-mix(in srgb, var(--accent-strong) 35%, transparent) 0 2px,
+      transparent 2px 14px
+    ),
+    var(--accent);
+  color: #fff;
+}
+
+.cc-card-back-greeting {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.05rem;
+  line-height: 1.35;
+  text-wrap: balance;
+  padding: 0 0.5rem;
+}
+
+.cc-card-back-note {
+  margin: 0;
+  font-size: 0.8rem;
+  color: rgb(255 255 255 / 0.85);
+}
+
 .cc-montage-img {
   display: block;
   width: 100%;
@@ -759,16 +799,22 @@ label {
 }
 
 /* When the poster is ready the visual is a button-like flip control.
-   Center the flip faces and give the role=button div the same focus ring
-   the global :is(input, button, a) rule provides elsewhere (a div with
-   role=button gets no ring from that selector). Keep hover subtle. */
+   Give the role=button div the same focus ring the global
+   :is(input, button, a) rule provides elsewhere (a div with role=button
+   gets no ring from that selector). Keep hover subtle. */
 .cc-judge-visual.is-flippable {
   cursor: pointer;
 }
 
+/* The flip faces MUST stretch to the column width — do NOT center them with
+   justify-items here. `justify-items: center` made each face div a
+   fit-content grid item, and the sticker CardCanvas face's content is empty
+   until the canvas is measured from its container → circular sizing deadlock
+   (wrap measures 0 → stage never renders → face stays 0 wide → blank card on
+   flip). The poster centers itself via .cc-montage's margin-inline:auto +
+   max-width, so full-width faces change nothing visually. */
 .cc-judge-visual.is-flippable > div[role="button"] {
   display: grid;
-  justify-items: center;
 }
 
 .cc-judge-visual.is-flippable > div[role="button"]:focus-visible {
