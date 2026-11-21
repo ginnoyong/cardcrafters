@@ -1600,7 +1600,6 @@ no animations requiring sound. */
    with the shared keyboard focus ring. */
 .cc-winner-card {
   display: grid;
-  justify-items: center;
   gap: 0.5rem;
   margin-top: 1rem;
 }
@@ -1735,7 +1734,6 @@ no animations requiring sound. */
     page-break-after: always;
     break-after: page;
     display: grid;
-    justify-items: center;
     gap: 1rem;
     padding-top: 3rem;
   }
