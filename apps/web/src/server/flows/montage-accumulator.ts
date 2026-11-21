@@ -134,7 +134,7 @@ export async function normalizePosterToCardRatio(
   const targetAspect = cardRatioW / cardRatioH;
   if (Math.abs(nativeAspect - targetAspect) <= POSTER_ASPECT_TOLERANCE) return null;
   return sharp(bytes)
-    .resize(targetW, targetH, { fit: "cover", position: "bottom" })
+    .resize(targetW, targetH, { fit: "cover", position: "centre" })
     .png()
     .toBuffer();
 }
@@ -150,8 +150,9 @@ export async function normalizePosterToCardRatio(
  *
  * Tier boundaries (20/40/80) are sized so the text always fits: the
  * lower-third band is ~33% of the image height; at the 5:7 card ratio with a
- * ~1024×1536 native render the band is ~500px tall, so at 4% per line that's
- * 12 lines of headroom — plenty. The key constraint is
+ * ~5:7 native render (800×1120 target, provider-clamped from the requested
+ * 5:7 aspect_ratio) the band is ~370px tall, so at 4% per line that's
+ * 9 lines of headroom — plenty. The key constraint is
  * N_chars / chars_per_line × line_height_pct ≤ 33%.
  */
 export function textSizeHint(greeting: string): string {

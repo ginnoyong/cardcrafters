@@ -281,16 +281,26 @@ export class OpenRouterProvider implements AiProvider {
     started: number,
   ): Promise<AiCallResult> {
     const prompt = messages.map((m) => messageText(m.content)).join("\n\n");
-    // MONTAGE PORTRAIT BIAS (bleed-in fix, part b): the game's card is a tall
-    // 5:7 portrait — a square poster gets center-cropped to the card ratio at
-    // the source (gradePoster's cropToCardRatio), which cuts the greeting
-    // title's outer glyphs when the model painted it full-width. Requesting
-    // the portrait size natively (gpt-image-* native 1024×1536 = 2:3) shrinks that
-    // side crop dramatically. montage_image ONLY — item_image stickers must
-    // stay square (transparent square canvas). OpenRouter ignores unsupported
-    // params rather than rejecting them, so models without a size knob are
-    // unharmed.
-    const size = task === "montage_image" ? "1024x1536" : undefined;
+    // MONTAGE 5:7 NATIVE RATIO (bleed-in fix, part b): the game's card is a
+    // tall 5:7 portrait — a mismatched-ratio poster gets cropped to the card
+    // ratio during normalization (normalizePosterToCardRatio, bottom-anchored),
+    // which cuts the greeting text when the crop eats the bottom band. Ask for
+    // 5:7 natively via the normalized `aspect_ratio` knob so the crop is a
+    // no-op (or nearly one). montage_image ONLY — item_image stickers must
+    // stay square (no ratio field may ride along).
+    //
+    // Why aspect_ratio and not `size`: checked live via
+    // /api/v1/images/models/{id}/endpoints — NONE of the endpoints that serve
+    // this task (google-vertex/google-ai-studio Gemini image endpoints,
+    // OpenAI gpt-image-*) list `size` in supported_parameters, so an explicit
+    // pixel size like "1100x1540" is unsupported (silently ignored at best,
+    // 400 at worst — the OpenAPI spec says explicit pixel sizes are
+    // provider-dependent and some providers reject them). Every endpoint DOES
+    // support `aspect_ratio`, whose top-level enum includes "5:7" exactly;
+    // providers clamp it to their supported subset (Gemini image endpoints:
+    // 3:4/2:3 nearest; gpt-image-1: 2:3) — either clamp lands close enough
+    // that the bottom-anchored normalization crop stays minimal.
+    const aspectRatio = task === "montage_image" ? "5:7" : undefined;
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.baseUrl}/images`, {
@@ -303,7 +313,9 @@ export class OpenRouterProvider implements AiProvider {
           "User-Agent": "CardCrafters/0.1 (+https://cardcrafters.local)",
         },
         body: JSON.stringify(
-          size ? { model: cfg.primary, prompt, size } : { model: cfg.primary, prompt },
+          aspectRatio
+            ? { model: cfg.primary, prompt, aspect_ratio: aspectRatio }
+            : { model: cfg.primary, prompt },
         ),
         signal: AbortSignal.timeout(cfg.timeoutMs),
       });
