@@ -17,7 +17,11 @@
  *      style-derived grading to the poster (gradePoster — BOTH modes; the
  *      mock poster already bakes the greeting, real mode gets it from the
  *      image model itself; on grading failure the raw poster is persisted
- *      READY with a non-fatal lastError marker), persists the bytes exactly
+ *      READY with a non-fatal lastError marker), normalizes the final bytes
+ *      to the game's card ratio (normalizePosterToCardRatio — sharp resize
+ *      fit "cover" to the exact card-ratio box, e.g. 800×1120 for 5:7; the
+ *      UI box is locked to that ratio, so the persisted file must match it
+ *      even when grading fell back to raw bytes), persists the bytes exactly
  *      like item-image.ts and sets status READY + imageSeq = the SNAPSHOT seq
  *      (NOT the round) + promptText = the EXACT montageImagePrompt output.
  *   3. TRAILING EDGE — staging that lands DURING a pass is picked up by the
@@ -59,6 +63,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import sharp from "sharp";
+
 import { montagePromptSchema, type MontageGrading } from "@cardcrafters/shared";
 
 import { montageImagePrompt } from "../ai/openrouter-provider";
@@ -76,6 +82,62 @@ export const DEFAULT_MONTAGE_DIR = path.resolve(here, "../../../public/static/mo
 
 /** Default per-gen-pass AI timeout (Promise.race around the AI chain). */
 const DEFAULT_TIMEOUT_MS = 90_000;
+
+/**
+ * Canonical poster width for the persisted montage PNG. The procedural mock
+ * poster renders at 800×1120 (5:7) and the card stage draws at the same
+ * scale, so 800 is the natural base width for the normalized file.
+ */
+const POSTER_TARGET_WIDTH = 800;
+
+/** Aspect tolerance below which a source already counts as card-ratio. */
+const POSTER_ASPECT_TOLERANCE = 0.01;
+
+/**
+ * Normalize the AI poster to the game's card ratio — the hard guarantee that
+ * the PERSISTED file matches the UI box, independent of gradePoster. Real
+ * image models return whatever aspect they choose (often 1024×1024 square or
+ * landscape); the UI renders the poster in a box locked to
+ * cardRatioW/cardRatioH with object-fit: cover, which crops the model's
+ * output on the client and cuts off the lower-third greeting. Fixing the
+ * aspect SERVER-SIDE means every consumer (card face, rating carousel,
+ * presenter stage) sees the exact ratio with zero client-side cropping.
+ *
+ * Target dims: width fixed at {@link POSTER_TARGET_WIDTH} (800), height
+ * derived from the game's cardRatioW/H — for the default 5:7 card that is
+ * 800×1120, exactly the card ratio. `fit: "cover"` + `position: "centre"`
+ * center-crops the source into that box: a square source loses its sides
+ * equally (the greeting is centered, so it survives); a landscape source
+ * loses top/bottom proportionally.
+ *
+ * Returns null (no-op) when the ratio is missing/invalid, the bytes don't
+ * decode, or the source is already at the target ratio within tolerance —
+ * the caller then persists the bytes as-is (fail-open, same philosophy as
+ * gradePoster's cropToCardRatio). Callers should wrap in try/catch anyway:
+ * any throw here means the raw bytes get persisted instead.
+ */
+export async function normalizePosterToCardRatio(
+  bytes: Buffer,
+  cardRatioW?: number,
+  cardRatioH?: number,
+): Promise<Buffer | null> {
+  if (!cardRatioW || !cardRatioH || cardRatioW <= 0 || cardRatioH <= 0) return null;
+  const meta = await sharp(bytes).metadata();
+  if (!meta.width || !meta.height) return null;
+  const targetW = POSTER_TARGET_WIDTH;
+  const targetH = Math.round((POSTER_TARGET_WIDTH * cardRatioH) / cardRatioW);
+  if (targetW < 1 || targetH < 1) return null;
+  // Already exactly the target box (e.g. the mock's procedural 800×1120
+  // poster) → no re-encode needed.
+  if (meta.width === targetW && meta.height === targetH) return null;
+  const nativeAspect = meta.width / meta.height;
+  const targetAspect = cardRatioW / cardRatioH;
+  if (Math.abs(nativeAspect - targetAspect) <= POSTER_ASPECT_TOLERANCE) return null;
+  return sharp(bytes)
+    .resize(targetW, targetH, { fit: "cover", position: "centre" })
+    .png()
+    .toBuffer();
+}
 
 /**
  * Computed text-size hint for the montage_prompt template, from the greeting's
@@ -463,14 +525,40 @@ async function runGenPass(
         ? null
         : `poster saved without grading: ${gradeErrorMessage}`;
 
+    // ASPECT NORMALIZATION (runGenPass) — the hard guarantee that the
+    // persisted file matches the game's card ratio, applied to the FINAL
+    // bytes regardless of how grading went. gradePoster already center-crops
+    // on the success path, but its failure fallback persists the RAW bytes at
+    // the model's arbitrary aspect (square/landscape) — the exact bug this
+    // step closes: the UI box is locked to cardRatioW/H with object-fit:
+    // cover, so an off-ratio file gets client-cropped and the lower-third
+    // greeting is cut off. Resize to the exact target box (800×1120 for the
+    // 5:7 card) with fit cover / position centre; on any sharp failure fall
+    // open to the bytes as-is (graced or raw) with a warning.
+    try {
+      const normalized = await normalizePosterToCardRatio(
+        posterBytes,
+        game?.config.cardRatioW,
+        game?.config.cardRatioH,
+      );
+      if (normalized) posterBytes = normalized;
+    } catch (err) {
+      console.warn(
+        `[montage-accumulator] game ${gameId} team ${teamId} round ${round} poster aspect normalization failed — persisting the poster at its native aspect:`,
+        err instanceof Error ? (err.stack ?? err.message) : err,
+      );
+    }
+
     // (d) Persist image bytes — the SAME storage pattern as item-image.ts:
     // PNG under the public/static storage root, subdir per game/team,
     // served at the matching /static/ URL (no user text in the path).
     const storageDir = deps.storageDir ?? DEFAULT_MONTAGE_DIR;
     // A successfully graded poster is a fresh PNG encode at the game's card
     // ratio (gradePoster normalizes through sharp + center-crops to
-    // cardRatioW/H); the unchanged fallback (grading failure) keeps the
-    // mime-derived ext.
+    // cardRatioW/H), and a successfully normalized poster is too (the resize
+    // always encodes PNG at the target dims) — the ext must be .png for both.
+    // The unchanged fallback (grading AND normalization both skipped/failed)
+    // keeps the mime-derived ext.
     const ext =
       posterBytes !== rawBytes ? "png" : imageMime === "image/jpeg" ? "jpg" : "png";
     const fileName = `montage-${teamId}-${round}-${Date.now()}.${ext}`;

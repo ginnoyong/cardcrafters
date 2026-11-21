@@ -484,9 +484,11 @@ describe("montage accumulator (staging-driven)", () => {
     );
     const metaReal = await sharp(persistedReal).metadata();
     expect(metaReal.format).toBe("png");
-    // The fake's 1×1 placeholder poster persists at its native size.
-    expect(metaReal.width).toBe(1);
-    expect(metaReal.height).toBe(1);
+    // The fake's 1×1 placeholder poster is normalized to the game's card
+    // ratio (the setup game uses DEFAULT_CARD_CONFIG 5:7 → 800×1120): the
+    // persisted file must ALWAYS match the UI box, whatever the model sent.
+    expect(metaReal.width).toBe(800);
+    expect(metaReal.height).toBe(1120);
   });
 
   it("(g2b) mock mode WITHOUT the seam override — the real gradePoster re-encodes with grading (graded bytes differ from the raw mock poster, no greeting seam anywhere)", async () => {
@@ -528,12 +530,14 @@ describe("montage accumulator (staging-driven)", () => {
     expect(meta.height).toBe(1120);
   });
 
-  it("(g2c) square AI poster + the game's card ratio → the persisted PNG is center-cropped to the card ratio (source-side aspect normalization)", async () => {
+  it("(g2c) square AI poster + the game's card ratio → the persisted PNG is resized to the exact card-ratio box (800×1120 for 5:7)", async () => {
     // Real image models return varying aspects (often square); the persisted
     // poster must already match the game's card ratio so every UI box (5:7)
     // renders identically. The REAL gradePoster runs (no seam override) —
     // the accumulator forwards game.config.cardRatioW/H (the setup game uses
-    // DEFAULT_CARD_CONFIG: 5/7).
+    // DEFAULT_CARD_CONFIG: 5/7) and then normalizes the final bytes to the
+    // exact card-ratio box via normalizePosterToCardRatio (sharp resize fit
+    // cover / position centre).
     const s = await setup();
     tempDirs.push(s.storageDir);
     const squarePoster = await sharp({
@@ -555,12 +559,78 @@ describe("montage accumulator (staging-driven)", () => {
     const persisted = await readFile(path.join(s.storageDir, s.gameId, s.teamId, files[0]!));
     const meta = await sharp(persisted).metadata();
     expect(meta.format).toBe("png");
-    // Crop math: native 64×64 (aspect 1) vs 5/7 → width crops to
-    // floor(64·5/7) = 45, height stays 64 (never upscaled).
-    expect(meta.width).toBe(45);
-    expect(meta.height).toBe(64);
-    // Output ratio ≈ 5/7 within 2px of the exact box.
-    expect(Math.abs(meta.width! / meta.height! - 5 / 7)).toBeLessThan(2 / 64);
+    // Resize math: the accumulator normalizes the final bytes to the exact
+    // card-ratio box at the canonical poster width — 800×(800·7/5) =
+    // 800×1120, fit "cover" centre-cropping the square source's sides.
+    expect(meta.width).toBe(800);
+    expect(meta.height).toBe(1120);
+    // Output ratio is EXACTLY 5:7 — the whole point of the normalization.
+    expect(meta.width! / meta.height!).toBeCloseTo(5 / 7, 6);
+  });
+
+  it("(g2d) grading seam THROWS → the raw square poster STILL gets normalized to the card-ratio box (fail-open grading must not leak the model's aspect)", async () => {
+    // The degraded-but-ready path (gradePoster throws → raw bytes persisted)
+    // must NOT bypass aspect normalization: a square/landscape poster saved
+    // raw would be client-cropped by the 5:7 UI box and cut the greeting off.
+    // normalizePosterToCardRatio runs on the FINAL bytes regardless of the
+    // grading outcome, so even a grading failure persists at 800×1120.
+    const s = await setup();
+    tempDirs.push(s.storageDir);
+    const squarePoster = await sharp({
+      create: { width: 64, height: 64, channels: 3, background: "#2244cc" },
+    })
+      .png()
+      .toBuffer();
+    const fake = createFakeAi({ imageBase64: squarePoster.toString("base64") });
+    const deps = depsOf(s, fake.ai);
+    deps.gradePoster = async () => {
+      throw new Error("canvas exploded");
+    };
+
+    await finalizeMontageAll(deps, s.gameId);
+
+    const row = await s.repo.getMontageState(s.teamId, s.round);
+    // Degraded-but-ready: the grading failure is a non-fatal lastError marker.
+    expect(row?.status).toBe("READY");
+    expect(row?.lastError).toContain("poster saved without grading");
+    expect(row?.lastError).toContain("canvas exploded");
+    const files = await readdir(path.join(s.storageDir, s.gameId, s.teamId));
+    expect(files).toHaveLength(1);
+    // Normalized output is a fresh PNG encode → .png ext, exact card ratio.
+    expect(files[0]!.endsWith(".png")).toBe(true);
+    const persisted = await readFile(path.join(s.storageDir, s.gameId, s.teamId, files[0]!));
+    const meta = await sharp(persisted).metadata();
+    expect(meta.format).toBe("png");
+    expect(meta.width).toBe(800);
+    expect(meta.height).toBe(1120);
+    expect(meta.width! / meta.height!).toBeCloseTo(5 / 7, 6);
+  });
+
+  it("(g2e) grading AND normalization both fail → fail-open to the raw bytes at the native aspect + mime-derived ext (degraded, never lost)", async () => {
+    // Belt & braces: when sharp itself cannot decode the bytes
+    // (normalizePosterToCardRatio throws), the raw poster is still persisted
+    // — READY with the grading marker; a degraded poster beats no poster.
+    const s = await setup();
+    tempDirs.push(s.storageDir);
+    const garbage = Buffer.from("not-an-image-at-all");
+    const fake = createFakeAi({ imageBase64: garbage.toString("base64") });
+    const deps = depsOf(s, fake.ai);
+    deps.gradePoster = async () => {
+      throw new Error("grading unavailable");
+    };
+
+    await finalizeMontageAll(deps, s.gameId);
+
+    const row = await s.repo.getMontageState(s.teamId, s.round);
+    expect(row?.status).toBe("READY");
+    expect(row?.lastError).toContain("poster saved without grading");
+    const files = await readdir(path.join(s.storageDir, s.gameId, s.teamId));
+    expect(files).toHaveLength(1);
+    // Neither grading nor normalization succeeded → the raw bytes persist
+    // (fail-open) with the mime-derived ext (default png for the fake).
+    const persisted = await readFile(path.join(s.storageDir, s.gameId, s.teamId, files[0]!));
+    expect(persisted.equals(garbage)).toBe(true);
+    expect((row?.imageUrl ?? "").endsWith(".png")).toBe(true);
   });
 
   it("(g4) greeting bleed-in: the greeting rides BOTH AI inputs, the image prompt embeds it, and the mock prompt ships it end-to-end", async () => {
