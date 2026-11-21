@@ -235,17 +235,39 @@ function PresenterBoard({
   // actually on screen instead of wherever stageIndex was left.
   const [focusTeamId, setFocusTeamId] = useState<string | null>(initialFocusTeamId ?? null);
 
-  // Review L3: a deep-linked team latch must not survive a phase change —
-  // otherwise the GM picking a winner while a View tab is latched pins that
-  // team through REVEAL/RESULTS and the next round. Clear on phase change.
+  // Phase-entry latch rules:
+  //  - Entering REVEAL/RESULTS with a winner set → latch onto the WINNING
+  //    team so the big screen opens the next phase on the winning card
+  //    (whether the pick happened here or on the GM console). If the viewed
+  //    team is ALSO the crowd favourite, the banner block stacks naturally.
+  //  - Otherwise (entering any other phase with a latch): clear it — a
+  //    latched team must not survive a phase change (review L3).
+  //  - Fresh page load directly in REVEAL/RESULTS with a winner and NO
+  //    deep-link latch → open on the winner too.
+  // Cycling (stepStage) clears the latch and hands control back to the
+  // plain cycle; the effect never re-pins after that (it only fires on
+  // phase-entry transitions).
   const latchPhaseRef = useRef<string | null>(null);
+  const latchPhaseArmed = useRef(false);
   useEffect(() => {
     const phase = snapshot?.phase ?? null;
-    if (latchPhaseRef.current !== null && latchPhaseRef.current !== phase && focusTeamId) {
+    const isResults = phase === PHASE.REVEAL || phase === PHASE.RESULTS;
+    const winnerId = snapshot?.winnerTeamId ?? null;
+    const entering = latchPhaseRef.current !== null && latchPhaseRef.current !== phase;
+
+    if (entering && isResults && winnerId) {
+      setFocusTeamId(winnerId);
+    } else if (entering && focusTeamId) {
       setFocusTeamId(null);
+    } else if (!latchPhaseArmed.current && phase !== null && isResults && winnerId && !focusTeamId) {
+      // Fresh page load directly in REVEAL/RESULTS with no deep-link latch —
+      // open on the winner.
+      setFocusTeamId(winnerId);
+      latchPhaseArmed.current = true;
     }
+    if (!latchPhaseArmed.current && phase !== null) latchPhaseArmed.current = true;
     latchPhaseRef.current = phase;
-  }, [snapshot?.phase, focusTeamId]);
+  }, [snapshot?.phase, snapshot?.winnerTeamId, focusTeamId]);
 
   const clampedStageIndex = teamCount > 0 ? Math.min(stageIndex, teamCount - 1) : 0;
   const focusedIndex = focusTeamId
