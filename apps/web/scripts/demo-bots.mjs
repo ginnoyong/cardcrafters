@@ -261,6 +261,8 @@ async function main() {
     teams = game.teams;
     phase = game.phase;
     log(`joining game ${code} (phase=${phase}, ${teams.length} teams, theme=${JSON.stringify(game.theme)})`);
+    log(`watch:  ${URL}/gm?code=${code}      <- GM console`);
+    log(`watch:  ${URL}/present/${code}   <- presenter big screen`);
     if (OPTS.teamCount !== 2) log(`note: --team-count ignored when --code is given (game has ${teams.length} teams)`);
     if (!["LOBBY", "GREETINGS"].includes(phase)) {
       fail(`game ${code} is in phase ${phase} — players can only join during LOBBY/GREETINGS`);
@@ -277,6 +279,8 @@ async function main() {
     teams = game.teams;
     phase = game.phase;
     log(`game ${code} created (phase=${phase}, ${teams.length} teams)`);
+    log(`watch:  ${URL}/gm?code=${code}      <- GM console`);
+    log(`watch:  ${URL}/present/${code}   <- presenter big screen`);
   }
   summaries.teams = teams.length;
   const firstTeamId = teams[0].id;
@@ -348,6 +352,25 @@ async function main() {
     const approve = await emitAck(gm, "gm:approveGreetings", {});
     if (!approve.ok || approve.phase !== "BUILD") fail(`approveGreetings failed: ${JSON.stringify(approve)}`);
     log("greetings approved → BUILD");
+  }
+
+  // 4b) No GM drive: the game may still be in LOBBY/GREETINGS (no theme set,
+  //     greetings not approved). Prompts are rejected with `before_theme` /
+  //     phase guards until BUILD, so poll the game phase and wait for the
+  //     human GM to set the theme + approve greetings on the GM console.
+  if (!OPTS.gmDrive) {
+    let phaseNow = (await (await fetch(`${URL}/api/games/${code}`)).json()).phase;
+    if (phaseNow !== "BUILD") {
+      log(`game is in ${phaseNow} — waiting for BUILD (set the theme and approve greetings on the GM console: ${URL}/gm?code=${code})`);
+      const waitStart = Date.now();
+      while (phaseNow !== "BUILD") {
+        if (deadlineLeft() <= 5_000) fail("overall deadline hit waiting for BUILD phase");
+        if (Date.now() - waitStart > 120_000) fail(`game still in ${phaseNow} after 120s — start the build on the GM console first`);
+        await sleep(2000);
+        phaseNow = (await (await fetch(`${URL}/api/games/${code}`)).json()).phase;
+      }
+      log("BUILD started — bots submitting");
+    }
   }
 
   // 5) BUILD: every bot submits its prompts. Cooldown is PER PLAYER, so bots

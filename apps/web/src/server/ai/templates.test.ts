@@ -98,7 +98,12 @@ function minimalVars(task: string): Record<string, unknown> {
     case "layout_montage":
       return { cardWidth: 1000, cardHeight: 1000, textHint: "top third", items: "[]" };
     case "montage_prompt":
-      return { theme: "birthday", greeting: "Happy Birthday!", subjects: "a red balloon" };
+      return {
+        theme: "birthday",
+        greeting: "Happy Birthday!",
+        textSizeHint: "Render the greeting text LARGE",
+        subjects: "a red balloon",
+      };
     default:
       return {};
   }

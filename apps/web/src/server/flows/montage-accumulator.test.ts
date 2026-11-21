@@ -38,6 +38,7 @@ import {
   finalizeMontageAll,
   resetMontageAccumulatorInFlight,
   stageMontageInput,
+  textSizeHint,
   type MontageAccumulatorDeps,
   type StageMontageInput,
 } from "./montage-accumulator";
@@ -583,6 +584,11 @@ describe("montage accumulator (staging-driven)", () => {
     expect(promptCall).toBeDefined();
     expect(imageCall).toBeDefined();
     expect(promptCall!.input.greeting).toBe("Cheers to you, Linda!");
+    // The computed text-size hint rides the montage_prompt input (21-char
+    // greeting "Cheers to you, Linda!" → MEDIUM tier) so the template can
+    // tell the image model how LARGE to render the text.
+    expect(promptCall!.input.textSizeHint).toBe(textSizeHint("Cheers to you, Linda!"));
+    expect(String(promptCall!.input.textSizeHint)).toContain("MEDIUM");
     // The montage_image input derives from the montage_prompt output — which
     // (per the hardened template) renders the greeting verbatim as the
     // poster's title treatment — so the image model sees the greeting inside
@@ -678,5 +684,48 @@ describe("montage accumulator (staging-driven)", () => {
     expect(settled?.status).toBe("READY");
     // No duplicate pass fired: still exactly one heads-up.
     expect(s.events.filter((e) => e.event === "montage:generating")).toHaveLength(1);
+  });
+});
+
+describe("textSizeHint (greeting length → lower-third text-size hint)", () => {
+  it("short greeting (≤ 20 chars) → LARGE hint at 10% line height", () => {
+    const hint = textSizeHint("Hi!");
+    expect(hint).toContain("LARGE");
+    expect(hint).toContain("10%");
+  });
+
+  it("30-char greeting → MEDIUM hint at 6% line height", () => {
+    const hint = textSizeHint("Happy birthday to you, dear friend!"); // 35 chars
+    expect(hint).toContain("MEDIUM");
+    expect(hint).toContain("6%");
+  });
+
+  it("60-char greeting → SMALL hint at 4% line height", () => {
+    const hint = textSizeHint(
+      "Wishing you the happiest of birthdays and a wonderful year ahead!", // 66 chars
+    );
+    expect(hint).toContain("SMALL");
+    expect(hint).toContain("4%");
+  });
+
+  it("100-char greeting → COMPACT hint at 2.5% line height + explicit bottom-boundary guard", () => {
+    const hint = textSizeHint(
+      "Sending you warmest birthday wishes, joy, laughter, love, and every happiness today and always, dear friend!", // >80 chars
+    );
+    expect(hint).toContain("COMPACT");
+    expect(hint).toContain("2.5%");
+    expect(hint).toContain("lower-third boundary");
+  });
+
+  it("tier boundaries: trims first; 20/21, 40/41, 80/81 split the tiers", () => {
+    // Boundary char counts land on the UPPER tier of each band.
+    expect(textSizeHint("  " + "x".repeat(20))).toContain("LARGE"); // trimmed → 20
+    expect(textSizeHint("  " + "x".repeat(21))).toContain("MEDIUM"); // trimmed → 21
+    expect(textSizeHint("x".repeat(40))).toContain("MEDIUM");
+    expect(textSizeHint("x".repeat(41))).toContain("SMALL");
+    expect(textSizeHint("x".repeat(80))).toContain("SMALL");
+    expect(textSizeHint("x".repeat(81))).toContain("COMPACT");
+    // Empty greeting (no greeting on the team) → the LARGE default tier.
+    expect(textSizeHint("")).toContain("LARGE");
   });
 });

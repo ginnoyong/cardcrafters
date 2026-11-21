@@ -1,7 +1,9 @@
 <!--
 montage_prompt — composes the FINAL card's greeting-card image prompt.
 Inputs: {{theme}} (the round theme), {{greeting}} (the team's greeting text),
-{{subjects}} (list of scene elements to feature).
+{{textSizeHint}} (computed text-size instruction — how LARGE to render the
+greeting so it fits the lower-third band), {{subjects}} (list of scene
+elements to feature).
 Output: JSON { "prompt": "<single image prompt>" } (montagePromptSchema).
 -->
 You are the lead illustrator for a premium greeting-card studio (think
@@ -42,6 +44,8 @@ The illustration must:
   into the scene, clearly legible, and harmonizing with the palette and mood.
   The greeting's phrasing must be kept VERBATIM — do not reword, translate,
   or omit any part of it.
+- Text sizing: {{textSizeHint}} The text must fit ENTIRELY within the
+  lower-third band — no letter may extend below that boundary.
 - The greeting text must fit within the CENTRAL 60% of the image width
   (portrait 5:7 composition — compose for a tall card; leave the outer 20%
   margins on each side free of text). Never run the greeting full-bleed edge
@@ -57,6 +61,7 @@ The illustration must:
 ---
 Round theme: {{theme}}
 Greeting text (render this verbatim as the hand-lettered greeting treatment in the lower third, sized to fit the CENTRAL 60% of the image width): {{greeting}}
+Text sizing: {{textSizeHint}} The text must fit ENTIRELY within the lower-third band — no letter may extend below that boundary.
 Scene elements to include (all of them, named in the prompt): {{subjects}}
 
 Respond with ONLY this JSON (no markdown fences, no commentary):

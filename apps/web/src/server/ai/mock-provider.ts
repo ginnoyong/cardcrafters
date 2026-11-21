@@ -1076,13 +1076,18 @@ function mockMontagePrompt(input: Record<string, unknown>): unknown {
   const greetingNote = greeting
     ? ` Render the greeting "${greeting}" verbatim as an elegant hand-lettered greeting treatment across the lower third, sized to fit the CENTRAL 60% of the image width (outer 20% margins on each side stay free of text).`
     : " Render the greeting verbatim as an elegant hand-lettered greeting treatment across the lower third, sized to fit the CENTRAL 60% of the image width (outer 20% margins on each side stay free of text).";
+  // The accumulator's computed text-size hint (inverse greeting-length →
+  // size) is passed through VERBATIM — same wording the real template gets —
+  // so the canned prompt carries the same lower-third fit constraint.
+  const sizeHint = String(input.textSizeHint ?? "").trim();
+  const sizeNote = sizeHint ? ` ${sizeHint}` : "";
 
   const prompt =
     `${flavor} full-bleed greeting-card illustration for a ${theme} card, in the style of a premium ` +
     `greeting-card studio: a single warm, hand-crafted storybook scene featuring ${subjectList}, ` +
     `all subjects integrated into ONE shared scene with a clear focal point. Soft cohesive pastel ` +
     `palette, gentle storybook lighting, decorative florals and charming hand-drawn accents ` +
-    `framing the scene.${greetingNote} Family-friendly; the ONLY text in the artwork is the greeting, rendered exactly as given.`;
+    `framing the scene.${greetingNote}${sizeNote} Family-friendly; the ONLY text in the artwork is the greeting, rendered exactly as given.`;
 
   // No length cap (montagePromptSchema only requires non-empty) — long subject
   // lists flow through untruncated.

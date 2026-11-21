@@ -77,6 +77,35 @@ export const DEFAULT_MONTAGE_DIR = path.resolve(here, "../../../public/static/mo
 /** Default per-gen-pass AI timeout (Promise.race around the AI chain). */
 const DEFAULT_TIMEOUT_MS = 90_000;
 
+/**
+ * Computed text-size hint for the montage_prompt template, from the greeting's
+ * character count (trimmed). The image model renders the greeting at a FIXED
+ * size regardless of length, so a long greeting overflows the lower-third band
+ * and gets cropped at the bottom edge. The hint scales INVERSELY with the
+ * character count (more chars → smaller text) and is passed as the
+ * `textSizeHint` input so the template can tell the model how LARGE to render
+ * the text so it always fits.
+ *
+ * Tier boundaries (20/40/80) are sized so the text always fits: the
+ * lower-third band is ~33% of the image height; at the 5:7 card ratio with a
+ * ~1024×1536 native render the band is ~500px tall, so at 4% per line that's
+ * 12 lines of headroom — plenty. The key constraint is
+ * N_chars / chars_per_line × line_height_pct ≤ 33%.
+ */
+export function textSizeHint(greeting: string): string {
+  const n = greeting.trim().length;
+  if (n <= 20) {
+    return "Render the greeting text LARGE — each line approximately 10% of the image height, fitting the full greeting in 1-2 lines within the lower-third band.";
+  }
+  if (n <= 40) {
+    return "Render the greeting text at MEDIUM size — each line approximately 6% of the image height, fitting the full greeting in 2 lines within the lower-third band.";
+  }
+  if (n <= 80) {
+    return "Render the greeting text at SMALL size — each line approximately 4% of the image height, fitting the full greeting in 2-3 lines within the lower-third band.";
+  }
+  return "Render the greeting text at COMPACT size — each line approximately 2.5% of the image height, fitting the full greeting in 3-4 tightly-spaced lines within the lower-third band. Do NOT let the text extend below the lower-third boundary.";
+}
+
 export interface MontageAccumulatorDeps {
   repo: Repository;
   /** Null AI → fail-open straight to FALLBACK without AI calls. */
@@ -311,6 +340,11 @@ async function runGenPass(
       ? `palette ${style.palette.join(", ")}, ${style.mood} mood`
       : "";
     const theme = game?.theme ?? "";
+    // Text-size hint for the greeting: scales INVERSELY with the greeting's
+    // character count so the image model renders it small enough to stay
+    // inside the lower-third band (long greetings were cropped at the bottom
+    // edge when the model used its default fixed size).
+    const sizeHint = textSizeHint(greeting?.text ?? "");
 
     // Subjects come from the stagedInputs snapshot taken when this pass was
     // scheduled; sized READY items are the fallback ONLY when nothing was
@@ -358,6 +392,7 @@ async function runGenPass(
             greeting: greeting?.text ?? "",
             subjects,
             styleHint,
+            textSizeHint: sizeHint,
           },
           { gameId },
         );
