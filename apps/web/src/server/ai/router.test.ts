@@ -76,7 +76,7 @@ const VALID_VALIDATION = { valid: true, reason: "", normalized_subject: "golden 
 /** OpenRouter-backed router for prompt_validation; all HTTP goes to `handler`. */
 async function mkOpenRouterRouter(
   handler: (url: string, init: RequestInit) => Response | Promise<Response>,
-  opts: { budgetUsd?: number; cfg?: TaskConfig } = {},
+  opts: { budgetUsd?: number; cfg?: TaskConfig; sleepMs?: (ms: number) => Promise<void> } = {},
 ) {
   const { repo, gameId } = await mkRepo();
   const { fn, calls } = mockFetch(handler);
@@ -88,8 +88,29 @@ async function mkOpenRouterRouter(
     config: configFor(base),
     provider,
     ...(opts.budgetUsd !== undefined ? { budgetUsd: opts.budgetUsd } : {}),
+    ...(opts.sleepMs ? { sleepMs: opts.sleepMs } : {}),
   });
   return { repo, router, calls, models: () => calls.map((c) => JSON.parse(String(c.init.body)).model as string), gameId, provider };
+}
+
+/** EXACT production 402 body (10×10 demo-bot load): the account still HAS
+ *  credits, but concurrent in-flight requests would exceed the budget. */
+const PROD_402_IN_FLIGHT_BODY =
+  '{"error":{"message":"This request would exceed your available credits given your current in-flight requests...","code":402,"metadata":{"reason":"in_flight_budget_exhausted","limit_source":"openrouter_in_flight_budget"}}}';
+
+function inFlight402Res(): Response {
+  return new Response(PROD_402_IN_FLIGHT_BODY, {
+    status: 402,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/** A REGULAR 402 (genuinely out of credits — no in-flight marker anywhere). */
+function regular402Res(): Response {
+  return new Response(
+    '{"error":{"message":"You have exceeded your monthly credit limit of $10.00","code":402}}',
+    { status: 402, headers: { "content-type": "application/json" } },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -216,19 +237,19 @@ describe("AiRouter — openrouter (mocked fetch)", () => {
     const res = await router.run("prompt_validation", { prompt: "big red balloon" }, { gameId: gid });
 
     expect(res.data).toEqual(VALID_VALIDATION);
-    // retries=1 → the primary gets 2 attempts, the fallback succeeds on its first
-    expect(models()).toEqual([primary, primary, fallback]);
+    // retries=2 → the primary gets 3 attempts, the fallback succeeds on its first
+    expect(models()).toEqual([primary, primary, primary, fallback]);
     const rows = (await repo.listAiCalls(gid)).rows;
-    expect(rows.map((r) => r.status)).toEqual(["ERROR", "ERROR", "FALLBACK_OK"]);
-    expect(rows[2]!.fallbackUsed).toBe(true);
-    expect(rows[2]!.model).toBe(fallback);
+    expect(rows.map((r) => r.status)).toEqual(["ERROR", "ERROR", "ERROR", "FALLBACK_OK"]);
+    expect(rows[3]!.fallbackUsed).toBe(true);
+    expect(rows[3]!.model).toBe(fallback);
     // retries is CUMULATIVE across all models in the run, on every row.
-    expect(rows.map((r) => r.retries)).toEqual([1, 2, 2]);
+    expect(rows.map((r) => r.retries)).toEqual([1, 2, 3, 3]);
   });
 
   it("schema-invalid output is retried across the chain; exhaustion throws AiTaskError", async () => {
-    // prompt_validation: retries=1, fallbacks=[gemini-3.8-flash, gpt-6-luna]
-    // → every model gets 2 attempts → 6 calls, all ERROR.
+    // prompt_validation: retries=2, fallbacks=[gemini-3.8-flash, gpt-6-luna]
+    // → every model gets 3 attempts → 9 calls, all ERROR.
     const { router, models, repo, gameId } = await mkOpenRouterRouter(() =>
       completionRes({ valid: true, reason: "" /* normalized_subject missing */ }, 0),
     );
@@ -236,7 +257,7 @@ describe("AiRouter — openrouter (mocked fetch)", () => {
     await expect(router.run("prompt_validation", { prompt: "x" }, { gameId: gid })).rejects.toThrow(
       AiTaskError,
     );
-    expect(models()).toHaveLength(6);
+    expect(models()).toHaveLength(9);
     const rows = (await repo.listAiCalls(gid)).rows;
     expect(rows.every((r) => r.status === "ERROR")).toBe(true);
   });
@@ -282,6 +303,69 @@ describe("AiRouter — openrouter (mocked fetch)", () => {
     // 400 is fatal per-model (no retry on the same model) but the chain continues
     // through every fallback → primary + both fallbacks, 1 attempt each.
     expect(models()).toEqual([primary, fallback, CONFIG.prompt_validation.fallbacks[1]!]);
+  });
+
+  // -- 402 "in_flight_budget_exhausted": back off + retry the SAME model -----
+  // (the account still HAS credits; retrying immediately adds MORE in-flight
+  // requests and makes the 402 worse — OpenRouter's remedy: "Retry after
+  // in-flight requests settle.")
+  it("402 in-flight twice then success → retries the SAME model with 4s/8s backoff, no fallback advance", async () => {
+    let n = 0;
+    const waits: number[] = [];
+    const primary = CONFIG.prompt_validation.primary;
+    const { router, models, repo, gameId } = await mkOpenRouterRouter(
+      () => {
+        n += 1;
+        return n <= 2 ? inFlight402Res() : completionRes(VALID_VALIDATION);
+      },
+      { sleepMs: async (ms) => { waits.push(ms); } },
+    );
+    const res = await router.run("prompt_validation", { prompt: "big red balloon" }, { gameId });
+    expect(res.data).toEqual(VALID_VALIDATION);
+    // Never advanced to a fallback model: primary, primary, primary.
+    expect(models()).toEqual([primary, primary, primary]);
+    // First wait 4s, second 8s (per-call state, never global).
+    expect(waits).toEqual([4000, 8000]);
+    const rows = (await repo.listAiCalls(gameId)).rows;
+    expect(rows.map((r) => r.status)).toEqual(["ERROR", "ERROR", "OK"]);
+    // In-flight waits do NOT count as failed attempts (retries stays 0).
+    expect(rows.map((r) => r.retries)).toEqual([0, 0, 0]);
+    expect(rows[2]!.fallbackUsed).toBe(false);
+  });
+
+  it("regular 402 (no in-flight marker) → fails fast as before: no waits, burns attempts + fallbacks", async () => {
+    const waits: number[] = [];
+    const { router, models, repo, gameId } = await mkOpenRouterRouter(
+      () => regular402Res(),
+      { sleepMs: async (ms) => { waits.push(ms); } },
+    );
+    await expect(router.run("prompt_validation", { prompt: "x" }, { gameId })).rejects.toThrow(AiTaskError);
+    // prompt_validation: retries=2, 2 fallbacks → 3 models × 3 attempts = 9 calls.
+    expect(models()).toHaveLength(9);
+    expect(waits).toEqual([]); // a regular 402 has nothing to wait for
+    const rows = (await repo.listAiCalls(gameId)).rows;
+    expect(rows.every((r) => r.status === "ERROR")).toBe(true);
+    expect(rows.map((r) => r.retries)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  });
+
+  it("in-flight 402 beyond the 3-wait cap falls back to normal failure logic (waits stop)", async () => {
+    const waits: number[] = [];
+    const { router, models, repo, gameId } = await mkOpenRouterRouter(
+      () => inFlight402Res(),
+      { sleepMs: async (ms) => { waits.push(ms); } },
+    );
+    await expect(router.run("prompt_validation", { prompt: "x" }, { gameId })).rejects.toThrow(AiTaskError);
+    // 3 waits (4s/8s/12s), then the 402 is handled like any other retryable
+    // failure: primary = 3 in-flight retries on attempt 0 + 3 normal attempts
+    // = 6 calls; each fallback = 3 normal attempts = 3 calls each → 12 total.
+    expect(waits).toEqual([4000, 8000, 12000]);
+    expect(models()).toHaveLength(12);
+    const rows = (await repo.listAiCalls(gameId)).rows;
+    expect(rows).toHaveLength(12);
+    expect(rows.every((r) => r.status === "ERROR")).toBe(true);
+    // retries counts FAILED attempts only — the 3 in-flight waits don't
+    // increment it, so the counter reads [0,0,0, then 1..9].
+    expect(rows.map((r) => r.retries)).toEqual([0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
   });
 });
 

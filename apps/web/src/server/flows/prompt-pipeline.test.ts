@@ -291,6 +291,108 @@ describe("prompt pipeline — AI checks", () => {
   });
 });
 
+describe("prompt pipeline — prompt_validation fail-open (AI outage fallback)", () => {
+  /** AI fake: prompt_validation's whole model chain is down; moderation (and
+   *  any other task) still routes to the mock provider. */
+  function validationDownAi(fallback: AiRouter) {
+    return {
+      run: async (
+        task: string,
+        input: Record<string, unknown>,
+        opts?: { gameId?: string },
+      ) => {
+        if (task === "prompt_validation") {
+          throw new AiTaskError({ task, retryable: false, message: "all models down" });
+        }
+        return fallback.run(task, input, opts);
+      },
+    };
+  }
+
+  it("AI validation throws + prompt ≤ maxWords → proceeds to GENERATING (not FAILED), no example_fix needed", async () => {
+    const s = await setup();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await s.submit("a red balloon dog", { ai: validationDownAi(s.ai) });
+    expect(res).toEqual({ ok: true, itemId: expect.any(String) });
+
+    const rows = await itemsOf(s.repo, s.teamId);
+    expect(rows[0]).toMatchObject({
+      status: "GENERATING",
+      failReason: null,
+      subject: "a red balloon dog", // local fallback normalizes like the mock
+    });
+    // Diagnosable in live runs.
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("prompt_validation AI unavailable, local word-count fallback"),
+    );
+    // Cooldown anchored: the fallback counts as a fully accepted submission.
+    tick(1000);
+    const second = await s.submit("a birthday cake with candles", { ai: validationDownAi(s.ai) });
+    expect(second).toMatchObject({ ok: false, stage: "cooldown" });
+  });
+
+  it("AI validation throws + prompt > maxWords → REJECTED with the local reason + rejection events", async () => {
+    const s = await setup();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await s.submit("a very big red balloon dog with a hat", {
+      ai: validationDownAi(s.ai),
+    });
+    expect(res).toMatchObject({ ok: false, stage: "validation" });
+    const failed = res as Extract<PromptSubmitResult, { stage: "validation" }>;
+    expect(failed.reason).toContain("limited to 6 words");
+    expect(failed.exampleFix).toBeUndefined(); // AI-only suggestion, locally absent
+
+    const rows = await itemsOf(s.repo, s.teamId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: "REJECTED", subject: null });
+
+    // Same rejection events as the AI-invalid path: owner-only item:rejected
+    // (NO exampleFix key), then the team-room item:withdrawn cleanup.
+    expect(s.events).toEqual([
+      { event: "item:pending", payload: expect.anything(), toPlayerOnly: undefined },
+      {
+        event: "item:rejected",
+        payload: { itemId: rows[0]!.id, reason: failed.reason },
+        toPlayerOnly: s.playerId,
+      },
+      {
+        event: "item:withdrawn",
+        payload: { itemId: rows[0]!.id, teamId: s.teamId },
+        toPlayerOnly: undefined,
+      },
+    ]);
+  });
+
+  it("moderation outage → still FAILED + ai_unavailable (moderation never fails open)", async () => {
+    const s = await setup();
+    const moderationDownAi = {
+      run: async (
+        task: string,
+        input: Record<string, unknown>,
+        opts?: { gameId?: string },
+      ) => {
+        if (task === "moderation") {
+          throw new AiTaskError({ task, retryable: false, message: "moderators down" });
+        }
+        return s.ai.run(task, input, opts);
+      },
+    };
+
+    const res = await s.submit("a red balloon dog", { ai: moderationDownAi });
+    expect(res).toEqual({
+      ok: false,
+      stage: "ai_unavailable",
+      reason: expect.stringContaining("temporarily unavailable"),
+    });
+    const rows = await itemsOf(s.repo, s.teamId);
+    expect(rows[0]).toMatchObject({ status: "FAILED", failReason: "moderators down" });
+    expect(s.events[1]).toMatchObject({ event: "item:failed", toPlayerOnly: s.playerId });
+    expect(s.events[2]).toMatchObject({ event: "item:withdrawn", toPlayerOnly: undefined });
+  });
+});
+
 describe("prompt pipeline — limits", () => {
   it("cooldown enforced between accepted submissions (fake clock)", async () => {
     const s = await setup();

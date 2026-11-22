@@ -24,7 +24,15 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { PromptTemplates } from "./templates";
-import { montageImagePrompt, OpenRouterProvider } from "./openrouter-provider";
+import {
+  DEFAULT_AI_MAX_CONCURRENT_REQUESTS,
+  isInFlightBudgetBody,
+  montageImagePrompt,
+  OpenRouterProvider,
+  openrouterSemaphore,
+  resolveMaxConcurrentRequests,
+  Semaphore,
+} from "./openrouter-provider";
 
 /** Exact production 404 body (truncated the way the provider stores it). */
 const PROD_404_BODY =
@@ -337,4 +345,193 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   if (tplDir) await rm(tplDir, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// 402 "in_flight_budget_exhausted" hardening — typed marker on the provider
+// ---------------------------------------------------------------------------
+
+/** EXACT production 402 body (10×10 demo-bot load): the account still HAS
+ *  credits, but concurrent in-flight requests would exceed the budget. */
+const PROD_402_IN_FLIGHT_BODY =
+  '{"error":{"message":"This request would exceed your available credits given your current in-flight requests...","code":402,"metadata":{"reason":"in_flight_budget_exhausted","limit_source":"openrouter_in_flight_budget"}}}';
+
+/** A REGULAR 402 (genuinely out of credits — no in-flight marker anywhere). */
+const REGULAR_402_BODY =
+  '{"error":{"message":"You have exceeded your monthly credit limit of $10.00","code":402}}';
+
+describe("OpenRouterProvider — 402 in-flight budget (typed marker)", () => {
+  it("402 with reason in_flight_budget_exhausted → AiTaskError with inFlightBudget=true (retryable)", async () => {
+    const { fetchImpl, calls } = scriptedFetch([
+      () => jsonResponse(JSON.parse(PROD_402_IN_FLIGHT_BODY), 402),
+    ]);
+    const provider = new OpenRouterProvider({ apiKey: "k", fetchImpl });
+    await expect(provider.run("item_image", ITEM_INPUT, IMAGE_CFG)).rejects.toMatchObject({
+      inFlightBudget: true,
+      retryable: true,
+      message: expect.stringContaining("openrouter HTTP 402 (in-flight budget exhausted)"),
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("402 with limit_source openrouter_in_flight_budget (no reason field) → inFlightBudget=true", async () => {
+    const { fetchImpl } = scriptedFetch([
+      () =>
+        jsonResponse(
+          {
+            error: {
+              message: "This request would exceed your available credits...",
+              code: 402,
+              metadata: { limit_source: "openrouter_in_flight_budget" },
+            },
+          },
+          402,
+        ),
+    ]);
+    const provider = new OpenRouterProvider({ apiKey: "k", fetchImpl });
+    await expect(provider.run("item_image", ITEM_INPUT, IMAGE_CFG)).rejects.toMatchObject({
+      inFlightBudget: true,
+    });
+  });
+
+  it("regular 402 (genuinely out of credits — no in-flight marker) → inFlightBudget=false, still retryable", async () => {
+    const { fetchImpl } = scriptedFetch([() => jsonResponse(JSON.parse(REGULAR_402_BODY), 402)]);
+    const provider = new OpenRouterProvider({ apiKey: "k", fetchImpl });
+    await expect(provider.run("item_image", ITEM_INPUT, IMAGE_CFG)).rejects.toMatchObject({
+      inFlightBudget: false,
+      retryable: true,
+      message: expect.stringContaining("openrouter HTTP 402"),
+    });
+  });
+
+  it("images endpoint 402 in-flight → same typed marker", async () => {
+    const { fetchImpl } = scriptedFetch([
+      // chat/completions rejects the image-only model (404 → images endpoint),
+      // then the unified images API answers with the in-flight 402.
+      () => jsonResponse(JSON.parse(PROD_404_BODY), 404),
+      () => jsonResponse(JSON.parse(PROD_402_IN_FLIGHT_BODY), 402),
+    ]);
+    const provider = new OpenRouterProvider({ apiKey: "k", fetchImpl });
+    await expect(provider.run("item_image", ITEM_INPUT, IMAGE_CFG)).rejects.toMatchObject({
+      inFlightBudget: true,
+      message: expect.stringContaining("openrouter images HTTP 402"),
+    });
+  });
+
+  it("isInFlightBudgetBody: reason/limit_source/message markers, non-JSON fallback, regular 402 no match", () => {
+    expect(isInFlightBudgetBody(PROD_402_IN_FLIGHT_BODY)).toBe(true);
+    expect(
+      isInFlightBudgetBody('{"error":{"code":402,"metadata":{"limit_source":"openrouter_in_flight_budget"}}}'),
+    ).toBe(true);
+    expect(
+      isInFlightBudgetBody('{"error":{"message":"in-flight requests would exceed credits","code":402}}'),
+    ).toBe(true);
+    expect(isInFlightBudgetBody("plain-text in-flight budget exhausted")).toBe(true);
+    expect(isInFlightBudgetBody(REGULAR_402_BODY)).toBe(false);
+    expect(isInFlightBudgetBody('{"error":{"message":"out of credits","code":402}}')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Global outbound concurrency cap (semaphore)
+// ---------------------------------------------------------------------------
+
+describe("OpenRouter outbound semaphore (AI_MAX_CONCURRENT_REQUESTS)", () => {
+  it("Semaphore: 20 fake calls with cap 2 → max observed in-flight == 2, all complete", async () => {
+    const sem = new Semaphore(2);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let completed = 0;
+    const call = async () => {
+      const release = await sem.acquire();
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 2));
+      inFlight -= 1;
+      release();
+      completed += 1;
+    };
+    await Promise.all(Array.from({ length: 20 }, call));
+    expect(maxInFlight).toBe(2);
+    expect(completed).toBe(20);
+  });
+
+  it("Semaphore: release in finally on error never deadlocks the queue", async () => {
+    const sem = new Semaphore(1);
+    const results: string[] = [];
+    const call = async (fail: boolean) => {
+      const release = await sem.acquire();
+      try {
+        if (fail) throw new Error("boom");
+        results.push("ok");
+      } finally {
+        release();
+      }
+    };
+    await Promise.all([call(false), call(true).catch(() => "swallowed"), call(false)]);
+    expect(results).toEqual(["ok", "ok"]); // the throwing call released its slot
+  });
+
+  it("resolveMaxConcurrentRequests: absent/invalid → 6, valid integer wins", () => {
+    expect(DEFAULT_AI_MAX_CONCURRENT_REQUESTS).toBe(6);
+    const env = (v: string | undefined) =>
+      (v === undefined ? {} : { AI_MAX_CONCURRENT_REQUESTS: v }) as unknown as NodeJS.ProcessEnv;
+    expect(resolveMaxConcurrentRequests(undefined)).toBe(6);
+    expect(resolveMaxConcurrentRequests(env(undefined))).toBe(6);
+    expect(resolveMaxConcurrentRequests(env(""))).toBe(6);
+    expect(resolveMaxConcurrentRequests(env("3"))).toBe(3);
+    expect(resolveMaxConcurrentRequests(env("0"))).toBe(6);
+    expect(resolveMaxConcurrentRequests(env("-2"))).toBe(6);
+    expect(resolveMaxConcurrentRequests(env("2.5"))).toBe(6);
+    expect(resolveMaxConcurrentRequests(env("nan"))).toBe(6);
+  });
+
+  it("provider constructor applies the env cap to the module-level semaphore", () => {
+    const tinyPng = Buffer.from("89504e47", "hex");
+    const dataUrl = `data:image/png;base64,${tinyPng.toString("base64")}`;
+    const { fetchImpl } = scriptedFetch([
+      () =>
+        jsonResponse({
+          choices: [{ message: { content: null, images: [{ image_url: { url: dataUrl } }] } }],
+        }),
+    ]);
+    new OpenRouterProvider({
+      apiKey: "k",
+      fetchImpl,
+      env: { AI_MAX_CONCURRENT_REQUESTS: "2" } as unknown as NodeJS.ProcessEnv,
+    });
+    expect(openrouterSemaphore.capacity).toBe(2);
+    // Self-healing: constructing without env restores the default cap.
+    new OpenRouterProvider({ apiKey: "k", fetchImpl });
+    expect(openrouterSemaphore.capacity).toBe(DEFAULT_AI_MAX_CONCURRENT_REQUESTS);
+  });
+
+  it("20 concurrent provider.run calls with env cap 2 → max observed in-flight == 2", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const fetchImpl = (async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 2));
+      inFlight -= 1;
+      return jsonResponse({
+        choices: [
+          { message: { content: null, images: [{ image_url: { url: "data:image/png;base64,QUJD" } }] } },
+        ],
+      });
+    }) as typeof fetch;
+    const provider = new OpenRouterProvider({
+      apiKey: "k",
+      fetchImpl,
+      env: { AI_MAX_CONCURRENT_REQUESTS: "2" } as unknown as NodeJS.ProcessEnv,
+    });
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => provider.run("item_image", ITEM_INPUT, IMAGE_CFG)),
+    );
+    expect(results).toHaveLength(20);
+    expect(results.every((r) => r.imageBase64 === "QUJD")).toBe(true);
+    expect(maxInFlight).toBe(2);
+    // Reset the shared module-level semaphore so later tests keep the default.
+    openrouterSemaphore.setLimit(DEFAULT_AI_MAX_CONCURRENT_REQUESTS);
+  });
 });

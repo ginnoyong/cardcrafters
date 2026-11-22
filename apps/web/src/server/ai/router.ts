@@ -15,6 +15,16 @@
  *     Non-retryable failures skip the remaining retries of the current model
  *     but still move to the next fallback model (retrying a bad model id or
  *     malformed request can't help; a different model might).
+ *     EXCEPTION — 402 "in_flight_budget_exhausted": the account still HAS
+ *     credits, only too many requests are in flight (OpenRouter's remedy:
+ *     "Retry after in-flight requests settle"). This is NOT counted as a
+ *     normal failed attempt and does NOT advance the fallback chain: the
+ *     router backs off 4s/8s/12s and retries the SAME model, up to 3 such
+ *     waits per run (IN_FLIGHT_BACKOFF_SECONDS / MAX_IN_FLIGHT_RETRIES). A
+ *     regular 402 (genuinely out of credits — no in-flight marker) keeps the
+ *     existing behavior. Outbound concurrency is additionally capped by the
+ *     provider's global semaphore (AI_MAX_CONCURRENT_REQUESTS) so the 402 is
+ *     rare in the first place.
  *  4. AUDIT: every attempt is persisted via repo.insertAiCall (status
  *     OK / FALLBACK_OK / ERROR, latency, cost, usage, retries, fallbackUsed,
  *     error). Mock calls log cost 0.
@@ -80,6 +90,16 @@ export const DEFAULT_CALL_ESTIMATE_USD = 0.01;
 export const DEFAULT_IMAGE_CALL_ESTIMATE_USD = 0.05;
 
 /**
+ * Backoff schedule (seconds) for OpenRouter's HTTP 402 "in_flight_budget_exhausted"
+ * retries: first wait 4s, second 8s, third 12s, then give up waiting and handle
+ * the 402 like any other retryable failure. Per-call state (every run() starts
+ * fresh at 4s), never global.
+ */
+export const IN_FLIGHT_BACKOFF_SECONDS = [4, 8, 12] as const;
+/** Max number of 402 in-flight waits per run() before normal failure logic. */
+export const MAX_IN_FLIGHT_RETRIES = 3;
+
+/**
  * Optimistic cost estimate for one call, reserved BEFORE the provider runs so
  * concurrent runs cannot jointly overshoot the budget (check-then-act race).
  * Reconciled against the actual cost (from usage) once the call completes.
@@ -101,6 +121,9 @@ export interface AiRouterOptions {
   /** OpenRouter credentials, needed when mode resolves to the real provider. */
   openrouter?: { apiKey?: string; baseUrl?: string };
   env?: NodeJS.ProcessEnv;
+  /** Injectable sleep for the 402 in-flight backoff (tests inject a fake that
+   *  records the waits instead of really sleeping). Default: real setTimeout. */
+  sleepMs?: (ms: number) => Promise<void>;
 }
 
 export class AiRouter {
@@ -112,11 +135,14 @@ export class AiRouter {
   private readonly spend = new Map<string, number>();
   /** gameId → sum of estimates reserved for calls currently in flight. */
   private readonly inflight = new Map<string, number>();
+  /** Sleep used for the 402 in-flight backoff (injectable for tests). */
+  private readonly sleepMs: (ms: number) => Promise<void>;
 
   constructor(opts: AiRouterOptions) {
     this.repo = opts.repo;
     this.config = opts.config;
     this.budgetUsd = opts.budgetUsd ?? null;
+    this.sleepMs = opts.sleepMs ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
     this.provider =
       opts.provider ??
       resolveProvider(opts.mode, opts.openrouter?.apiKey, opts.openrouter?.baseUrl, opts.env);
@@ -194,6 +220,11 @@ export class AiRouter {
     const models = [cfg.primary, ...cfg.fallbacks];
     let lastError: AiTaskError | undefined;
     let failedAttempts = 0;
+    // 402 "in_flight_budget_exhausted" waits used so far in THIS run. The
+    // backoff schedule is per-call state (every run() starts fresh at 4s),
+    // never global, and the cap is shared across the whole model chain —
+    // simplest correct behavior: 3 waits per run, then normal failure logic.
+    let inFlightRetries = 0;
 
     for (let mi = 0; mi < models.length; mi++) {
       const model = models[mi]!;
@@ -215,6 +246,40 @@ export class AiRouter {
                   retryable: true,
                   message: `provider threw: ${(cause as Error).message}`,
                 });
+          // 402 "in_flight_budget_exhausted": the account still HAS credits —
+          // the in-flight requests alone would exceed the available budget.
+          // Retrying immediately (like any other retryable failure) ADDS more
+          // in-flight requests and makes the 402 worse; advancing to the next
+          // fallback model does the same. OpenRouter's remedy hint: "Retry
+          // after in-flight requests settle." So: back off 4s/8s/12s and retry
+          // the SAME model, up to 3 such waits per run. These waits do NOT
+          // consume the regular attempt budget and do NOT advance the
+          // fallback chain (documented semantics — the brief allowed up to 3
+          // in-flight retries, "2 extra attempts" is the per-model lower
+          // bound of the same idea; 3 waits per run is the strictest cap).
+          // Once the cap is hit, a further in-flight 402 is handled like any
+          // other retryable failure (burns attempts → advances as before).
+          // A regular 402 (genuinely out of credits — no in-flight marker)
+          // never enters this branch and keeps the existing behavior.
+          if (lastError.inFlightBudget && inFlightRetries < MAX_IN_FLIGHT_RETRIES) {
+            const k = inFlightRetries + 1;
+            const waitSec = IN_FLIGHT_BACKOFF_SECONDS[inFlightRetries]!;
+            inFlightRetries += 1;
+            console.warn(
+              `[ai-router] 402 in-flight budget hit on ${task} via ${model}, backing off ${waitSec}s (retry ${k}/3)`,
+            );
+            await this.log(task, model, "ERROR", {
+              latencyMs: 0,
+              costUsd: 0,
+              retries: failedAttempts, // unchanged: an in-flight wait is not a failed attempt
+              fallbackUsed,
+              error: lastError.message,
+              gameId: opts?.gameId,
+            });
+            await this.sleepMs(waitSec * 1000);
+            attempt -= 1; // retry the SAME model at the SAME attempt index
+            continue;
+          }
           failedAttempts += 1;
           console.warn(
             `[ai-router] ${task} attempt ${failedAttempts} via ${model} failed: ${lastError.message}`,
@@ -406,7 +471,13 @@ function resolveProvider(
     if (!apiKey) {
       throw new Error("AI_MODE=openrouter requires OPENROUTER_API_KEY");
     }
-    return new OpenRouterProvider({ apiKey, ...(baseUrl ? { baseUrl } : {}) });
+    // env is passed so the provider constructor can apply the global
+    // AI_MAX_CONCURRENT_REQUESTS semaphore cap at boot time.
+    return new OpenRouterProvider({
+      apiKey,
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(env ? { env } : {}),
+    });
   }
   return new MockProvider({ env });
 }

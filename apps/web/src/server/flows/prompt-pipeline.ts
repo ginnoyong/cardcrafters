@@ -62,6 +62,7 @@
 
 import {
   MAX_PROMPT_WORDS,
+  countWords,
   moderationSchema,
   promptValidationSchema,
   type CardConfig,
@@ -320,7 +321,12 @@ async function runSubmit(
     createdAt: item.createdAt,
   });
 
-  // 5a) AI validation.
+  // 5a) AI validation. On a whole-chain outage we FAIL OPEN with a local
+  //    word-count check (see localWordCountValidation) — prompts are ≤6
+  //    words and trivially checkable without AI, so an outage must never
+  //    cost the player their sticker. Moderation below still runs, and a
+  //    moderation failure still fails the item (safety-critical, never
+  //    fail-open).
   let validation: PromptValidation;
   try {
     const res = await deps.ai.run(
@@ -330,7 +336,11 @@ async function runSubmit(
     );
     validation = promptValidationSchema.parse(res.data);
   } catch (err) {
-    return aiUnavailable(deps, item, player.id, player.teamId, err);
+    const detail = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[prompt-pipeline] prompt_validation AI unavailable, local word-count fallback: ${detail}`,
+    );
+    validation = localWordCountValidation(text, MAX_PROMPT_WORDS);
   }
   if (!validation.valid) {
     const reason = validation.reason;
@@ -428,6 +438,37 @@ async function runSubmit(
     );
   }
   return { ok: true, itemId: accepted.id };
+}
+
+/**
+ * Deterministic local stand-in for the prompt_validation AI task, used ONLY
+ * when the whole model chain is unreachable (FAIL-OPEN — see 5a). Prompts
+ * are ≤6 words, so a plain word-count check needs no AI; the AI's only extra
+ * contribution is a friendly `example_fix`, which is intentionally absent
+ * here (the rejection path already treats example_fix as optional).
+ *
+ * Shapes mirror the mock provider (mock-provider.ts):
+ * - valid → normalized_subject = lowercased prompt (an empty prompt keeps
+ *   the mock's "a sticker" placeholder so the schema's min(1) holds — the
+ *   ws layer's pre-filter normally rejects empty prompts earlier anyway);
+ * - too many words → invalid with a friendly reason in the mock's style.
+ * `maxWords` is the same value the AI task receives (MAX_PROMPT_WORDS).
+ */
+function localWordCountValidation(text: string, maxWords: number): PromptValidation {
+  const trimmed = text.trim();
+  const words = countWords(trimmed);
+  if (words <= maxWords) {
+    return promptValidationSchema.parse({
+      valid: true,
+      reason: "",
+      normalized_subject: words === 0 ? "a sticker" : trimmed.toLowerCase(),
+    });
+  }
+  return promptValidationSchema.parse({
+    valid: false,
+    reason: `Prompts are limited to ${maxWords} words (yours has ${words}). Keep the visible subject and drop extra words.`,
+    normalized_subject: trimmed.toLowerCase(),
+  });
 }
 
 /**

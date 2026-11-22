@@ -23,6 +23,97 @@ import { validateTaskOutput } from "./provider";
 
 const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 
+// ---------------------------------------------------------------------------
+// Global outbound-concurrency cap (semaphore)
+// ---------------------------------------------------------------------------
+
+/**
+ * Default cap on CONCURRENT in-flight OpenRouter HTTP requests. Under the
+ * 10×10 demo-bot load (~200 near-simultaneous image generations), OpenRouter
+ * starts rejecting calls with HTTP 402 "in_flight_budget_exhausted" — the
+ * account still HAS credits, but the in-flight requests alone would exceed
+ * the available budget. Capping our own concurrency keeps us under that
+ * in-flight ceiling in the first place.
+ *
+ * Configurable via AI_MAX_CONCURRENT_REQUESTS (parsed as an integer; absent,
+ * invalid, or < 1 → the default). The cap is GLOBAL: one module-level
+ * semaphore shared by every OpenRouterProvider instance, because the credit
+ * budget is per-account, not per-provider-instance.
+ */
+export const DEFAULT_AI_MAX_CONCURRENT_REQUESTS = 6;
+
+/** A tiny promise-queue semaphore (no dependency). acquire() resolves once a
+ *  slot is free and returns the release callback; ALWAYS call release in a
+ *  finally block so errors can never deadlock the queue. */
+export class Semaphore {
+  private limit: number;
+  private inFlight = 0;
+  private readonly waiters: (() => void)[] = [];
+
+  constructor(limit: number) {
+    this.limit = toPositiveInt(limit, 1);
+  }
+
+  /** Adjust the cap (used by the provider constructor to apply the env). */
+  setLimit(limit: number): void {
+    this.limit = toPositiveInt(limit, 1);
+    // If the new limit admits queued waiters, hand them slots immediately.
+    while (this.inFlight < this.limit && this.waiters.length > 0) {
+      const next = this.waiters.shift()!;
+      this.inFlight += 1;
+      next();
+    }
+  }
+
+  /** Current limit (exposed for tests/diagnostics). */
+  get capacity(): number {
+    return this.limit;
+  }
+
+  /** Wait for a slot, then return the release function. */
+  async acquire(): Promise<() => void> {
+    if (this.inFlight < this.limit) {
+      this.inFlight += 1;
+      return this.releaseBound;
+    }
+    // Slot is transferred by release() (it increments on our behalf) —
+    // incrementing here too would double-count and over-admit callers.
+    await new Promise<void>((resolve) => this.waiters.push(resolve));
+    return this.releaseBound;
+  }
+
+  private releaseBound = (): void => {
+    this.inFlight -= 1;
+    if (this.inFlight < this.limit) {
+      const next = this.waiters.shift();
+      if (next) {
+        this.inFlight += 1; // hand the freed slot straight to the next waiter
+        next();
+      }
+    }
+  };
+}
+
+/** AI_MAX_CONCURRENT_REQUESTS parsing: an integer ≥ 1 wins; anything else
+ *  (absent, empty, float, 0, negative, garbage) falls back to the default. */
+export function resolveMaxConcurrentRequests(env?: NodeJS.ProcessEnv): number {
+  const raw = env?.AI_MAX_CONCURRENT_REQUESTS;
+  if (raw === undefined || raw === "") return DEFAULT_AI_MAX_CONCURRENT_REQUESTS;
+  const parsed = Number(raw);
+  return toPositiveInt(parsed, DEFAULT_AI_MAX_CONCURRENT_REQUESTS);
+}
+
+function toPositiveInt(value: number, fallback: number): number {
+  return Number.isInteger(value) && value >= 1 ? value : fallback;
+}
+
+/** The one module-level semaphore ALL outbound OpenRouter HTTP requests go
+ *  through (chat/completions + images endpoint). Constructed at the default
+ *  cap; the provider constructor re-derives the limit from the env it was
+ *  built with, so the process-wide cap always mirrors the boot-time env.
+ *  Exported for tests (the provider constructor is what mutates it). */
+export const openrouterSemaphore = new Semaphore(DEFAULT_AI_MAX_CONCURRENT_REQUESTS);
+
 export interface OpenRouterProviderOptions {
   apiKey: string;
   baseUrl?: string;
@@ -30,6 +121,10 @@ export interface OpenRouterProviderOptions {
   fetchImpl?: typeof fetch;
   /** Prompt template loader; loads config/prompts at first use. */
   templates?: PromptTemplates;
+  /** Environment the provider was built from — read once at construction to
+   *  (re)set the global AI_MAX_CONCURRENT_REQUESTS cap (mirrors how other env
+   *  config is read at construction; omitted → the current/default cap). */
+  env?: NodeJS.ProcessEnv;
 }
 
 interface ChatCompletionResponse {
@@ -95,6 +190,11 @@ export class OpenRouterProvider implements AiProvider {
     this.baseUrl = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch;
     this.templates = opts.templates ?? new PromptTemplates();
+    // Env-configured concurrency cap is read HERE (where the provider is
+    // constructed), mirroring how other env config is read at construction.
+    // Applied unconditionally so the global cap always mirrors the most
+    // recent construction env (the server constructs exactly once at boot).
+    openrouterSemaphore.setLimit(resolveMaxConcurrentRequests(opts.env));
   }
 
   /** Re-read prompt templates from disk (e.g. after editing config/prompts). */
@@ -143,6 +243,12 @@ export class OpenRouterProvider implements AiProvider {
     if (task === "item_image" || task === "montage_image") body.modalities = ["image", "text"];
 
     let res: Response;
+    // GLOBAL CONCURRENCY CAP: every outbound OpenRouter HTTP request passes
+    // through the module-level semaphore (chat/completions + images endpoint).
+    // Release happens in a finally block so network errors/aborts can never
+    // deadlock the queue. The per-attempt timeout clock starts only once a
+    // slot is acquired (waiting in the queue must not eat the timeout).
+    const release = await openrouterSemaphore.acquire();
     try {
       res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
         method: "POST",
@@ -166,6 +272,8 @@ export class OpenRouterProvider implements AiProvider {
         retryable: true,
         message: `openrouter request failed: ${(cause as Error).message}`,
       });
+    } finally {
+      release();
     }
 
     if (!res.ok) {
@@ -184,10 +292,26 @@ export class OpenRouterProvider implements AiProvider {
       ) {
         return this.runViaImagesEndpoint(task, input, cfg, messages, started);
       }
+      // 402 with the in-flight budget marker: the account still HAS credits —
+      // the in-flight requests alone would exceed the available budget. The
+      // remedy (per OpenRouter's own hint) is to wait for in-flight requests
+      // to settle; the router backs off and retries the SAME model instead of
+      // burning retries/fallbacks (which would add MORE in-flight requests).
+      // A regular 402 (genuinely out of credits, no in-flight marker) keeps
+      // the existing behavior: retryable generic failure.
+      if (status === 402 && isInFlightBudgetBody(text)) {
+        throw new AiTaskError({
+          task,
+          model: cfg.primary,
+          retryable: true,
+          inFlightBudget: true,
+          message: `openrouter HTTP 402 (in-flight budget exhausted): ${text.slice(0, 300)}`,
+        });
+      }
       // 400/404: malformed request (unknown model id, bad params) — retrying
       // with the SAME model cannot help, so this is fatal for the model; the
       // router still moves on to the next FALLBACK model. Everything else
-      // (401/408/429/5xx) is treated as retryable per the failure policy.
+      // (401/402/408/429/5xx) is treated as retryable per the failure policy.
       const retryable = status !== 400 && status !== 404;
       throw new AiTaskError({
         task,
@@ -302,6 +426,8 @@ export class OpenRouterProvider implements AiProvider {
     // that the bottom-anchored normalization crop stays minimal.
     const aspectRatio = task === "montage_image" ? "5:7" : undefined;
     let res: Response;
+    // Global concurrency cap — same semaphore as chat/completions.
+    const release = await openrouterSemaphore.acquire();
     try {
       res = await this.fetchImpl(`${this.baseUrl}/images`, {
         method: "POST",
@@ -327,14 +453,27 @@ export class OpenRouterProvider implements AiProvider {
         retryable: true,
         message: `openrouter images request failed: ${(cause as Error).message}`,
       });
+    } finally {
+      release();
     }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
+      // Same in-flight budget handling as chat/completions (image models hit
+      // POST /api/v1/images, so 402 in-flight bodies arrive here too).
+      if (res.status === 402 && isInFlightBudgetBody(text)) {
+        throw new AiTaskError({
+          task,
+          model: cfg.primary,
+          retryable: true,
+          inFlightBudget: true,
+          message: `openrouter images HTTP 402 (in-flight budget exhausted): ${text.slice(0, 300)}`,
+        });
+      }
       throw new AiTaskError({
         task,
         model: cfg.primary,
         // Unknown-model/bad-param 404s and 400s are fatal for this model;
-        // capacity/limit errors (408/429/5xx) stay retryable.
+        // capacity/limit errors (402/408/429/5xx) stay retryable.
         retryable: res.status !== 400 && res.status !== 404,
         message: `openrouter images HTTP ${res.status}: ${text.slice(0, 300)}`,
       });
@@ -429,6 +568,38 @@ export class OpenRouterProvider implements AiProvider {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Detect OpenRouter's HTTP 402 "in-flight budget" body — the account still
+ * HAS credits, but the current in-flight requests would exceed the available
+ * budget. Observed shape (metadata carries both markers):
+ *   {"error":{"message":"This request would exceed your available credits
+ *    given your current in-flight requests...","code":402,
+ *    "metadata":{"reason":"in_flight_budget_exhausted",
+ *                "limit_source":"openrouter_in_flight_budget"}}}
+ * A regular 402 (genuinely out of credits — no in-flight marker anywhere) does
+ * NOT match, so it keeps its normal retryable-failure behavior.
+ */
+export function isInFlightBudgetBody(text: string): boolean {
+  try {
+    const json = JSON.parse(text) as {
+      error?: {
+        message?: string;
+        metadata?: { reason?: string; limit_source?: string };
+      };
+    };
+    const reason = json.error?.metadata?.reason ?? "";
+    const limitSource = json.error?.metadata?.limit_source ?? "";
+    if (reason.includes("in_flight")) return true;
+    if (limitSource.includes("in_flight")) return true;
+    if (typeof json.error?.message === "string" && /in-flight/i.test(json.error.message)) {
+      return true;
+    }
+  } catch {
+    // Not JSON — fall through to the raw-text heuristic below.
+  }
+  return /in[-_ ]flight/i.test(text);
+}
 
 /**
  * The montage_image user prompt (chat/completions + images endpoint):
