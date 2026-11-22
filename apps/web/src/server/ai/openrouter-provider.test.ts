@@ -26,12 +26,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AiTaskError } from "./errors";
 import { PromptTemplates } from "./templates";
 import {
+  DEFAULT_AI_MAX_CONCURRENT_IMAGES,
   DEFAULT_AI_MAX_CONCURRENT_REQUESTS,
   isInFlightBudgetBody,
   montageImagePrompt,
   OpenRouterProvider,
+  openrouterImageSemaphore,
   openrouterSemaphore,
   parseRetryAfterSeconds,
+  resolveMaxConcurrentImages,
   resolveMaxConcurrentRequests,
   Semaphore,
 } from "./openrouter-provider";
@@ -615,5 +618,207 @@ describe("OpenRouter outbound semaphore (AI_MAX_CONCURRENT_REQUESTS)", () => {
     expect(maxInFlight).toBe(2);
     // Reset the shared module-level semaphore so later tests keep the default.
     openrouterSemaphore.setLimit(DEFAULT_AI_MAX_CONCURRENT_REQUESTS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Images-endpoint semaphore (AI_MAX_CONCURRENT_IMAGES) — Change: separate cap
+// ---------------------------------------------------------------------------
+
+/** TEXT_CFG: a fast text task with no schema so any JSON body succeeds. */
+const TEXT_CFG = {
+  name: "moderation" as const,
+  primary: "google/gemini-2.5-flash",
+  fallbacks: [],
+  temperature: 0,
+  maxTokens: 100,
+  timeoutMs: 8_000,
+  retries: 1,
+  structured: null,
+  enabled: true,
+};
+
+/** Manual (deferred) fetch. Image tasks (modalities present) get the prod
+ *  404 on chat/completions so they reroute to POST /images (the endpoint the
+ *  images semaphore guards); gated calls (the /images endpoint itself + text
+ *  tasks) park in-flight until the test flushes the gate. */
+function gatedFetch(onCall?: (url: string, body: Record<string, unknown>) => void) {
+  const gates: (() => void)[] = [];
+  let open = false;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    const urlStr = String(url);
+    onCall?.(urlStr, body);
+    // Image task on chat/completions → the EXACT prod 404 body that makes the
+    // provider reroute the same attempt to the unified images endpoint.
+    if (urlStr.endsWith("/chat/completions") && Array.isArray(body.modalities)) {
+      return jsonResponse(JSON.parse(PROD_404_BODY), 404);
+    }
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    if (!open) {
+      await new Promise<void>((resolve) => gates.push(resolve));
+    }
+    inFlight -= 1;
+    if (urlStr.endsWith("/images")) {
+      return jsonResponse({ data: [{ b64_json: "QUJD", media_type: "image/png" }] });
+    }
+    return jsonResponse({ choices: [{ message: { content: "{}" } }] });
+  }) as typeof fetch;
+  return {
+    fetchImpl,
+    /** Open every pending request's gate AND let all future gated calls
+     *  through immediately (a one-time latch — chained semaphore admissions
+     *  must never park on a gate nobody will open again). */
+    flush: () => {
+      open = true;
+      while (gates.length) gates.shift()!();
+    },
+    get maxInFlight() { return maxInFlight; },
+  };
+}
+
+describe("OpenRouter images semaphore (AI_MAX_CONCURRENT_IMAGES)", () => {
+  it("resolveMaxConcurrentImages: absent/invalid → 3, valid wins, always clamped to the overall cap", () => {
+    expect(DEFAULT_AI_MAX_CONCURRENT_IMAGES).toBe(3);
+    const env = (over: Record<string, string>) => over as unknown as NodeJS.ProcessEnv;
+    // Absent / invalid → default 3.
+    expect(resolveMaxConcurrentImages(undefined)).toBe(3);
+    expect(resolveMaxConcurrentImages(env({}))).toBe(3);
+    expect(resolveMaxConcurrentImages(env({ AI_MAX_CONCURRENT_IMAGES: "" }))).toBe(3);
+    expect(resolveMaxConcurrentImages(env({ AI_MAX_CONCURRENT_IMAGES: "0" }))).toBe(3);
+    expect(resolveMaxConcurrentImages(env({ AI_MAX_CONCURRENT_IMAGES: "-2" }))).toBe(3);
+    expect(resolveMaxConcurrentImages(env({ AI_MAX_CONCURRENT_IMAGES: "2.5" }))).toBe(3);
+    expect(resolveMaxConcurrentImages(env({ AI_MAX_CONCURRENT_IMAGES: "nan" }))).toBe(3);
+    // A valid integer wins.
+    expect(resolveMaxConcurrentImages(env({ AI_MAX_CONCURRENT_IMAGES: "5" }))).toBe(5);
+    // Clamped to ≤ the overall cap when the image cap exceeds it.
+    expect(
+      resolveMaxConcurrentImages(env({ AI_MAX_CONCURRENT_IMAGES: "10", AI_MAX_CONCURRENT_REQUESTS: "6" })),
+    ).toBe(6);
+    // Clamped even when the image value is absent but the overall is tiny
+    // (preserves: image in-flight ≤ total in-flight).
+    expect(resolveMaxConcurrentImages(env({ AI_MAX_CONCURRENT_REQUESTS: "2" }))).toBe(2);
+  });
+
+  it("provider constructor applies the env image cap to the module-level images semaphore", () => {
+    const { fetchImpl } = gatedFetch();
+    new OpenRouterProvider({
+      apiKey: "k",
+      fetchImpl,
+      env: {
+        AI_MAX_CONCURRENT_IMAGES: "2",
+        AI_MAX_CONCURRENT_REQUESTS: "6",
+      } as unknown as NodeJS.ProcessEnv,
+    });
+    expect(openrouterImageSemaphore.capacity).toBe(2);
+    expect(openrouterSemaphore.capacity).toBe(6);
+    // Self-healing: constructing without env restores BOTH defaults.
+    new OpenRouterProvider({ apiKey: "k", fetchImpl });
+    expect(openrouterImageSemaphore.capacity).toBe(DEFAULT_AI_MAX_CONCURRENT_IMAGES);
+    expect(openrouterSemaphore.capacity).toBe(DEFAULT_AI_MAX_CONCURRENT_REQUESTS);
+  });
+
+  it("10 concurrent image calls with image cap 3 → max 3 concurrent image fetches", async () => {
+    const imagesStarted: number[] = [];
+    const gate = gatedFetch((url) => {
+      if (url.endsWith("/images")) imagesStarted.push(Date.now());
+    });
+    const provider = new OpenRouterProvider({
+      apiKey: "k",
+      fetchImpl: gate.fetchImpl,
+      env: {
+        AI_MAX_CONCURRENT_IMAGES: "3",
+        AI_MAX_CONCURRENT_REQUESTS: "6",
+      } as unknown as NodeJS.ProcessEnv,
+    });
+    const runs = Array.from({ length: 10 }, () =>
+      provider.run("item_image", ITEM_INPUT, IMAGE_CFG),
+    );
+    // Let the acquire microtasks settle, then count what actually started.
+    await new Promise((r) => setTimeout(r, 25));
+    expect(imagesStarted).toHaveLength(3); // only 3 /images requests in flight
+    expect(gate.maxInFlight).toBe(3);
+    gate.flush();
+    const results = await Promise.all(runs);
+    expect(results).toHaveLength(10);
+    expect(gate.maxInFlight).toBe(3); // never exceeded across the whole run
+  });
+
+  it("text calls proceed while 3 image calls are held (text slots never starve)", async () => {
+    const gate = gatedFetch();
+    new OpenRouterProvider({
+      apiKey: "k",
+      fetchImpl: gate.fetchImpl,
+      templates: textTemplates(),
+      env: {
+        AI_MAX_CONCURRENT_IMAGES: "3",
+        AI_MAX_CONCURRENT_REQUESTS: "6",
+      } as unknown as NodeJS.ProcessEnv,
+    });
+    const provider = new OpenRouterProvider({
+      apiKey: "k",
+      fetchImpl: gate.fetchImpl,
+      templates: textTemplates(),
+    });
+    // Hold 3 image calls (they occupy 3 of the 6 global slots).
+    const imageRuns = Array.from({ length: 3 }, () =>
+      provider.run("item_image", ITEM_INPUT, IMAGE_CFG),
+    );
+    await new Promise((r) => setTimeout(r, 25));
+    // Text calls must still go through while the images are held.
+    const textRuns = Array.from({ length: 3 }, () =>
+      provider.run("moderation", { text: "cat" }, TEXT_CFG),
+    );
+    await new Promise((r) => setTimeout(r, 25));
+    expect(gate.maxInFlight).toBe(6); // 3 held images + 3 text calls in flight
+    gate.flush();
+    await Promise.all([...imageRuns, ...textRuns]);
+    // Reset BOTH shared module-level semaphores for later tests.
+    openrouterSemaphore.setLimit(DEFAULT_AI_MAX_CONCURRENT_REQUESTS);
+    openrouterImageSemaphore.setLimit(DEFAULT_AI_MAX_CONCURRENT_IMAGES);
+  });
+
+  it("image calls release BOTH semaphores (total ≤ overall cap) even when the request throws", async () => {
+    let imageCalls = 0;
+    // chat/completions 404s (image reroute), then the /images fetch itself
+    // fails — each run must acquire AND release BOTH semaphores.
+    const failFetch = (async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.endsWith("/images")) {
+        imageCalls += 1;
+        throw new Error("network down");
+      }
+      return jsonResponse(JSON.parse(PROD_404_BODY), 404);
+    }) as typeof fetch;
+    new OpenRouterProvider({
+      apiKey: "k",
+      fetchImpl: failFetch,
+      env: {
+        AI_MAX_CONCURRENT_IMAGES: "3",
+        AI_MAX_CONCURRENT_REQUESTS: "6",
+      } as unknown as NodeJS.ProcessEnv,
+    });
+    const provider = new OpenRouterProvider({ apiKey: "k", fetchImpl: failFetch });
+    // 10 failing image calls must not leak slots from either semaphore.
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () =>
+        provider.run("item_image", ITEM_INPUT, IMAGE_CFG).catch((e: unknown) => e),
+      ),
+    );
+    expect(imageCalls).toBe(10);
+    expect(results.every((e) => e instanceof Error)).toBe(true);
+    // No deadlock, no leaked slots: a fresh image call goes straight through.
+    const gate = gatedFetch();
+    const probe = new OpenRouterProvider({ apiKey: "k", fetchImpl: gate.fetchImpl });
+    const done = probe.run("item_image", ITEM_INPUT, IMAGE_CFG);
+    await new Promise((r) => setTimeout(r, 25));
+    expect(gate.maxInFlight).toBe(1);
+    gate.flush();
+    await done;
+    openrouterSemaphore.setLimit(DEFAULT_AI_MAX_CONCURRENT_REQUESTS);
+    openrouterImageSemaphore.setLimit(DEFAULT_AI_MAX_CONCURRENT_IMAGES);
   });
 });

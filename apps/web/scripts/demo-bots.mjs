@@ -25,14 +25,18 @@
  *
  * Exit 0 + summary when the game reaches RESULTS; exit 1 on any ack failure
  * or deadline miss (per-step deadline: --step-timeout-ms, default AUTO =
- * max(120s, 0.3s × expected players) for fresh games / 120s for --code runs;
- * 300s overall).
+ * max(120s, 12s × expected players) for fresh games / 120s for --code runs;
+ * overall = max(300s, 2 × step deadline)).
  *
  * Why the step deadline scales: with many players against a LIVE AI server a
  * single step (e.g. "waiting for items READY") can legitimately take many
  * minutes — every generation may hit OpenRouter backoffs (Retry-After waits up
- * to 120s each). The default auto-scales as 3000ms × (teams × players/team),
- * keeping the 120s floor for small games; pass --step-timeout-ms to override.
+ * to 120s each), and the images endpoint runs under its own concurrency cap
+ * (AI_MAX_CONCURRENT_IMAGES, default 3), so the 100 stickers of a 10×10 game
+ * queue behind ~3 in-flight image generations at a time. The default
+ * auto-scales as 12000ms × (teams × players/team), keeping the 120s floor for
+ * small games; a 10×10 game gets 1200s (20 min). Pass --step-timeout-ms to
+ * override.
  */
 import { io } from "socket.io-client";
 
@@ -84,17 +88,22 @@ if (OPTS.submitGapMs <= 5000) {
 // Deadlines + diagnostics
 // ---------------------------------------------------------------------------
 // Per-step deadline: 120s floor for small games; for fresh games it auto-
-// scales as 3000ms × expected players (teams × players/team → a 10×10 game
-// gets 300s) because big live-AI games spend minutes per step on AI backoffs.
-// Joining an existing game (--code) keeps the 120s default — the size is only
-// known after joining — unless --step-timeout-ms is passed explicitly.
+// scales as 12000ms × expected players (teams × players/team → a 10×10 game
+// gets 1200s = 20 min) because big live-AI games spend many minutes per step
+// on image generations (own concurrency cap + 402 Retry-After backoffs up to
+// 120s each). Joining an existing game (--code) keeps the 120s default — the
+// size is only known after joining — unless --step-timeout-ms is passed
+// explicitly.
 const STEP_TIMEOUT_MS =
   OPTS.stepTimeoutMs === "auto"
     ? OPTS.code
       ? 120_000
-      : Math.max(120_000, 3000 * (OPTS.teamCount * OPTS.playersPerTeam))
+      : Math.max(120_000, 12_000 * (OPTS.teamCount * OPTS.playersPerTeam))
     : Number(OPTS.stepTimeoutMs);
-const OVERALL_TIMEOUT_MS = 300_000;
+// Overall deadline scales with the step deadline (otherwise the 300s default
+// would cut every big live-AI run short long before its 1200s step budget);
+// small games keep the original 300s floor.
+const OVERALL_TIMEOUT_MS = Math.max(300_000, 2 * STEP_TIMEOUT_MS);
 const SUBMIT_MAX_RETRIES = 12;
 
 const URL = OPTS.url;
@@ -271,7 +280,7 @@ async function submitScore(sock, bot, cardId, score) {
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
-  log(`demo bots → ${URL} (teams=${OPTS.teamCount}, players/team=${OPTS.playersPerTeam}, prompts/bot=${OPTS.promptsPerBot}, gmDrive=${OPTS.gmDrive}, rate=${OPTS.rate}, stepTimeout=${STEP_TIMEOUT_MS / 1000}s)`);
+  log(`demo bots → ${URL} (teams=${OPTS.teamCount}, players/team=${OPTS.playersPerTeam}, prompts/bot=${OPTS.promptsPerBot}, gmDrive=${OPTS.gmDrive}, rate=${OPTS.rate}, stepTimeout=${STEP_TIMEOUT_MS / 1000}s, overallTimeout=${OVERALL_TIMEOUT_MS / 1000}s)`);
 
   // 1) Game: create (POST /api/games → 201 with ALL joinTokens; greetings are
   //    auto-generated fire-and-forget) or join an existing one

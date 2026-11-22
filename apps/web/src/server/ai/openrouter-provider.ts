@@ -24,7 +24,7 @@ import { validateTaskOutput } from "./provider";
 const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 
 // ---------------------------------------------------------------------------
-// Global outbound-concurrency cap (semaphore)
+// Outbound-concurrency caps (semaphores: 1 global + 1 images-dedicated)
 // ---------------------------------------------------------------------------
 
 /**
@@ -39,8 +39,24 @@ const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
  * invalid, or < 1 → the default). The cap is GLOBAL: one module-level
  * semaphore shared by every OpenRouterProvider instance, because the credit
  * budget is per-account, not per-provider-instance.
+ *
+ * TWO SEMAPHORES (total ≤ overall AND images ≤ image cap): image requests
+ * are long (tens of seconds to minutes, plus 402 Retry-After backoffs), text
+ * requests are fast. A single shared cap let 6 slow image calls starve every
+ * text call (moderation/validation/layout) — and under saturation those text
+ * calls then 402'd too, which fails moderation CLOSED and loses stickers.
+ * Structure chosen: the images endpoint additionally acquires a DEDICATED
+ * images semaphore (see openrouterImageSemaphore); text calls take only the
+ * global one. Lock ordering is always images → global (never the reverse),
+ * so no circular wait can form → deadlock-free (documented at the call site).
  */
 export const DEFAULT_AI_MAX_CONCURRENT_REQUESTS = 6;
+
+/** Default cap on CONCURRENT in-flight calls to the OpenRouter IMAGES
+ *  endpoint (POST /api/v1/images) — configurable via AI_MAX_CONCURRENT_IMAGES
+ *  (absent/invalid → 3; clamped to ≤ the overall AI_MAX_CONCURRENT_REQUESTS
+ *  cap so the image cap can never widen the total in-flight budget). */
+export const DEFAULT_AI_MAX_CONCURRENT_IMAGES = 3;
 
 /** A tiny promise-queue semaphore (no dependency). acquire() resolves once a
  *  slot is free and returns the release callback; ALWAYS call release in a
@@ -103,6 +119,21 @@ export function resolveMaxConcurrentRequests(env?: NodeJS.ProcessEnv): number {
   return toPositiveInt(parsed, DEFAULT_AI_MAX_CONCURRENT_REQUESTS);
 }
 
+/** AI_MAX_CONCURRENT_IMAGES parsing, generalized from
+ *  resolveMaxConcurrentRequests: an integer ≥ 1 wins; anything else
+ *  (absent, empty, float, 0, negative, garbage) → the default (3). The result
+ *  is ALWAYS clamped to ≤ the overall cap (resolveMaxConcurrentRequests) so
+ *  the total in-flight invariant (image in-flight ≤ total in-flight) holds
+ *  even when only one of the two env vars is set explicitly. */
+export function resolveMaxConcurrentImages(env?: NodeJS.ProcessEnv): number {
+  const raw = env?.AI_MAX_CONCURRENT_IMAGES;
+  const requested =
+    raw === undefined || raw === ""
+      ? DEFAULT_AI_MAX_CONCURRENT_IMAGES
+      : toPositiveInt(Number(raw), DEFAULT_AI_MAX_CONCURRENT_IMAGES);
+  return Math.min(requested, resolveMaxConcurrentRequests(env));
+}
+
 function toPositiveInt(value: number, fallback: number): number {
   return Number.isInteger(value) && value >= 1 ? value : fallback;
 }
@@ -113,6 +144,14 @@ function toPositiveInt(value: number, fallback: number): number {
  *  built with, so the process-wide cap always mirrors the boot-time env.
  *  Exported for tests (the provider constructor is what mutates it). */
 export const openrouterSemaphore = new Semaphore(DEFAULT_AI_MAX_CONCURRENT_REQUESTS);
+
+/** DEDICATED semaphore for the images endpoint (POST /api/v1/images) only.
+ *  Image calls acquire THIS FIRST, then openrouterSemaphore (global); text
+ *  calls acquire ONLY the global one. Same construction/reset contract as
+ *  the global semaphore (the provider constructor mutates it from the env).
+ *  LOCK ORDERING: images → global, always, never the reverse → no circular
+ *  wait → deadlock-free. */
+export const openrouterImageSemaphore = new Semaphore(DEFAULT_AI_MAX_CONCURRENT_IMAGES);
 
 export interface OpenRouterProviderOptions {
   apiKey: string;
@@ -190,11 +229,12 @@ export class OpenRouterProvider implements AiProvider {
     this.baseUrl = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch;
     this.templates = opts.templates ?? new PromptTemplates();
-    // Env-configured concurrency cap is read HERE (where the provider is
+    // Env-configured concurrency caps are read HERE (where the provider is
     // constructed), mirroring how other env config is read at construction.
-    // Applied unconditionally so the global cap always mirrors the most
+    // Applied unconditionally so the global caps always mirror the most
     // recent construction env (the server constructs exactly once at boot).
     openrouterSemaphore.setLimit(resolveMaxConcurrentRequests(opts.env));
+    openrouterImageSemaphore.setLimit(resolveMaxConcurrentImages(opts.env));
   }
 
   /** Re-read prompt templates from disk (e.g. after editing config/prompts). */
@@ -427,25 +467,41 @@ export class OpenRouterProvider implements AiProvider {
     // that the bottom-anchored normalization crop stays minimal.
     const aspectRatio = task === "montage_image" ? "5:7" : undefined;
     let res: Response;
-    // Global concurrency cap — same semaphore as chat/completions.
-    const release = await openrouterSemaphore.acquire();
+    // CONCURRENCY CAP (two semaphores, images calls take BOTH). LOCK ORDERING
+    // (deadlock-free by construction): image calls acquire the IMAGES
+    // semaphore FIRST, then the GLOBAL one, and release in REVERSE order
+    // (global, then images), each in its own finally. Text calls acquire only
+    // the global semaphore. Every multi-acquire path uses the same order
+    // (images → global, never the reverse) and every holder releases in a
+    // finally, so no circular wait can ever form. Invariants: image in-flight
+    // ≤ AI_MAX_CONCURRENT_IMAGES (3) AND total in-flight ≤
+    // AI_MAX_CONCURRENT_REQUESTS (6) — while 3 images grind slowly, text
+    // calls (validation/moderation/montage_prompt/layout) always have ≥ 3
+    // global slots left. The per-attempt timeout clock starts only once BOTH
+    // slots are acquired (queue waiting must not eat the timeout).
+    const releaseImages = await openrouterImageSemaphore.acquire();
     try {
-      res = await this.fetchImpl(`${this.baseUrl}/images`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": "https://cardcrafters.local",
-          "X-Title": "Card Crafters",
-          "User-Agent": "CardCrafters/0.1 (+https://cardcrafters.local)",
-        },
-        body: JSON.stringify(
-          aspectRatio
-            ? { model: cfg.primary, prompt, aspect_ratio: aspectRatio }
-            : { model: cfg.primary, prompt },
-        ),
-        signal: AbortSignal.timeout(cfg.timeoutMs),
-      });
+      const releaseGlobal = await openrouterSemaphore.acquire();
+      try {
+        res = await this.fetchImpl(`${this.baseUrl}/images`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://cardcrafters.local",
+            "X-Title": "Card Crafters",
+            "User-Agent": "CardCrafters/0.1 (+https://cardcrafters.local)",
+          },
+          body: JSON.stringify(
+            aspectRatio
+              ? { model: cfg.primary, prompt, aspect_ratio: aspectRatio }
+              : { model: cfg.primary, prompt },
+          ),
+          signal: AbortSignal.timeout(cfg.timeoutMs),
+        });
+      } finally {
+        releaseGlobal(); // reverse order: global released before images
+      }
     } catch (cause) {
       throw new AiTaskError({
         task,
@@ -455,7 +511,7 @@ export class OpenRouterProvider implements AiProvider {
         message: `openrouter images request failed: ${(cause as Error).message}`,
       });
     } finally {
-      release();
+      releaseImages();
     }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
