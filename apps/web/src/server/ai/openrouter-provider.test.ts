@@ -23,6 +23,7 @@ import path from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { AiTaskError } from "./errors";
 import { PromptTemplates } from "./templates";
 import {
   DEFAULT_AI_MAX_CONCURRENT_REQUESTS,
@@ -30,6 +31,7 @@ import {
   montageImagePrompt,
   OpenRouterProvider,
   openrouterSemaphore,
+  parseRetryAfterSeconds,
   resolveMaxConcurrentRequests,
   Semaphore,
 } from "./openrouter-provider";
@@ -414,6 +416,86 @@ describe("OpenRouterProvider — 402 in-flight budget (typed marker)", () => {
     const provider = new OpenRouterProvider({ apiKey: "k", fetchImpl });
     await expect(provider.run("item_image", ITEM_INPUT, IMAGE_CFG)).rejects.toMatchObject({
       inFlightBudget: true,
+      message: expect.stringContaining("openrouter images HTTP 402"),
+    });
+  });
+
+  it("402 in-flight with a Retry-After header → retryAfterSeconds parsed from the response headers", async () => {
+    const { fetchImpl } = scriptedFetch([
+      () =>
+        new Response(PROD_402_IN_FLIGHT_BODY, {
+          status: 402,
+          headers: { "content-type": "application/json", "RETRY-AFTER": "10" },
+        }),
+    ]);
+    const provider = new OpenRouterProvider({ apiKey: "k", fetchImpl });
+    await expect(provider.run("item_image", ITEM_INPUT, IMAGE_CFG)).rejects.toMatchObject({
+      inFlightBudget: true,
+      retryAfterSeconds: 10,
+    });
+  });
+
+  it("402 in-flight Retry-After is case-insensitive (lowercase header) and absent → undefined", async () => {
+    const { fetchImpl } = scriptedFetch([
+      () =>
+        new Response(PROD_402_IN_FLIGHT_BODY, {
+          status: 402,
+          headers: { "content-type": "application/json", "retry-after": "7" },
+        }),
+      () => jsonResponse(JSON.parse(PROD_402_IN_FLIGHT_BODY), 402),
+    ]);
+    const provider = new OpenRouterProvider({ apiKey: "k", fetchImpl });
+    const err1 = await provider.run("item_image", ITEM_INPUT, IMAGE_CFG).catch((e: unknown) => e as Error);
+    expect(err1).toMatchObject({ inFlightBudget: true, retryAfterSeconds: 7 });
+    const err2 = await provider.run("item_image", ITEM_INPUT, IMAGE_CFG).catch((e: unknown) => e as Error);
+    expect(err2).toMatchObject({ inFlightBudget: true });
+    expect((err2 as AiTaskError).retryAfterSeconds).toBeUndefined();
+  });
+
+  it("402 in-flight with garbage Retry-After values → header ignored (retryAfterSeconds undefined)", async () => {
+    for (const garbage of ["soon", "1.5", "-3", "", "10s", "NaN"]) {
+      const { fetchImpl } = scriptedFetch([
+        () =>
+          new Response(PROD_402_IN_FLIGHT_BODY, {
+            status: 402,
+            headers: { "content-type": "application/json", "retry-after": garbage },
+          }),
+      ]);
+      const provider = new OpenRouterProvider({ apiKey: "k", fetchImpl });
+      const err = (await provider.run("item_image", ITEM_INPUT, IMAGE_CFG).catch(
+        (e: unknown) => e as Error,
+      )) as AiTaskError;
+      expect(err.inFlightBudget).toBe(true);
+      expect(err.retryAfterSeconds, `retry-after=${JSON.stringify(garbage)}`).toBeUndefined();
+    }
+  });
+
+  it("parseRetryAfterSeconds: integer seconds only, case-insensitive, garbage/absent → undefined", () => {
+    const resWith = (headers: Record<string, string>) =>
+      new Response("x", { status: 402, headers });
+    expect(parseRetryAfterSeconds(resWith({ "Retry-After": "12" }))).toBe(12);
+    expect(parseRetryAfterSeconds(resWith({ "retry-after": " 30 " }))).toBe(30);
+    expect(parseRetryAfterSeconds(resWith({ "RETRY-AFTER": "0" }))).toBe(0);
+    expect(parseRetryAfterSeconds(resWith({ "retry-after": "soon" }))).toBeUndefined();
+    expect(parseRetryAfterSeconds(resWith({ "retry-after": "2.5" }))).toBeUndefined();
+    expect(parseRetryAfterSeconds(resWith({ "retry-after": "-5" }))).toBeUndefined();
+    expect(parseRetryAfterSeconds(resWith({ "retry-after": "" }))).toBeUndefined();
+    expect(parseRetryAfterSeconds(resWith({ "x-other": "1" }))).toBeUndefined();
+  });
+
+  it("images endpoint 402 in-flight with Retry-After → same typed marker + parsed header", async () => {
+    const { fetchImpl } = scriptedFetch([
+      () => jsonResponse(JSON.parse(PROD_404_BODY), 404),
+      () =>
+        new Response(PROD_402_IN_FLIGHT_BODY, {
+          status: 402,
+          headers: { "content-type": "application/json", "retry-after": "20" },
+        }),
+    ]);
+    const provider = new OpenRouterProvider({ apiKey: "k", fetchImpl });
+    await expect(provider.run("item_image", ITEM_INPUT, IMAGE_CFG)).rejects.toMatchObject({
+      inFlightBudget: true,
+      retryAfterSeconds: 20,
       message: expect.stringContaining("openrouter images HTTP 402"),
     });
   });

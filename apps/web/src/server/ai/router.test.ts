@@ -98,10 +98,13 @@ async function mkOpenRouterRouter(
 const PROD_402_IN_FLIGHT_BODY =
   '{"error":{"message":"This request would exceed your available credits given your current in-flight requests...","code":402,"metadata":{"reason":"in_flight_budget_exhausted","limit_source":"openrouter_in_flight_budget"}}}';
 
-function inFlight402Res(): Response {
+function inFlight402Res(retryAfter?: string): Response {
   return new Response(PROD_402_IN_FLIGHT_BODY, {
     status: 402,
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(retryAfter !== undefined ? { "retry-after": retryAfter } : {}),
+    },
   });
 }
 
@@ -331,6 +334,42 @@ describe("AiRouter — openrouter (mocked fetch)", () => {
     // In-flight waits do NOT count as failed attempts (retries stays 0).
     expect(rows.map((r) => r.retries)).toEqual([0, 0, 0]);
     expect(rows[2]!.fallbackUsed).toBe(false);
+  });
+
+  it("402 in-flight with Retry-After: 10 → the server hint is honored: first wait ≥10s", async () => {
+    let n = 0;
+    const waits: number[] = [];
+    const primary = CONFIG.prompt_validation.primary;
+    const { router, models, gameId } = await mkOpenRouterRouter(
+      () => {
+        n += 1;
+        return n === 1 ? inFlight402Res("10") : completionRes(VALID_VALIDATION);
+      },
+      { sleepMs: async (ms) => { waits.push(ms); } },
+    );
+    const res = await router.run("prompt_validation", { prompt: "big red balloon" }, { gameId });
+    expect(res.data).toEqual(VALID_VALIDATION);
+    expect(models()).toEqual([primary, primary]);
+    // Retry-After 10 > planned 4 → the hint wins (never wait LESS than planned,
+    // but a LONGER hint is respected).
+    expect(waits[0]).toBeGreaterThanOrEqual(10_000);
+    expect(waits).toEqual([10_000]);
+  });
+
+  it("402 in-flight with Retry-After: 1 → max semantics: planned 4s ladder wins over the short hint", async () => {
+    let n = 0;
+    const waits: number[] = [];
+    const { router, gameId } = await mkOpenRouterRouter(
+      () => {
+        n += 1;
+        return n === 1 ? inFlight402Res("1") : completionRes(VALID_VALIDATION);
+      },
+      { sleepMs: async (ms) => { waits.push(ms); } },
+    );
+    const res = await router.run("prompt_validation", { prompt: "x" }, { gameId });
+    expect(res.data).toEqual(VALID_VALIDATION);
+    // A hint of 1s must NOT defeat the settle-time intent: planned 4s ≥ hint.
+    expect(waits).toEqual([4000]);
   });
 
   it("regular 402 (no in-flight marker) → fails fast as before: no waits, burns attempts + fallbacks", async () => {

@@ -305,6 +305,7 @@ export class OpenRouterProvider implements AiProvider {
           model: cfg.primary,
           retryable: true,
           inFlightBudget: true,
+          retryAfterSeconds: parseRetryAfterSeconds(res),
           message: `openrouter HTTP 402 (in-flight budget exhausted): ${text.slice(0, 300)}`,
         });
       }
@@ -466,6 +467,7 @@ export class OpenRouterProvider implements AiProvider {
           model: cfg.primary,
           retryable: true,
           inFlightBudget: true,
+          retryAfterSeconds: parseRetryAfterSeconds(res),
           message: `openrouter images HTTP 402 (in-flight budget exhausted): ${text.slice(0, 300)}`,
         });
       }
@@ -599,6 +601,24 @@ export function isInFlightBudgetBody(text: string): boolean {
     // Not JSON — fall through to the raw-text heuristic below.
   }
   return /in[-_ ]flight/i.test(text);
+}
+
+/**
+ * Parse the standard `Retry-After` response header (OpenRouter MAY send it on
+ * a 402 in-flight response) as integer seconds. `Headers.get` is already
+ * case-insensitive per the Fetch spec, so "Retry-After"/"retry-after"/
+ * "RETRY-AFTER" all match. Absent, empty, non-integer ("soon", "1.5"),
+ * negative, or otherwise garbage values are IGNORED (→ undefined) so the
+ * router falls back to its own planned backoff ladder. HTTP-date forms are
+ * deliberately not supported: we only honor the plain integer-seconds form.
+ */
+export function parseRetryAfterSeconds(res: Response): number | undefined {
+  const raw = res.headers.get("retry-after");
+  if (raw === null) return undefined;
+  const trimmed = raw.trim();
+  if (trimmed === "") return undefined;
+  const parsed = Number(trimmed);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 /**

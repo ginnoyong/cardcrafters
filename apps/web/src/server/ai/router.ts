@@ -93,7 +93,9 @@ export const DEFAULT_IMAGE_CALL_ESTIMATE_USD = 0.05;
  * Backoff schedule (seconds) for OpenRouter's HTTP 402 "in_flight_budget_exhausted"
  * retries: first wait 4s, second 8s, third 12s, then give up waiting and handle
  * the 402 like any other retryable failure. Per-call state (every run() starts
- * fresh at 4s), never global.
+ * fresh at 4s), never global. When the 402 carries a Retry-After header, the
+ * EFFECTIVE wait is max(Retry-After, this ladder value) — the server's hint can
+ * lengthen the wait but never shorten it below the planned settle time.
  */
 export const IN_FLIGHT_BACKOFF_SECONDS = [4, 8, 12] as const;
 /** Max number of 402 in-flight waits per run() before normal failure logic. */
@@ -252,7 +254,9 @@ export class AiRouter {
           // in-flight requests and makes the 402 worse; advancing to the next
           // fallback model does the same. OpenRouter's remedy hint: "Retry
           // after in-flight requests settle." So: back off 4s/8s/12s and retry
-          // the SAME model, up to 3 such waits per run. These waits do NOT
+          // the SAME model, up to 3 such waits per run — and when the 402 also
+          // carries a Retry-After hint, wait max(hint, planned) so the server
+          // can ask for longer, but never for shorter. These waits do NOT
           // consume the regular attempt budget and do NOT advance the
           // fallback chain (documented semantics — the brief allowed up to 3
           // in-flight retries, "2 extra attempts" is the per-model lower
@@ -263,10 +267,19 @@ export class AiRouter {
           // never enters this branch and keeps the existing behavior.
           if (lastError.inFlightBudget && inFlightRetries < MAX_IN_FLIGHT_RETRIES) {
             const k = inFlightRetries + 1;
-            const waitSec = IN_FLIGHT_BACKOFF_SECONDS[inFlightRetries]!;
+            // The 402 may carry a standard Retry-After hint (integer seconds,
+            // parsed by the provider). Honor it, but never wait LESS than the
+            // planned ladder: max(hint, planned) keeps the settle-time intent
+            // intact when the server suggests 0/1s (or sends no header).
+            const plannedSec = IN_FLIGHT_BACKOFF_SECONDS[inFlightRetries]!;
+            const waitSec = Math.max(lastError.retryAfterSeconds ?? 0, plannedSec);
             inFlightRetries += 1;
             console.warn(
-              `[ai-router] 402 in-flight budget hit on ${task} via ${model}, backing off ${waitSec}s (retry ${k}/3)`,
+              `[ai-router] 402 in-flight budget hit on ${task} via ${model}, backing off ${waitSec}s (retry ${k}/3${
+                lastError.retryAfterSeconds !== undefined && waitSec !== plannedSec
+                  ? `, Retry-After ${lastError.retryAfterSeconds}s honored`
+                  : ""
+              })`,
             );
             await this.log(task, model, "ERROR", {
               latencyMs: 0,

@@ -23,6 +23,12 @@ export class AiTaskError extends Error {
    *  limit_source marker) — see the class doc. Only the provider layer sets
    *  this; the router uses it to back off and retry the SAME model. */
   readonly inFlightBudget: boolean;
+  /** Standard `Retry-After` response header (integer seconds) attached by
+   *  OpenRouter to a 402 in-flight response, when present. The provider layer
+   *  parses it (case-insensitive; invalid/absent → undefined); the router
+   *  uses max(retryAfterSeconds, its planned backoff) — the hint can lengthen
+   *  the wait but never shortens it below the planned ladder. */
+  readonly retryAfterSeconds?: number;
 
   constructor(params: {
     task: string;
@@ -30,6 +36,7 @@ export class AiTaskError extends Error {
     cause?: unknown;
     retryable: boolean;
     inFlightBudget?: boolean;
+    retryAfterSeconds?: number;
     message: string;
   }) {
     super(params.message, { cause: params.cause });
@@ -38,6 +45,7 @@ export class AiTaskError extends Error {
     this.model = params.model;
     this.retryable = params.retryable;
     this.inFlightBudget = params.inFlightBudget ?? false;
+    this.retryAfterSeconds = params.retryAfterSeconds;
   }
 }
 
