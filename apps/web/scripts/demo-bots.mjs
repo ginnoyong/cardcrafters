@@ -185,9 +185,17 @@ function waitConnect(sock, name) {
   });
 }
 
-function emitAck(sock, event, payload) {
+const ACK_TIMEOUT_MS = 8_000;
+// player:submitPrompt acks only fire AFTER the server-side pipeline finishes
+// validation + moderation (real AI calls). Under a saturated OpenRouter
+// in-flight budget the router backs off 4/8/12s per 402 before falling
+// through, so a legitimate ack can take a minute+. 8s kills exactly the
+// second-wave prompts — hence the long dedicated budget below.
+const SUBMIT_ACK_TIMEOUT_MS = 180_000;
+
+function emitAck(sock, event, payload, timeoutMs = ACK_TIMEOUT_MS) {
   return new Promise((res, rej) => {
-    const t = setTimeout(() => rej(new Error(`${event} ack timeout`)), 8_000);
+    const t = setTimeout(() => rej(new Error(`${event} ack timeout`)), timeoutMs);
     sock.emit(event, payload, (r) => {
       clearTimeout(t);
       res(r);
@@ -250,7 +258,7 @@ function promptFor(botIndex, attempt) {
 async function submitPrompt(sock, bot, text) {
   for (let attempt = 1; attempt <= SUBMIT_MAX_RETRIES; attempt++) {
     if (deadlineLeft() <= 2_000) fail(`overall deadline hit while bot ${bot.index} submitted "${text}"`);
-    const ack = await emitAck(sock, "player:submitPrompt", { text });
+    const ack = await emitAck(sock, "player:submitPrompt", { text }, SUBMIT_ACK_TIMEOUT_MS);
     if (ack.ok) {
       summaries.stickers++;
       log(`bot ${bot.index} accepted "${text}" (itemId=${ack.itemId}, attempt ${attempt})`);
