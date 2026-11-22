@@ -23,10 +23,19 @@
  * and free. Against a LIVE server the bots spend REAL AI money on every
  * greeting / sticker / montage — keep the bot count small.
  *
- * Exit 0 + summary when the game reaches RESULTS; exit 1 on any ack failure
- * or deadline miss (per-step deadline: --step-timeout-ms, default AUTO =
- * max(120s, 12s × expected players) for fresh games / 120s for --code runs;
- * overall = max(300s, 2 × step deadline)).
+ * CONTENT-LEVEL AI FAILURES ARE NOT FATAL: a prompt rejected with
+ * `validation` / `moderation` / `ai_unavailable` is logged as a warning,
+ * counted in the summary (`rejected`), and the run continues with the bot's
+ * next prompt; sticker generations that come back `item:failed` likewise only
+ * abort the run when NOTHING at all generated (systemic breakage) — the game
+ * itself fully tolerates missing stickers (text-chip fallback cards, montage
+ * renders from prompts). Structural problems (phase acks, socket errors,
+ * timeouts) remain fatal.
+ *
+ * Exit 0 + summary when the game reaches RESULTS; exit 1 on a structural ack
+ * failure or deadline miss (per-step deadline: --step-timeout-ms, default
+ * AUTO = max(120s, 12s × expected players) for fresh games / 120s for --code
+ * runs; overall = max(300s, 2 × step deadline)).
  *
  * Why the step deadline scales: with many players against a LIVE AI server a
  * single step (e.g. "waiting for items READY") can legitimately take many
@@ -115,9 +124,15 @@ const summaries = {
   teams: 0,
   players: 0,
   stickers: 0, // accepted player:submitPrompt acks
+  rejected: 0, // prompts skipped on recoverable acks (validation/moderation/ai_unavailable)
   ratings: 0, // accepted score:submit acks
   standings: null,
 };
+
+/** Content rejections are warn-and-skip, never fatal: under live AI a small
+ *  OpenRouter in-flight pool can 402 on moderation/validation calls, and the
+ *  game fully tolerates missing stickers (text-chip fallback cards). */
+const RECOVERABLE_ACK_CODES = new Set(["validation", "moderation", "ai_unavailable"]);
 
 function log(...args) {
   const line = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
@@ -226,7 +241,11 @@ function promptFor(botIndex, attempt) {
  *   - ack code "card_full"         → the team card hit 25 stickers: stop
  *                                    THIS bot (its remaining prompts are
  *                                    dropped), never fatal for the run.
- * Everything else is fatal (validation / moderation / phase problems).
+ *   - validation / moderation /    → content rejection: log a warning, count
+ *     ai_unavailable                 it in summaries.rejected, move on to the
+ *                                    bot's NEXT prompt — never fatal.
+ * Everything else is fatal (phase_ended / before_theme / kicked /
+ * not_joined / invalid_payload / submit_failed / unknown codes).
  */
 async function submitPrompt(sock, bot, text) {
   for (let attempt = 1; attempt <= SUBMIT_MAX_RETRIES; attempt++) {
@@ -251,6 +270,13 @@ async function submitPrompt(sock, bot, text) {
     if (ack.code === "card_full") {
       log(`bot ${bot.index} card_full — team card hit ${ack.maxItems ?? 25} stickers, stopping this bot`);
       bot.stopped = true;
+      return;
+    }
+    if (RECOVERABLE_ACK_CODES.has(ack.code)) {
+      const reason = ack.reason ?? ack.error ?? ack.code;
+      const fix = ack.exampleFix ? ` (exampleFix: ${JSON.stringify(ack.exampleFix)})` : "";
+      log(`WARNING: bot ${bot.index} prompt "${text}" skipped (${ack.code}): ${reason}${fix} — continuing`);
+      summaries.rejected++;
       return;
     }
     throw new Error(`bot ${bot.index} submit "${text}" rejected: ${JSON.stringify(ack)}`);
@@ -333,6 +359,9 @@ async function main() {
     gm.on("phaseChanged", (p) => log(`PHASE → ${p.phase}`));
     gm.on("item:pending", (p) => log(`item:pending ${p.itemId} "${p.promptRaw}" (${p.nickname})`));
     gm.on("item:failed", (p) => {
+      // Same double-room delivery as item:ready — dedupe by itemId so the
+      // settled count (ready + failed vs targetItems) cannot inflate.
+      if (itemFailed.some((f) => f.itemId === p.itemId)) return;
       itemFailed.push(p);
       log(`item:failed ${p.itemId}: ${p.reason}`);
     });
@@ -423,17 +452,22 @@ async function main() {
   );
   log(`build submissions done in ${((Date.now() - buildStart) / 1000).toFixed(1)}s (${summaries.stickers}/${targetItems} accepted)`);
 
-  // 6) Wait for every team's stickers to come out READY (mock mode finishes
-  //    all of them; a real provider needs real time here).
+  // 6) Wait for every team's sticker to SETTLE (ready OR failed — mock mode
+  //    finishes all of them READY; a real provider needs real time here and
+  //    may fail individual stickers, which the game tolerates).
   const itemsStart = Date.now();
-  while (itemsReady.length < targetItems) {
-    stepLeft(itemsStart, "waiting for item:ready targets");
-    if (itemFailed.length > 0 && itemsReady.length + itemFailed.length >= targetItems) {
-      fail(`${itemFailed.length} item(s) FAILED — targets can never be met`);
-    }
+  while (itemsReady.length + itemFailed.length < targetItems) {
+    stepLeft(itemsStart, "waiting for item:ready/item:failed settlements");
     await sleep(250);
   }
-  log(`all ${itemsReady.length} items READY`);
+  if (itemFailed.length > 0) {
+    if (itemsReady.length === 0) {
+      fail(`${itemFailed.length} item(s) FAILED and nothing generated — systemic AI breakage`);
+    }
+    log(`WARNING: ${itemFailed.length} sticker(s) failed AI generation — continuing with ${itemsReady.length}/${targetItems} ready`);
+  } else {
+    log(`all ${itemsReady.length} items READY`);
+  }
 
   // 7) → SCORING. Drive mode ends BUILD early; otherwise the bots wait for
   //    whoever is driving the real GM console.
@@ -505,7 +539,7 @@ async function main() {
   console.log(`game:            ${code}`);
   console.log(`teams:           ${summaries.teams}`);
   console.log(`players:         ${summaries.players}`);
-  console.log(`stickers:        ${summaries.stickers} accepted, ${itemsReady.length} ready, ${itemFailed.length} failed`);
+  console.log(`stickers:        ${summaries.stickers} accepted, ${summaries.rejected} prompts rejected (skipped), ${itemsReady.length} ready, ${itemFailed.length} failed`);
   console.log(`ratings:         ${summaries.ratings}`);
   if (summaries.standings) {
     console.log("final standings (avg desc):");
