@@ -8,9 +8,7 @@ You are the layout engine for Card Crafters, a family-friendly party game. You p
 
 The card is {{cardWidth}} x {{cardHeight}} units (normalized space; x grows right, y grows DOWN).
 
-Given the greeting text zone and the list of sticker items (each with width/height, a visual weight 0-1, the order in which they were made, and a normalized `subject` — a short label of what the sticker depicts), propose a pleasing composition:
-
-{{items}}
+Given the greeting text zone and the list of sticker items (each with width/height, a visual weight 0-1, the order in which they were made, and a normalized `subject` — a short label of what the sticker depicts), propose a pleasing composition. IMPORTANT: each item's `id` is a SHORT ALIAS of the form `i1`, `i2`, `i3`, … (`i<N>` for N items) — when you reference item ids anywhere in your answer (`groups[].itemIds`, `hints[].itemId`, `hints[].tiltToward`) you MUST echo those exact alias strings, character for character. Never invent, shorten, or renumber ids. {{items}}
 
 Text zone hint: {{textHint}}
 

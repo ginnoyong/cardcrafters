@@ -35,6 +35,7 @@ import {
   computeAndPersistLayout,
   createLayoutDebouncer,
   defaultTextZone,
+  remapLayoutHintAliases,
   type LayoutEmit,
 } from "./engine";
 import { scoreLayout } from "./score";
@@ -300,7 +301,14 @@ describe("computeAndPersistLayout (memory repo + mock AI)", () => {
             cardHeight: number;
             items: Array<{ id: string; w: number; h: number; visualWeight: number; orderIndex: number; subject: string }>;
           };
-          fixture = twoDiagonalGroupsFixture(inp);
+          // The engine sends COMPACT ALIASES (i1..iN). Build the fixture over
+          // the aliases, then remap to the REAL ids exactly the way the
+          // engine's remapLayoutHintAliases does — so the direct solve below
+          // (real-id items) exercises the same remapped hints.
+          expect(inp.items.map((it) => it.id)).toEqual(itemIds.map((_, i) => `i${i + 1}`));
+          const aliasFixture = twoDiagonalGroupsFixture(inp);
+          const aliasMap = new Map(itemIds.map((id, i) => [`i${i + 1}`, id] as const));
+          fixture = remapLayoutHintAliases(aliasFixture, aliasMap);
           return { data: fixture };
         }
         return s.ai.run(task, input, opts);
@@ -418,6 +426,133 @@ describe("computeAndPersistLayout (memory repo + mock AI)", () => {
     expect(wins).toBeGreaterThanOrEqual(SEEDS - 1);
   });
 
+});
+
+describe("computeAndPersistLayout — compact AI id aliases (i1..iN)", () => {
+  /** Minimal schema-valid LayoutComposition over the given (alias) ids. */
+  function aliasHints(ids: string[], card: { w: number; h: number }): LayoutComposition {
+    const tz = defaultTextZone({ w: card.w, h: card.h });
+    return layoutCompositionSchema.parse({
+      focalPoint: { x: 0.618 * card.w, y: 0.382 * card.h },
+      groups: [
+        { itemIds: ids, cx: 0.618 * card.w, cy: 0.382 * card.h, spread: 60, subject: "pair" },
+      ],
+      hints: ids.map((id, i) => ({
+        itemId: id,
+        role: i === 0 ? ("focal" as const) : ("support" as const),
+        tiltToward: i === 0 ? ("group_center" as const) : ids[0],
+        importance: (ids.length - i) / ids.length,
+      })),
+      textZone: tz,
+      suggestedGreetingStyle: { font: "Inter", color: "#1f2937", align: "center", y: tz.y + tz.h / 2 },
+    });
+  }
+
+  it("AI input items carry compact aliases (i1..iN), NOT the real cuids", async () => {
+    const s = await setup();
+    const realIds: string[] = [];
+    for (let i = 0; i < 3; i++) realIds.push(await readyItem(s.repo, s.teamId, 1, i));
+
+    let captured: Array<{ id: string; w: number; h: number; visualWeight: number; orderIndex: number; subject: string }> | null = null;
+    const capturingAi: AiRouter = {
+      run: async (task: Parameters<AiRouter["run"]>[0], input: Record<string, unknown>) => {
+        if (task === "layout_composition") {
+          captured = (input as { items: NonNullable<typeof captured> }).items;
+          throw new Error("captured"); // fail AFTER capturing → solver-only fallback
+        }
+        throw new Error(`unexpected task ${task}`);
+      },
+    } as unknown as AiRouter;
+
+    const res = await computeAndPersistLayout({ repo: s.repo, ai: capturingAi, emit: s.emit }, s.gameId, s.teamId);
+    expect(res).not.toBeNull(); // capture failure still lays out solver-only
+    expect(res!.source).toBe("solver");
+    expect(captured).not.toBeNull();
+    expect(captured!.map((i) => i.id)).toEqual(["i1", "i2", "i3"]);
+    // Aliased entries still carry the real per-item fields:
+    expect(captured!.map((i) => i.subject)).toEqual(["sticker 0", "sticker 1", "sticker 2"]);
+    expect(captured!.map((i) => i.orderIndex)).toEqual([0, 1, 2]);
+    expect(captured!.map((i) => i.visualWeight)).toEqual([0.3, 0.4, 0.5]);
+    expect(realIds.every((id) => !captured!.some((i) => i.id === id))).toBe(true);
+  });
+
+  it("remapLayoutHintAliases: known aliases → real cuids (incl. tiltToward, group_center preserved)", () => {
+    const map = new Map([
+      ["i1", "cuid-A"],
+      ["i2", "cuid-B"],
+      ["i3", "cuid-C"],
+    ]);
+    const remapped = remapLayoutHintAliases(aliasHints(["i2", "i3"], { w: 1000, h: 1000 }), map);
+    expect(remapped.groups).toEqual([
+      { ...remapped.groups[0], itemIds: ["cuid-B", "cuid-C"] },
+    ]);
+    expect(remapped.groups[0]!.itemIds).not.toContain("i");
+    expect(remapped.hints).toEqual([
+      // itemId remapped; literal "group_center" tilt kept verbatim.
+      expect.objectContaining({ itemId: "cuid-B", role: "focal", tiltToward: "group_center" }),
+      // itemId AND tiltToward (an alias) remapped.
+      expect.objectContaining({ itemId: "cuid-C", tiltToward: "cuid-B" }),
+    ]);
+    // All hint ids are real ids from the map, never aliases:
+    for (const h of remapped.hints ?? []) expect([...map.values()]).toContain(h.itemId);
+  });
+
+  it("remapLayoutHintAliases: unknown alias → group + hint dropped (no throw), unresolvable tiltToward omitted", () => {
+    const map = new Map([
+      ["i1", "cuid-A"],
+      ["i2", "cuid-B"],
+    ]);
+    // Group mixes a known alias with an unknown one; a hint references an
+    // unknown item; a second hint tilts toward the unknown alias.
+    const parsed = aliasHints(["i1"], { w: 1000, h: 1000 });
+    const remapped = remapLayoutHintAliases(
+      layoutCompositionSchema.parse({
+        ...parsed,
+        groups: [
+          { ...parsed.groups[0], itemIds: ["i1", "i99"] }, // unknown "i99"
+          { ...parsed.groups[0], itemIds: ["i2"] },
+        ],
+        hints: [
+          { itemId: "i1", role: "focal" },
+          { itemId: "i98", role: "support" }, // unknown itemId → dropped
+          { itemId: "i2", tiltToward: "i99" }, // unknown tilt target → tilt omitted
+        ],
+      }),
+      map,
+    );
+    expect(remapped.groups).toHaveLength(1);
+    expect(remapped.groups[0]!.itemIds).toEqual(["cuid-B"]);
+    expect(remapped.hints).toEqual([
+      { itemId: "cuid-A", role: "focal" },
+      { itemId: "cuid-B" }, // no tiltToward
+    ]);
+  });
+
+  it("engine-level: hints echoing aliases (incl. an unknown one) never throw — solver runs on real cuids", async () => {
+    const s = await setup();
+    const realIds: string[] = [];
+    for (let i = 0; i < 3; i++) realIds.push(await readyItem(s.repo, s.teamId, 1, i));
+
+    const aliasAi: AiRouter = {
+      run: async (task: Parameters<AiRouter["run"]>[0], input: Record<string, unknown>) => {
+        if (task !== "layout_composition") throw new Error(`unexpected task ${task}`);
+        const inp = input as { cardWidth: number; cardHeight: number };
+        const hints = aliasHints(["i2", "i3"], { w: inp.cardWidth, h: inp.cardHeight });
+        // One group with an UNKNOWN alias must be dropped silently.
+        hints.groups.unshift({ itemIds: ["i1", "i99"], cx: 200, cy: 200, spread: 60 });
+        return { data: hints };
+      },
+    } as unknown as AiRouter;
+
+    const res = await computeAndPersistLayout({ repo: s.repo, ai: aliasAi, emit: s.emit }, s.gameId, s.teamId);
+    expect(res).not.toBeNull();
+    expect(res!.version).toBe(1);
+    expect([...res!.placements.map((p) => p.itemId)].sort()).toEqual([...realIds].sort());
+    const stored = await s.repo.getLayoutState(s.teamId, 1);
+    expect([...stored!.placements.map((p) => p.itemId)].sort()).toEqual([...realIds].sort());
+    expect(s.events).toHaveLength(1);
+    expect(s.events[0]!.event).toBe("layout:updated");
+  });
 });
 
 describe("createLayoutDebouncer", () => {

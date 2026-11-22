@@ -13,7 +13,11 @@
  *      greeting itself is rendered by the UI (step 4); the solver only needs
  *      the reserved area. (A measured text box can replace this later.)
  *   4. AI hints: ai.run('layout_composition', {cardWidth, cardHeight,
- *      textHint, items:[{id, w, h, visualWeight, orderIndex, subject}]},
+ *      textHint, items:[{id: "i1".."iN", w, h, visualWeight, orderIndex,
+ *      subject}]}, {gameId}) — items carry SHORT aliases (i1..iN; echoing
+ *      long cuids truncates the JSON at small maxTokens); the parsed hints
+ *      are remapped back to real ids by remapLayoutHintAliases (unknown
+ *      aliases drop their group/hint entry — never throws).
  *      {gameId}) — ANY failure (AiTaskError, schema reject, budget) → hints = null and
  *      the layout proceeds solver-only. A layout NEVER fails because of AI.
  *   5. Solve with hints AND without; keep the better scoreLayout score
@@ -30,6 +34,8 @@
  * TODO(layout): greetingStyle is left undefined for now (fixed text zone);
  * wire suggestedGreetingStyle from the hints once the UI consumes it.
  */
+
+import type { z } from "zod";
 
 import {
   layoutCompositionSchema,
@@ -84,6 +90,48 @@ export function defaultTextZone(card: { w: number; h: number }): Rect {
   return { x: 0.1 * card.w, y: 0.06 * card.h, w: 0.8 * card.w, h: 0.16 * card.h };
 }
 
+/**
+ * Remap the AI's parsed hints from compact aliases (`i1..iN`) back to the real
+ * item ids the solver expects.
+ *
+ * Tolerance rules (a dropped entry must NEVER throw — the solver tolerates
+ * missing hints and simply runs with fewer of them):
+ *  - a group containing ANY unknown alias is dropped entirely (partial groups
+ *    would silently mis-group items); ids are de-duplicated within a group;
+ *  - a hint entry with an unknown `itemId` is dropped;
+ *  - a hint's `tiltToward` referencing an unknown alias is removed (the
+ *    literal "group_center" and "facing nothing" are preserved/omitted).
+ * A completely empty groups array is fine: the engine treats it as no
+ * clustering and the hint-driven focal/fallback logic degrades gracefully.
+ */
+/** Exported for tests — pure function, no IO. */
+export function remapLayoutHintAliases(
+  parsed: z.infer<typeof layoutCompositionSchema>,
+  aliasOf: ReadonlyMap<string, string>,
+): z.infer<typeof layoutCompositionSchema> {
+  const groups = parsed.groups.flatMap((g) => {
+    if (g.itemIds.some((id) => !aliasOf.has(id))) return []; // unknown alias → drop group
+    const ids = [...new Set(g.itemIds.map((id) => aliasOf.get(id)!))];
+    return [{ ...g, itemIds: ids }];
+  });
+  const hints = (parsed.hints ?? []).flatMap((h) => {
+    const itemId = aliasOf.get(h.itemId);
+    if (!itemId) return []; // unknown alias → drop hint
+    const tilt = h.tiltToward;
+    if (typeof tilt === "string" && tilt !== "group_center") {
+      const mapped = aliasOf.get(tilt);
+      if (!mapped) {
+        // Unresolvable tilt target → keep the hint, omit just the tilt.
+        const { tiltToward: _omit, ...rest } = h;
+        return [{ ...rest, itemId }];
+      }
+      return [{ ...h, itemId, tiltToward: mapped }];
+    }
+    return [{ ...h, itemId }];
+  });
+  return { ...parsed, groups, hints };
+}
+
 /** Map repo item rows onto the solver's LayoutItem shape (READY + sized only). */
 function toLayoutItems(rows: Array<{
   id: string;
@@ -134,6 +182,26 @@ export async function computeAndPersistLayout(
   const greeting = (await repo.listGreetings(gameId, round)).find((g) => g.teamId === teamId);
 
   // -- AI hints (best-effort; NEVER fail the layout) -------------------------
+  // COMPACT ID ALIASES: the model must echo every item id in its JSON output,
+  // and long cuids (26 chars × 20+ items) blow past the task's maxTokens and
+  // truncate the response (paid calls wasted). So the AI input uses SHORT
+  // aliases `i1..iN`, and the parsed hints are remapped back to real ids
+  // before the solver sees them. Unknown aliases (the model hallucinated an
+  // id) drop that group / hint entry — the solver tolerates missing hints.
+  const aliasOf = new Map<string, string>(); // alias ("i1") → real item id
+  const aiItems = items.map((i, idx) => {
+    const alias = `i${idx + 1}`;
+    aliasOf.set(alias, i.id);
+    return {
+      id: alias,
+      w: i.imgW,
+      h: i.imgH,
+      visualWeight: i.visualWeight,
+      orderIndex: i.orderIndex,
+      subject: i.subject ?? "",
+    };
+  });
+
   let hints = null;
   if (deps.ai) {
     try {
@@ -143,18 +211,11 @@ export async function computeAndPersistLayout(
           cardWidth: card.w,
           cardHeight: card.h,
           textHint: greeting?.text ?? "",
-          items: items.map((i) => ({
-            id: i.id,
-            w: i.imgW,
-            h: i.imgH,
-            visualWeight: i.visualWeight,
-            orderIndex: i.orderIndex,
-            subject: i.subject ?? "",
-          })),
+          items: aiItems,
         },
         { gameId },
       );
-      hints = layoutCompositionSchema.parse(res.data);
+      hints = remapLayoutHintAliases(layoutCompositionSchema.parse(res.data), aliasOf);
     } catch {
       hints = null; // AiTaskError / budget / schema — solver-only fallback
     }
