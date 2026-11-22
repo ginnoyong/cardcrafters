@@ -7,6 +7,7 @@
  *   node apps/web/scripts/demo-bots.mjs --team-count 4 --players-per-team 5
  *   node apps/web/scripts/demo-bots.mjs --code ABC123                      # join an EXISTING game (join links)
  *   node apps/web/scripts/demo-bots.mjs --url http://localhost:3210 --no-gm-drive
+ *   node apps/web/scripts/demo-bots.mjs --step-timeout-ms 600000           # raise per-step deadline
  *
  * Full path exercised: game creation (POST /api/games, theme required) →
  * players join via `join` {role:"player", joinToken, nickname} (the ONLY way
@@ -23,7 +24,15 @@
  * greeting / sticker / montage — keep the bot count small.
  *
  * Exit 0 + summary when the game reaches RESULTS; exit 1 on any ack failure
- * or deadline miss (120s per step, 300s overall).
+ * or deadline miss (per-step deadline: --step-timeout-ms, default AUTO =
+ * max(120s, 0.3s × expected players) for fresh games / 120s for --code runs;
+ * 300s overall).
+ *
+ * Why the step deadline scales: with many players against a LIVE AI server a
+ * single step (e.g. "waiting for items READY") can legitimately take many
+ * minutes — every generation may hit OpenRouter backoffs (Retry-After waits up
+ * to 120s each). The default auto-scales as 3000ms × (teams × players/team),
+ * keeping the 120s floor for small games; pass --step-timeout-ms to override.
  */
 import { io } from "socket.io-client";
 
@@ -53,6 +62,8 @@ const OPTS = {
   promptsPerBot: Number(flagValue("prompts-per-bot", 2)),
   staggerMs: Number(flagValue("stagger-ms", 300)),
   submitGapMs: Number(flagValue("submit-gap-ms", 5200)),
+  // "auto" = scale with expected players (see STEP_TIMEOUT_MS below).
+  stepTimeoutMs: flagValue("step-timeout-ms", "auto"),
   rate: flagBool("rate", true),
   // GM drive defaults ON for a fresh game (the bots own the whole flow) and
   // OFF when joining an existing one (a human GM is driving).
@@ -72,7 +83,17 @@ if (OPTS.submitGapMs <= 5000) {
 // ---------------------------------------------------------------------------
 // Deadlines + diagnostics
 // ---------------------------------------------------------------------------
-const STEP_TIMEOUT_MS = 120_000;
+// Per-step deadline: 120s floor for small games; for fresh games it auto-
+// scales as 3000ms × expected players (teams × players/team → a 10×10 game
+// gets 300s) because big live-AI games spend minutes per step on AI backoffs.
+// Joining an existing game (--code) keeps the 120s default — the size is only
+// known after joining — unless --step-timeout-ms is passed explicitly.
+const STEP_TIMEOUT_MS =
+  OPTS.stepTimeoutMs === "auto"
+    ? OPTS.code
+      ? 120_000
+      : Math.max(120_000, 3000 * (OPTS.teamCount * OPTS.playersPerTeam))
+    : Number(OPTS.stepTimeoutMs);
 const OVERALL_TIMEOUT_MS = 300_000;
 const SUBMIT_MAX_RETRIES = 12;
 
@@ -113,6 +134,11 @@ function fail(message) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Fail fast (before ANY connection) on a non-numeric / non-positive timeout.
+if (!Number.isFinite(STEP_TIMEOUT_MS) || STEP_TIMEOUT_MS <= 0) {
+  fail(`--step-timeout-ms must be a positive number of milliseconds, got "${OPTS.stepTimeoutMs}"`);
+}
 
 // ---------------------------------------------------------------------------
 // Socket helpers (copied from scripts/smoke-build.mjs)
@@ -245,7 +271,7 @@ async function submitScore(sock, bot, cardId, score) {
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
-  log(`demo bots → ${URL} (teams=${OPTS.teamCount}, players/team=${OPTS.playersPerTeam}, prompts/bot=${OPTS.promptsPerBot}, gmDrive=${OPTS.gmDrive}, rate=${OPTS.rate})`);
+  log(`demo bots → ${URL} (teams=${OPTS.teamCount}, players/team=${OPTS.playersPerTeam}, prompts/bot=${OPTS.promptsPerBot}, gmDrive=${OPTS.gmDrive}, rate=${OPTS.rate}, stepTimeout=${STEP_TIMEOUT_MS / 1000}s)`);
 
   // 1) Game: create (POST /api/games → 201 with ALL joinTokens; greetings are
   //    auto-generated fire-and-forget) or join an existing one

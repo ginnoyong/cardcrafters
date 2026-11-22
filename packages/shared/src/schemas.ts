@@ -112,6 +112,9 @@ export type StyleDerivation = z.infer<typeof styleDerivationSchema>;
  * contract: every field here is optional and the whole array is optional, so
  * older outputs (and the pre-hint solver path) keep parsing.
  */
+// Tolerant of unknown keys (default zod strip mode): live models occasionally
+// add fields the contract never promised (e.g. `spread_unit`, `unit`, `notes`)
+// and a strict object would throw the WHOLE response away over harmless extras.
 export const layoutItemHintSchema = z
   .object({
     itemId: z.string().min(1),
@@ -122,8 +125,7 @@ export const layoutItemHintSchema = z
     tiltToward: z.string().min(1).optional(),
     /** Size/importance ordering within the composition, 0..1 (1 = biggest). */
     importance: z.number().finite().min(0).max(1).optional(),
-  })
-  .strict();
+  });
 export type LayoutItemHint = z.infer<typeof layoutItemHintSchema>;
 
 /** Step: layout composition — suggests where to group items on the card. */
@@ -141,8 +143,7 @@ export const layoutCompositionSchema = z
             /** Short label for what the group depicts (e.g. "nature scene").
              *  Optional so pre-upgrade outputs still parse. */
             subject: z.string().min(1).optional(),
-          })
-          .strict(),
+          }),
       )
       .min(1),
     /** Per-item orientation/importance hints (see layoutItemHintSchema).
@@ -152,8 +153,7 @@ export const layoutCompositionSchema = z
       .object({ x: coord, y: coord, w: coord, h: coord })
       .strict(),
     suggestedGreetingStyle: greetingStyleSchema,
-  })
-  .strict();
+  });
 export type LayoutComposition = z.infer<typeof layoutCompositionSchema>;
 
 /**
@@ -204,13 +204,14 @@ export type MontageGrading = z.infer<typeof montageGradingSchema>;
  *    MAX_PAIRWISE_OVERLAP cap by MONTAGE_OVERLAP_RELAX_FACTOR for blended
  *    sticker edges (final pass only — never during BUILD).
  */
+// NOTE: no `.strict()` here either — same tolerance as the base composition:
+// unknown model-added keys are stripped, not fatal.
 export const layoutMontageSchema = layoutCompositionSchema
   .extend({
     strategy: z.enum(MONTAGE_STRATEGIES),
     /** True only if soft overlaps would visibly improve blending. */
     relaxOverlap: z.boolean().optional(),
-  })
-  .strict();
+  });
 export type LayoutMontage = z.infer<typeof layoutMontageSchema>;
 
 /**

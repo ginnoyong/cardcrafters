@@ -207,7 +207,27 @@ describe("layoutCompositionSchema", () => {
     expect(() => bad({ itemId: "i1", role: "protagonist" })).toThrow();
     expect(() => bad({ itemId: "i1", tiltToward: "" })).toThrow();
     expect(() => bad({ itemId: "" })).toThrow();
-    expect(() => bad({ itemId: "i1", extra: true })).toThrow();
+  });
+
+  // -- Unknown keys are STRIPPED, not rejected (live models add extras) ------
+
+  it("strips unknown extra keys on the top level, groups, and hints", () => {
+    expect(
+      layoutCompositionSchema.parse({
+        ...valid,
+        spread_unit: "px",
+        notes: "model freestyle",
+        groups: [{ itemIds: ["i1", "i2"], cx: 300, cy: 300, spread: 120, unit: "px" }],
+        hints: [{ itemId: "i1", role: "focal", confidence: 0.9 }],
+      }),
+    ).toEqual({ ...valid, hints: [{ itemId: "i1", role: "focal" }] });
+  });
+
+  it("still rejects missing/invalid required fields after stripping", () => {
+    expect(() => layoutCompositionSchema.parse({ ...valid, groups: [] })).toThrow();
+    expect(() =>
+      layoutCompositionSchema.parse({ ...valid, hints: [{ itemId: "i1", importance: 9 }] }),
+    ).toThrow();
   });
 
   it("rejects an out-of-range group subject shape", () => {
@@ -351,8 +371,8 @@ describe("layoutMontageSchema", () => {
     expect(() => layoutMontageSchema.parse({ ...valid, relaxOverlap: "yes" })).toThrow();
   });
 
-  it("rejects extra fields (strict) while keeping the base layout contract", () => {
-    expect(() => layoutMontageSchema.parse({ ...valid, montageMode: "aggressive" })).toThrow();
+  it("strips unknown extra fields while keeping the base layout contract", () => {
+    expect(layoutMontageSchema.parse({ ...valid, montageMode: "aggressive" })).toEqual(valid);
     expect(() =>
       layoutMontageSchema.parse({ ...valid, focalPoint: { x: 1200, y: 400 } }),
     ).toThrow();
