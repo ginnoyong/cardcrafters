@@ -447,25 +447,23 @@ export class OpenRouterProvider implements AiProvider {
   ): Promise<AiCallResult> {
     const prompt = messages.map((m) => messageText(m.content)).join("\n\n");
     // MONTAGE 5:7 NATIVE RATIO (bleed-in fix, part b): the game's card is a
-    // tall 5:7 portrait — a mismatched-ratio poster gets cropped to the card
-    // ratio during normalization (normalizePosterToCardRatio, bottom-anchored),
-    // which cuts the greeting text when the crop eats the bottom band. Ask for
-    // 5:7 natively via the normalized `aspect_ratio` knob so the crop is a
-    // no-op (or nearly one). montage_image ONLY — item_image stickers must
-    // stay square (no ratio field may ride along).
+    // tall portrait — a mismatched-ratio poster gets cropped to the card
+    // ratio during normalization (normalizePosterToCardRatio, bottom-anchored).
+    // Ask for 3:4 via the normalized `aspect_ratio` knob: 3:4 is NATIVELY
+    // supported by the Gemini image endpoints (unlike 5:7, which they clamp
+    // unpredictably), and 3:4 (0.75) is slightly WIDER than the 5:7 card
+    // (0.714) — so the normalization crop trims only the SIDES (~5% total)
+    // and never the greeting band at the bottom. montage_image ONLY —
+    // item_image stickers must stay square (no ratio field may ride along).
     //
     // Why aspect_ratio and not `size`: checked live via
     // /api/v1/images/models/{id}/endpoints — NONE of the endpoints that serve
-    // this task (google-vertex/google-ai-studio Gemini image endpoints,
-    // OpenAI gpt-image-*) list `size` in supported_parameters, so an explicit
-    // pixel size like "1100x1540" is unsupported (silently ignored at best,
-    // 400 at worst — the OpenAPI spec says explicit pixel sizes are
-    // provider-dependent and some providers reject them). Every endpoint DOES
-    // support `aspect_ratio`, whose top-level enum includes "5:7" exactly;
-    // providers clamp it to their supported subset (Gemini image endpoints:
-    // 3:4/2:3 nearest; gpt-image-1: 2:3) — either clamp lands close enough
-    // that the bottom-anchored normalization crop stays minimal.
-    const aspectRatio = task === "montage_image" ? "5:7" : undefined;
+    // this task list `size` in supported_parameters, so an explicit pixel
+    // size like "1100x1540" is unsupported (silently ignored at best, 400 at
+    // worst — the OpenAPI spec says explicit pixel sizes are
+    // provider-dependent and some providers reject them). Every endpoint
+    // supports `aspect_ratio`.
+    const aspectRatio = task === "montage_image" ? "3:4" : undefined;
     let res: Response;
     // CONCURRENCY CAP (two semaphores, images calls take BOTH). LOCK ORDERING
     // (deadlock-free by construction): image calls acquire the IMAGES

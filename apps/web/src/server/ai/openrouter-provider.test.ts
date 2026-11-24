@@ -306,7 +306,7 @@ describe("OpenRouterProvider montage_image (poster task)", () => {
       { ...MONTAGE_CFG, primary: "openai/gpt-image-1" },
     );
     expect(montage.calls[1]!.url).toBe("https://openrouter.ai/api/v1/images");
-    expect(montage.calls[1]!.body.aspect_ratio).toBe("5:7");
+    expect(montage.calls[1]!.body.aspect_ratio).toBe("3:4");
     expect(montage.calls[1]!.body.size).toBeUndefined();
 
     const item = scriptedFetch([
