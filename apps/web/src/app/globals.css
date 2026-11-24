@@ -539,8 +539,32 @@ label {
   display: block;
   width: 100%;
   max-height: max(260px, 70vh);
-  max-width: calc(70vh * var(--card-ratio-w, 3) / var(--card-ratio-h, 4));
+  /* Width cap with the SAME 260px floor as the height cap: when 70vh <
+     260px (short viewports) the old 70vh-only width shrank the box while
+     the CardCanvas sticker face kept its max(260, 70vh) JS floor — the two
+     flip faces rendered at different sizes and .cc-canvas-box's 70vh cap
+     cropped the stage. One floored basis for both axes keeps every face
+     identical. */
+  max-width: calc(max(260px, 70vh) * var(--card-ratio-w, 3) / var(--card-ratio-h, 4));
   margin-inline: auto;
+}
+
+/* Flip-face children of the montage wrapper fill it entirely: the wrapper
+   owns the geometry (inline aspect-ratio + the floored max caps above), and
+   CardCanvas fillContainer measures THIS box (clientWidth × clientHeight).
+   Never justify-items:center here — a centered/auto-sized child in a
+   content-sized wrapper can measure 0 before Konva mounts (zero-size
+   deadlock); the wrapper is sized by the layout, the canvas stretches. */
+.cc-montage > .cc-canvas-wrap {
+  width: 100%;
+  height: 100%;
+}
+
+/* The stage box fills the measured wrapper — the wrapper's floored max caps
+   replace .cc-canvas-box's own 70vh cap (which would crop the sticker stage
+   below the 260px floor on short viewports). */
+.cc-montage .cc-canvas-box {
+  max-height: none;
 }
 
 .cc-card-back {

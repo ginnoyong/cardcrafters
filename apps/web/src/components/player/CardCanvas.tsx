@@ -58,6 +58,17 @@ export interface CardCanvasProps {
    *  observer delivery is missed (older Safari, race with the style commit).
    *  Cheap: the measure is idempotent. */
   resizeSignal?: boolean | number;
+  /** Size the stage to the measured container box (clientWidth ×
+   *  clientHeight) instead of deriving height from the card ratio with the
+   *  ~70vh cap. For flip faces where an aspect-ratio WRAPPER owns the
+   *  geometry (.cc-montage in TeamJudgeCard): the stage then matches the
+   *  poster/CardBack face box 1:1 at any viewport — no JS ratio/clamp math
+   *  to drift out of sync with the CSS. The container MUST be sized by the
+   *  wrapper (see .cc-montage > .cc-canvas-wrap in globals.css). A zero
+   *  container measure (hidden face) keeps the stage at 0 until the
+   *  ResizeObserver re-fires on reveal. Default false → ratio-derived
+   *  sizing (every other caller unchanged). */
+  fillContainer?: boolean;
   ariaLabel?: string;
 }
 
@@ -127,16 +138,33 @@ function usePrefersReducedMotion(): boolean {
   return reduced;
 }
 
-/** Container-width-driven stage size: height = width × ratio, capped ~70vh.
- *  `remeasureKey` re-runs the measure whenever the caller's visibility state
- *  toggles (see CardCanvasProps.resizeSignal). */
-function useStageSize(ratioW: number, ratioH: number, remeasureKey: boolean | number) {
+/** Container-driven stage size. Default: height = width × ratio, capped
+ *  ~70vh. With `fillContainer`, the stage is exactly the measured container
+ *  box (the aspect-ratio wrapper owns the geometry — no ratio/clamp math
+ *  here). `remeasureKey` re-runs the measure whenever the caller's
+ *  visibility state toggles (see CardCanvasProps.resizeSignal). */
+function useStageSize(
+  ratioW: number,
+  ratioH: number,
+  remeasureKey: boolean | number,
+  fillContainer: boolean,
+) {
   const ref = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     const compute = (): void => {
+      if (fillContainer) {
+        const w = el.clientWidth;
+        const h = el.clientHeight;
+        // Guard: a hidden (display:none) face measures 0 — keep the stage
+        // at 0 until the observer re-fires when the face is revealed.
+        if (w <= 0 || h <= 0) return;
+        const next = { w: Math.round(w), h: Math.round(h) };
+        setSize((prev) => (prev.w === next.w && prev.h === next.h ? prev : next));
+        return;
+      }
       const containerW = el.clientWidth;
       if (containerW <= 0) return;
       let w = containerW;
@@ -159,7 +187,7 @@ function useStageSize(ratioW: number, ratioH: number, remeasureKey: boolean | nu
       ro.disconnect();
       window.removeEventListener("resize", compute);
     };
-  }, [ratioW, ratioH, remeasureKey]);
+  }, [ratioW, ratioH, remeasureKey, fillContainer]);
   return { containerRef: ref, size };
 }
 
@@ -216,9 +244,10 @@ export default function CardCanvas({
   onItemTap,
   highlightItemId = null,
   resizeSignal = 0,
+  fillContainer = false,
   ariaLabel = "team card preview",
 }: CardCanvasProps) {
-  const { containerRef, size } = useStageSize(cardRatioW, cardRatioH, resizeSignal);
+  const { containerRef, size } = useStageSize(cardRatioW, cardRatioH, resizeSignal, fillContainer);
   const reducedMotion = usePrefersReducedMotion();
   const layerRef = useRef<Konva.Layer | null>(null);
   const nodesRef = useRef(new Map<string, Konva.Image>());

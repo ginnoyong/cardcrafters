@@ -27,12 +27,12 @@
  * like every other consumer: react-konva must never evaluate during SSR.
  */
 
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 
 import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W } from "@cardcrafters/shared";
 
-import CardBack from "@/components/CardBack";
+import CardBack, { montageFaceStyle } from "@/components/CardBack";
 import type { ClientTeam } from "@/lib/store";
 
 // Client-only: react-konva throws at module load under Next's bundled React
@@ -91,13 +91,22 @@ export default function TeamJudgeCard({
   // ready, otherwise the composed sticker CardCanvas), true = the other face
   // (sticker card / CardBack placeholder respectively).
   const [flipped, setFlipped] = useState(false);
+  // Poster <img> load failure → permanently swap the poster face to the
+  // CardBack placeholder (greeting + team note) so an unreadable poster file
+  // can never show an empty styled box. Keyed on the URL: a NEW poster URL
+  // (regenerated montage) gets a fresh chance.
+  const [brokenPosterUrl, setBrokenPosterUrl] = useState<string | null>(null);
   // Prompt transparency accordion: collapsed by default (same pattern as the
   // console's TeamCard "View prompt").
   const [showPrompt, setShowPrompt] = useState(false);
 
   const readyCount = team.items.filter((i) => i.status === "ready").length;
-  // The poster face is the real AI montage only when it actually landed.
-  const posterReady = team.montageStatus === "ready" && !!team.montageImageUrl;
+  // The poster face is the real AI montage only when it actually landed
+  // (and hasn't failed to load — see brokenPosterUrl).
+  const posterReady =
+    team.montageStatus === "ready" &&
+    !!team.montageImageUrl &&
+    team.montageImageUrl !== brokenPosterUrl;
   // ALWAYS flippable now: with a ready poster the poster is the default face
   // and the flip target is the sticker CardCanvas; without one the sticker
   // card is the default and the flip target is the CardBack placeholder
@@ -166,11 +175,7 @@ export default function TeamJudgeCard({
                 {posterReady ? (
                   <div
                     className="cc-montage"
-                    style={{
-                      aspectRatio: `${cardRatioW} / ${cardRatioH}`,
-                      "--card-ratio-w": cardRatioW,
-                      "--card-ratio-h": cardRatioH,
-                    } as CSSProperties}
+                    style={montageFaceStyle(cardRatioW, cardRatioH)}
                     aria-label={`poster for ${team.name}`}
                   >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -178,6 +183,7 @@ export default function TeamJudgeCard({
                       src={team.montageImageUrl ?? ""}
                       alt={`Finished poster for ${team.name}`}
                       className="cc-montage-img"
+                      onError={() => setBrokenPosterUrl(team.montageImageUrl ?? null)}
                     />
                   </div>
                 ) : (
@@ -190,15 +196,27 @@ export default function TeamJudgeCard({
                 )}
               </div>
               <div style={{ display: showingSticker ? undefined : "none" }}>
-                <CardCanvas
-                  items={team.items}
-                  layout={team.layout}
-                  greeting={team.greeting.text}
-                  cardRatioW={cardRatioW}
-                  cardRatioH={cardRatioH}
-                  resizeSignal={flipped}
-                  ariaLabel={`${team.name} sticker card — ${readyCount} stickers placed`}
-                />
+                {/* The sticker face lives in the SAME .cc-montage wrapper the
+                    poster/CardBack faces use (shared montageFaceStyle) — all
+                    three faces are dimensionally identical by construction.
+                    fillContainer lets the Konva stage fill that wrapper's box
+                    exactly (the wrapper's inline aspect-ratio + CSS max caps
+                    own the geometry), so poster and sticker never diverge. */}
+                <div
+                  className="cc-montage"
+                  style={montageFaceStyle(cardRatioW, cardRatioH)}
+                >
+                  <CardCanvas
+                    items={team.items}
+                    layout={team.layout}
+                    greeting={team.greeting.text}
+                    cardRatioW={cardRatioW}
+                    cardRatioH={cardRatioH}
+                    fillContainer
+                    resizeSignal={flipped}
+                    ariaLabel={`${team.name} sticker card — ${readyCount} stickers placed`}
+                  />
+                </div>
               </div>
             </div>
           {team.montageStatus === "generating" ? (

@@ -742,6 +742,107 @@ describe("GET /api/games/:code/scoring-card/:cardId?token= (player rating card P
   });
 });
 
+/**
+ * Blank scoring card for 0-prompt teams / round 2+ — repro: the greeting
+ * lookup in renderTeamCardPng was STRICTLY round-scoped, but greeting rows
+ * only exist for round 1 (created once at POST /api/games; per-team AI
+ * failures drop rows silently; round 2+ has none). Round 2+ cards for any
+ * team without a same-round greeting row rendered as a blank pale paper
+ * card. The fix falls back to the team's LATEST earlier-round greeting.
+ */
+describe("scoring card — 0-prompt team / round 2+ greeting fallback", () => {
+  it("round-1 card for a 0-prompt team carries its greeting; round-2 card falls back to it (byte parity)", async () => {
+    // 1. 2-team mock game — greeting generation fires for BOTH teams at
+    //    creation (mock resolves ~instantly).
+    const res = await fetch(base("/api/games"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ teamCount: 2, theme: "Greeting Fallback" }),
+    });
+    const body = (await res.json()) as { gameId: string; code: string };
+    await waitForGreetings(srv.repo, srv.hub, body.gameId, 2);
+    const teams = await srv.repo.listTeams(body.gameId);
+    const teamA = teams[0]!;
+    const teamB = teams[1]!;
+
+    // Team A submits a prompt (one READY sticker); team B submits NOTHING.
+    const sticker = await writeSticker(DEFAULT_ITEMS_DIR, `seed-${body.gameId}-fb`, "red balloon");
+    const item = await srv.repo.createItem({
+      teamId: teamA.id,
+      playerId: "seed-player",
+      round: 1,
+      promptRaw: "a red balloon",
+      status: "GENERATING",
+    });
+    await srv.repo.updateItem(item.id, {
+      status: "READY",
+      imageUrl: sticker.imageUrl,
+      width: sticker.width,
+      height: sticker.height,
+      placedAt: Date.now(),
+    });
+
+    // 2. Drive round 1 → SCORING and capture team B's round-1 card id + the
+    //    empty-greeting control render (the blank pale card the bug draws).
+    await srv.hub.applyEvent(body.gameId, { type: "gm:approveGreetings", now: Date.now() });
+    await srv.hub.applyEvent(body.gameId, { type: "gm:stopBuild", now: Date.now() });
+    const game1 = (await srv.repo.getGame(body.gameId))!;
+    const cardB1 = game1.scoringOrder!.cards.find((c) => c.teamId === teamB.id)!;
+    const emptyControl = await renderCardPng([], { placements: [] }, "", {
+      cardRatioW: game1.config.cardRatioW,
+      cardRatioH: game1.config.cardRatioH,
+      finalPass: true,
+      grading: deriveGradingFromStyle(game1.style, teamB.id),
+    });
+
+    // Round-1 tokenless GET (the game code is the capability): 200 PNG and
+    // NOT the empty-greeting control — team B's round-1 greeting is drawn.
+    const res1 = await fetch(base(`/api/games/${body.code}/scoring-card/${cardB1.cardId}`));
+    expect(res1.status).toBe(200);
+    expect(res1.headers.get("content-type")).toBe("image/png");
+    const bytes1 = Buffer.from(await res1.arrayBuffer());
+    expect(Buffer.compare(bytes1, emptyControl)).not.toBe(0);
+
+    // 3. Drive to round 2: RESULTS → gm:newRound (GREETINGS, round 2 — NO
+    //    new greeting generation: that only fires at POST /api/games) →
+    //    setTheme / approveGreetings / stopBuild (SCORING again).
+    await srv.hub.applyEvent(body.gameId, { type: "gm:stopScoring", now: Date.now() });
+    await srv.hub.applyEvent(body.gameId, { type: "gm:pickWinner", teamId: teamA.id, now: Date.now() });
+    const acked = await srv.hub.applyEvent(body.gameId, { type: "reveal:ack", now: Date.now() });
+    if (!acked.ok) throw new Error(`reveal:ack failed: ${acked.reason}`);
+    await srv.hub.applyEvent(body.gameId, { type: "gm:newRound", now: Date.now() });
+    await srv.hub.applyEvent(body.gameId, { type: "gm:setTheme", theme: "Greeting Fallback Round 2", now: Date.now() });
+    await srv.hub.applyEvent(body.gameId, { type: "gm:approveGreetings", now: Date.now() });
+    const stopped = await srv.hub.applyEvent(body.gameId, { type: "gm:stopBuild", now: Date.now() });
+    if (!stopped.ok) throw new Error(`gm:stopBuild failed: ${stopped.reason}`);
+
+    const game2 = (await srv.repo.getGame(body.gameId))!;
+    expect(game2.round).toBe(2);
+    // Round 2 has NO greeting rows at all (generation is creation-only).
+    expect(await srv.repo.listGreetings(body.gameId, 2)).toHaveLength(0);
+    const cardB2 = game2.scoringOrder!.cards.find((c) => c.teamId === teamB.id)!;
+
+    // 4. Team B's round-2 card must byte-equal the render carrying its
+    //    ROUND-1 greeting (the latest earlier-round fallback)...
+    const round1Greeting = (await srv.repo.listGreetings(body.gameId, 1)).find(
+      (g) => g.teamId === teamB.id,
+    )!;
+    const expected2 = await renderCardPng([], { placements: [] }, round1Greeting.text, {
+      cardRatioW: game2.config.cardRatioW,
+      cardRatioH: game2.config.cardRatioH,
+      finalPass: true,
+      grading: deriveGradingFromStyle(game2.style, teamB.id),
+    });
+    const res2 = await fetch(base(`/api/games/${body.code}/scoring-card/${cardB2.cardId}`));
+    expect(res2.status).toBe(200);
+    expect(res2.headers.get("content-type")).toBe("image/png");
+    const bytes2 = Buffer.from(await res2.arrayBuffer());
+    expect(Buffer.compare(bytes2, expected2)).toBe(0);
+    // ...and must NOT be the blank empty-greeting control.
+    expect(Buffer.compare(bytes2, emptyControl)).not.toBe(0);
+  });
+});
+
 describe("GET /api/games/:code/export/cards (all-cards zip export)", () => {
   /**
    * Create a game and drive it to SCORING (same steps as the scoring-card

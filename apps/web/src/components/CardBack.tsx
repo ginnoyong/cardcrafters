@@ -20,6 +20,20 @@
 
 import type { CSSProperties } from "react";
 
+/**
+ * montageFaceStyle — the ONE inline-geometry object every flip face uses
+ * (poster / sticker CardCanvas / CardBack): inline aspect-ratio + the
+ * --card-ratio-w/--card-ratio-h custom props the CSS max caps consume. All
+ * three faces are identical by construction (no drift between callers).
+ */
+export function montageFaceStyle(cardRatioW: number, cardRatioH: number): CSSProperties {
+  return {
+    aspectRatio: `${cardRatioW} / ${cardRatioH}`,
+    "--card-ratio-w": cardRatioW,
+    "--card-ratio-h": cardRatioH,
+  } as CSSProperties;
+}
+
 export default function CardBack({
   greeting,
   montageStatus,
@@ -44,13 +58,7 @@ export default function CardBack({
   return (
     <div
       className="cc-montage cc-card-back"
-      style={
-        {
-          aspectRatio: `${cardRatioW} / ${cardRatioH}`,
-          "--card-ratio-w": cardRatioW,
-          "--card-ratio-h": cardRatioH,
-        } as CSSProperties
-      }
+      style={montageFaceStyle(cardRatioW, cardRatioH)}
     >
       <p className="cc-card-back-greeting">“{greeting}”</p>
       <p className="cc-card-back-note">{note}</p>

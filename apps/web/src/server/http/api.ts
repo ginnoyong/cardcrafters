@@ -131,6 +131,12 @@ export function mergeCardConfig(partial: unknown): CardConfig {
  * later, so the montage pass has already settled. The render itself is
  * fail-open about missing stickers, but a hard failure propagates to the
  * caller (routes turn it into a 500).
+ *
+ * Greeting lookup: greeting rows are only ever created for round 1 (at game
+ * creation), and per-team AI failures drop rows silently, so round 2+ cards
+ * would otherwise render with an empty greeting (a blank pale card). If the
+ * round-scoped lookup misses, fall back to the team's LATEST greeting from an
+ * earlier round — walk rounds downward from round-1 and use the first match.
  */
 async function renderTeamCardPng(
   repo: Repository,
@@ -147,9 +153,14 @@ async function renderTeamCardPng(
   const items: RenderableItem[] = (await repo.listItems(teamId, round, ["READY"]))
     .filter((r) => (r.width ?? 0) > 0 && (r.height ?? 0) > 0)
     .map((r) => ({ itemId: r.id, imageUrl: r.imageUrl, width: r.width!, height: r.height! }));
-  const greeting = (await repo.listGreetings(game.id, round)).find(
-    (g) => g.teamId === teamId,
-  );
+  // Round-scoped lookup first; if it misses (greeting rows only exist for
+  // round 1, and per-team AI failures can drop even those), fall back to the
+  // team's LATEST greeting from an earlier round — walk rounds downward from
+  // round-1 and use the first match. A miss everywhere degrades to "".
+  let greeting: Awaited<ReturnType<typeof repo.listGreetings>>[number] | undefined;
+  for (let r = round; r >= 1 && !greeting; r--) {
+    greeting = (await repo.listGreetings(game.id, r)).find((g) => g.teamId === teamId);
+  }
   return renderCardPng(
     items,
     { placements: layout?.placements ?? [] },
