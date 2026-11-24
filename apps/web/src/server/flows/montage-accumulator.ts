@@ -105,10 +105,12 @@ const POSTER_ASPECT_TOLERANCE = 0.01;
  *
  * Target dims: width fixed at {@link POSTER_TARGET_WIDTH} (800), height
  * derived from the game's cardRatioW/H — for the default 5:7 card that is
- * 800×1120, exactly the card ratio. `fit: "cover"` + `position: "centre"`
- * center-crops the source into that box: a square source loses its sides
- * equally (the greeting is centered, so it survives); a landscape source
- * loses top/bottom proportionally.
+ * 800×1120, exactly the card ratio. `fit: "cover"` + `position: "bottom"`
+ * crops the source into that box: a wider-than-5:7 source loses its sides
+ * equally (the greeting is centered, so it survives); a taller-than-5:7
+ * source (the common case — providers clamp 5:7 to 3:4/2:3) is anchored at
+ * the BOTTOM, so only decorative top scenery is trimmed and the greeting
+ * band at the bottom is always kept in full.
  *
  * Returns null (no-op) when the ratio is missing/invalid, the bytes don't
  * decode, or the source is already at the target ratio within tolerance —
@@ -134,7 +136,7 @@ export async function normalizePosterToCardRatio(
   const targetAspect = cardRatioW / cardRatioH;
   if (Math.abs(nativeAspect - targetAspect) <= POSTER_ASPECT_TOLERANCE) return null;
   return sharp(bytes)
-    .resize(targetW, targetH, { fit: "cover", position: "centre" })
+    .resize(targetW, targetH, { fit: "cover", position: "bottom" })
     .png()
     .toBuffer();
 }
@@ -534,7 +536,9 @@ async function runGenPass(
     // step closes: the UI box is locked to cardRatioW/H with object-fit:
     // cover, so an off-ratio file gets client-cropped and the lower-third
     // greeting is cut off. Resize to the exact target box (800×1120 for the
-    // 5:7 card) with fit cover / position centre; on any sharp failure fall
+    // 5:7 card) with fit cover / position bottom (providers clamp the requested
+// 5:7 to a taller ratio, so the crop trims decorative top scenery only and
+// never the greeting band at the bottom); on any sharp failure fall
     // open to the bytes as-is (graced or raw) with a warning.
     try {
       const normalized = await normalizePosterToCardRatio(

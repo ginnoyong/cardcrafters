@@ -1,0 +1,9 @@
+cardcrafters-production.up.railway.app
+/api/health
+
+
+node apps/web/scripts/demo-bots.mjs --url https://cardcrafters-production.up.railway.app/gm --team-count 2 --players-per-team 2 --theme "mock check"
+
+node apps/web/scripts/demo-bots.mjs --url https://cardcrafters-production.up.railway.app --team-count 2 --players-per-team 2 --theme "first hosted game"
+
+npm install -g @railway/cli --allow-scripts=@railway/cli --foreground-scripts
