@@ -46,7 +46,7 @@ export interface ItemSize {
 /**
  * Fit a ratioW:ratioH card into the 0..1000 coordinate space, anchored at
  * (0,0) — mirror of constraints.cardBox({width:1000, height:1000}, rw, rh).
- * For the default 5:7 card: {w: 714.28…, h: 1000}.
+ * For the default 3:4 card: {w: 750, h: 1000}.
  */
 export function cardBoxNormalized(ratioW: number, ratioH: number): NormalizedCardBox {
   if (!(ratioW > 0) || !(ratioH > 0)) {

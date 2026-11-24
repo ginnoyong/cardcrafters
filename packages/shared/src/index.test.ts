@@ -31,7 +31,7 @@ describe("scaffold constants", () => {
     expect(MAX_TEAMS).toBe(10);
     expect(MAX_TEAM_MEMBERS).toBe(12);
     expect(MAX_PROMPT_WORDS).toBe(6);
-    expect(DEFAULT_CARD_RATIO_W).toBe(5);
-    expect(DEFAULT_CARD_RATIO_H).toBe(7);
+    expect(DEFAULT_CARD_RATIO_W).toBe(3);
+    expect(DEFAULT_CARD_RATIO_H).toBe(4);
   });
 });

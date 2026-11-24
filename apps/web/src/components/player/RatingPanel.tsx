@@ -59,7 +59,7 @@ export interface RatingPanelProps {
    *  when no timer is running. */
   remainingLabel?: string | null;
   /** Card aspect ratio (game config) — the preview box locks to the SAME
-   *  ratio as the CardCanvas sticker card. Defaults to the shared 5/7. */
+   *  ratio as the CardCanvas sticker card. Defaults to the shared 3/4. */
   cardRatioW?: number;
   cardRatioH?: number;
   testId?: string;

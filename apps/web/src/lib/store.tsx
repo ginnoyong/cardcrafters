@@ -223,7 +223,7 @@ export interface GameSnapshot {
   /** Configured SCORING timer in seconds (0 = untimed). */
   scoringTimerSeconds?: number | null;
   /** Card aspect ratio (from CardConfig via sync:full's `config` section;
-   *  server default 5/7). Undefined on hand-built test snapshots — consumers
+   *  server default 3/4). Undefined on hand-built test snapshots — consumers
    *  fall back to DEFAULT_CARD_RATIO_W/H so the montage poster box always
    *  matches the CardCanvas sticker card's aspect ratio. */
   cardRatioW?: number;

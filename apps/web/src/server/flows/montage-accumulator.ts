@@ -19,9 +19,11 @@
  *      image model itself; on grading failure the raw poster is persisted
  *      READY with a non-fatal lastError marker), normalizes the final bytes
  *      to the game's card ratio (normalizePosterToCardRatio — sharp resize
- *      fit "cover" to the exact card-ratio box, e.g. 800×1120 for 5:7; the
- *      UI box is locked to that ratio, so the persisted file must match it
- *      even when grading fell back to raw bytes), persists the bytes exactly
+ *      fit "cover" to the exact card-ratio box, e.g. 800×1067 for the 3:4
+ *      default; the UI box is locked to that ratio, so the persisted file
+ *      must match it even when grading fell back to raw bytes. For default
+ *      games this is a pure backstop — the pipeline generates natively at
+ *      3:4 — but it stays for non-3:4 sources), persists the bytes exactly
  *      like item-image.ts and sets status READY + imageSeq = the SNAPSHOT seq
  *      (NOT the round) + promptText = the EXACT montageImagePrompt output.
  *   3. TRAILING EDGE — staging that lands DURING a pass is picked up by the
@@ -85,7 +87,7 @@ const DEFAULT_TIMEOUT_MS = 90_000;
 
 /**
  * Canonical poster width for the persisted montage PNG. The procedural mock
- * poster renders at 800×1120 (5:7) and the card stage draws at the same
+ * poster renders at 800×1066 (3:4) and the card stage draws at the same
  * scale, so 800 is the natural base width for the normalized file.
  */
 const POSTER_TARGET_WIDTH = 800;
@@ -104,19 +106,30 @@ const POSTER_ASPECT_TOLERANCE = 0.01;
  * presenter stage) sees the exact ratio with zero client-side cropping.
  *
  * Target dims: width fixed at {@link POSTER_TARGET_WIDTH} (800), height
- * derived from the game's cardRatioW/H — for the default 5:7 card that is
- * 800×1120, exactly the card ratio. `fit: "cover"` + `position: "bottom"`
- * crops the source into that box: a wider-than-5:7 source loses its sides
- * equally (the greeting is centered, so it survives); a taller-than-5:7
- * source (the common case — providers clamp 5:7 to 3:4/2:3) is anchored at
- * the BOTTOM, so only decorative top scenery is trimmed and the greeting
- * band at the bottom is always kept in full.
+ * derived from the game's cardRatioW/H — for the default 3:4 card that is
+ * 800×1067 (Math.round of 1066.67), matching the card ratio within a
+ * half-pixel. `fit: "cover"` + `position: "bottom"` crops the source into
+ * that box: a wider-than-3:4 source loses its sides equally (the greeting
+ * is centered, so it survives); a taller-than-3:4 source is anchored at the
+ * BOTTOM, so only decorative top scenery is trimmed and the greeting band
+ * at the bottom is always kept in full.
+ *
+ * For default games this is a PURE BACKSTOP: the pipeline generates posters
+ * natively at the card ratio (3:4 is natively supported by the Gemini image
+ * endpoints and requested via aspect_ratio), so native 3:4 sources at
+ * canonical-or-larger width skip normalization via the checks below. The
+ * resize only kicks in for non-3:4 sources (fallback models, custom card
+ * ratios, degraded paths) and for sub-canonical sources that gradePoster's
+ * crop-only pass shrank to a tiny exact-ratio file (e.g. a 64×64 square
+ * fixture center-cropped to 48×64 — exact ratio, but far below the
+ * canonical width the persisted poster must carry).
  *
  * Returns null (no-op) when the ratio is missing/invalid, the bytes don't
- * decode, or the source is already at the target ratio within tolerance —
- * the caller then persists the bytes as-is (fail-open, same philosophy as
- * gradePoster's cropToCardRatio). Callers should wrap in try/catch anyway:
- * any throw here means the raw bytes get persisted instead.
+ * decode, or the source is already card-ratio within tolerance at
+ * canonical-or-larger width — the caller then persists the bytes as-is
+ * (fail-open, same philosophy as gradePoster's cropToCardRatio). Callers
+ * should wrap in try/catch anyway: any throw here means the raw bytes get
+ * persisted instead.
  */
 export async function normalizePosterToCardRatio(
   bytes: Buffer,
@@ -129,12 +142,21 @@ export async function normalizePosterToCardRatio(
   const targetW = POSTER_TARGET_WIDTH;
   const targetH = Math.round((POSTER_TARGET_WIDTH * cardRatioH) / cardRatioW);
   if (targetW < 1 || targetH < 1) return null;
-  // Already exactly the target box (e.g. the mock's procedural 800×1120
-  // poster) → no re-encode needed.
-  if (meta.width === targetW && meta.height === targetH) return null;
+  // Already canonical: exactly at the target box, or card-ratio within
+  // tolerance at canonical-or-larger width (e.g. the mock's procedural
+  // 800×1066 poster — its 0.7505 aspect is within tolerance of the exact
+  // 800×1067 box) → no re-encode needed. A sub-canonical exact-ratio file
+  // (tiny fixture or a cropped-down thumbnail) is still upscaled to the
+  // canonical box: the persisted poster must always be 800-wide.
   const nativeAspect = meta.width / meta.height;
   const targetAspect = cardRatioW / cardRatioH;
-  if (Math.abs(nativeAspect - targetAspect) <= POSTER_ASPECT_TOLERANCE) return null;
+  if (
+    (meta.width === targetW && meta.height === targetH) ||
+    (Math.abs(nativeAspect - targetAspect) <= POSTER_ASPECT_TOLERANCE &&
+      meta.width >= targetW)
+  ) {
+    return null;
+  }
   return sharp(bytes)
     .resize(targetW, targetH, { fit: "cover", position: "bottom" })
     .png()
@@ -151,10 +173,9 @@ export async function normalizePosterToCardRatio(
  * the text so it always fits.
  *
  * Tier boundaries (20/40/80) are sized so the text always fits: the
- * lower-third band is ~33% of the image height; at the 5:7 card ratio with a
- * ~5:7 native render (800×1120 target, provider-clamped from the requested
- * 5:7 aspect_ratio) the band is ~370px tall, so at 4% per line that's
- * 9 lines of headroom — plenty. The key constraint is
+ * lower-third band is ~33% of the image height; at the 3:4 card ratio with a
+ * 3:4 native render (800×1066) the band is ~355px tall (1066/3), so at 4% per line
+ * that's ~8 lines of headroom — plenty. The key constraint is
  * N_chars / chars_per_line × line_height_pct ≤ 33%.
  */
 export function textSizeHint(greeting: string): string {
@@ -535,10 +556,11 @@ async function runGenPass(
     // the model's arbitrary aspect (square/landscape) — the exact bug this
     // step closes: the UI box is locked to cardRatioW/H with object-fit:
     // cover, so an off-ratio file gets client-cropped and the lower-third
-    // greeting is cut off. Resize to the exact target box (800×1120 for the
-    // 5:7 card) with fit cover / position bottom (providers clamp the requested
-// 5:7 to a taller ratio, so the crop trims decorative top scenery only and
-// never the greeting band at the bottom); on any sharp failure fall
+    // greeting is cut off. Resize to the exact target box (800×1067 for the
+    // 3:4 card) with fit cover / position bottom — a pure backstop now that
+    // the pipeline generates natively at 3:4 (non-3:4 sources are bottom-
+    // anchored, so the crop trims decorative top scenery only and never the
+    // greeting band at the bottom); on any sharp failure fall
     // open to the bytes as-is (graced or raw) with a warning.
     try {
       const normalized = await normalizePosterToCardRatio(

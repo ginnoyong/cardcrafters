@@ -8,7 +8,7 @@
  * Geometry: server placements are CENTER coordinates in the normalized
  * 0..1000 space (see apps/web/src/server/layout/constraints.ts placedBox —
  * the truth this component mirrors via lib/canvas-geometry.ts). The stage is
- * sized to the card's aspect ratio (default 5:7), so the mapping is a single
+ * sized to the card's aspect ratio (default 3:4), so the mapping is a single
  * uniform scale.
  *
  * Motion: on a NEWER layout version, each moved item tweens x/y/width/height/
@@ -23,7 +23,11 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Konva from "konva";
 import { Image as KonvaImage, Layer, Rect, Stage, Text } from "react-konva";
 
-import { LAYOUT_TWEEN_MS } from "@cardcrafters/shared";
+import {
+  DEFAULT_CARD_RATIO_H,
+  DEFAULT_CARD_RATIO_W,
+  LAYOUT_TWEEN_MS,
+} from "@cardcrafters/shared";
 
 import {
   greetingZonePx,
@@ -206,8 +210,8 @@ export default function CardCanvas({
   items,
   layout,
   greeting,
-  cardRatioW = 5,
-  cardRatioH = 7,
+  cardRatioW = DEFAULT_CARD_RATIO_W,
+  cardRatioH = DEFAULT_CARD_RATIO_H,
   myPlayerId,
   onItemTap,
   highlightItemId = null,

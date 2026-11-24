@@ -82,7 +82,7 @@ export const BASE_COVERAGE = 0.25;
 /**
  * Fit a card with aspect ratio ratioW:ratioH into a dims×dims-ish canvas
  * (the caller passes the coordinate space), preserving aspect, anchored at
- * (0,0). For the default 5:7 card: {w: 714.28…, h: 1000}.
+ * (0,0). For the default 3:4 card: {w: 750, h: 1000}.
  */
 export function cardBox(
   dims: { width: number; height: number },

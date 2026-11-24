@@ -37,7 +37,7 @@ The illustration must:
   environment. There are no die-cut outlines, no white borders, no drop
   shadows suggesting cut-out objects, and no objects floating on a plain or
   patterned backdrop.
-- Compose for a TALL PORTRAIT card (5:7 aspect): arrange the artwork for a
+- Compose for a TALL PORTRAIT card (3:4 aspect): arrange the artwork for a
   vertical page, not a wide landscape frame.
 - Render the greeting text AS PART OF THE ARTWORK, in the lower third of the
   image, styled as an elegant hand-lettered greeting treatment: integrated
@@ -47,7 +47,7 @@ The illustration must:
 - Text sizing: {{textSizeHint}} The text must fit ENTIRELY within the
   lower-third band — no letter may extend below that boundary.
 - The greeting text must fit within the CENTRAL 60% of the image width
-  (portrait 5:7 composition — compose for a tall card; leave the outer 20%
+  (portrait 3:4 composition — compose for a tall card; leave the outer 20%
   margins on each side free of text). Never run the greeting full-bleed edge
   to edge: a tighter portrait crop must never cut the text's first or last
   letters.

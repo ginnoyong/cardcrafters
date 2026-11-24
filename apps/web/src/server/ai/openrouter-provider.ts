@@ -446,15 +446,15 @@ export class OpenRouterProvider implements AiProvider {
     started: number,
   ): Promise<AiCallResult> {
     const prompt = messages.map((m) => messageText(m.content)).join("\n\n");
-    // MONTAGE 5:7 NATIVE RATIO (bleed-in fix, part b): the game's card is a
-    // tall portrait — a mismatched-ratio poster gets cropped to the card
-    // ratio during normalization (normalizePosterToCardRatio, bottom-anchored).
-    // Ask for 3:4 via the normalized `aspect_ratio` knob: 3:4 is NATIVELY
-    // supported by the Gemini image endpoints (unlike 5:7, which they clamp
-    // unpredictably), and 3:4 (0.75) is slightly WIDER than the 5:7 card
-    // (0.714) — so the normalization crop trims only the SIDES (~5% total)
-    // and never the greeting band at the bottom. montage_image ONLY —
-    // item_image stickers must stay square (no ratio field may ride along).
+    // MONTAGE 3:4 NATIVE RATIO: the game's card defaults to 3:4 and the
+    // pipeline asks for EXACTLY that ratio via the normalized `aspect_ratio`
+    // knob — 3:4 is natively supported by the Gemini image endpoints (unlike
+    // the old 5:7 default, which they clamp unpredictably), so a default-ratio
+    // game needs ZERO cropping: the normalization step
+    // (normalizePosterToCardRatio, bottom-anchored) is a pure backstop that
+    // only kicks in for non-3:4 sources (fallback models, custom card ratios).
+    // montage_image ONLY — item_image stickers must stay square (no ratio
+    // field may ride along).
     //
     // Why aspect_ratio and not `size`: checked live via
     // /api/v1/images/models/{id}/endpoints — NONE of the endpoints that serve

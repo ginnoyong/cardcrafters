@@ -31,6 +31,8 @@ import {
 import sharp from "sharp";
 
 import {
+  DEFAULT_CARD_RATIO_H,
+  DEFAULT_CARD_RATIO_W,
   MONTAGE_FEATHER_FRACTION,
   type MontageGrading,
   type StyleDerivation,
@@ -44,11 +46,8 @@ const here = path.dirname(fileURLToPath(import.meta.url)); // .../src/server/ren
  *  apps/web/public/static/items/{itemId}.png (see flows/item-image.ts). */
 export const DEFAULT_ITEMS_DIR = path.resolve(here, "../../../public/static/items");
 
-/** Default render width; the card keeps its 5:7 ratio (→ 800×1120). */
+/** Default render width; the card keeps its 3:4 ratio (→ 800×1067). */
 export const DEFAULT_CARD_WIDTH_PX = 800;
-/** Default card ratio (matches DEFAULT_CARD_CONFIG). */
-const DEFAULT_RATIO_W = 5;
-const DEFAULT_RATIO_H = 7;
 /** Paper background color — warm off-white "cardstock". */
 const PAPER_COLOR = "#faf5ec";
 /** Greeting font size as a fraction of the render width (~4.5% → 36px @800). */
@@ -167,8 +166,8 @@ export async function renderCardPng(
   opts: RenderCardOptions = {},
 ): Promise<Buffer> {
   const width = Math.max(1, Math.round(opts.width ?? DEFAULT_CARD_WIDTH_PX));
-  const ratioW = opts.cardRatioW ?? DEFAULT_RATIO_W;
-  const ratioH = opts.cardRatioH ?? DEFAULT_RATIO_H;
+  const ratioW = opts.cardRatioW ?? DEFAULT_CARD_RATIO_W;
+  const ratioH = opts.cardRatioH ?? DEFAULT_CARD_RATIO_H;
   const height = Math.round((width * ratioH) / ratioW);
   const storageDir = opts.storageDir ?? DEFAULT_ITEMS_DIR;
   const finalPass = opts.finalPass ?? false;
@@ -279,15 +278,18 @@ export async function renderCardPng(
  * encode (input bytes are normalized through sharp first, so any decodable
  * format works as input).
  *
- * CARD-RATIO NORMALIZATION (source fix for the rating-carousel aspect bug):
- * when cardRatioW/H are supplied, the graded poster is center-cropped to the
- * game's card ratio whenever its native aspect differs (tolerance 0.01).
- * Real image models return varying aspects (often square); every UI box
+ * CARD-RATIO NORMALIZATION (backstop): when cardRatioW/H are supplied, the
+ * graded poster is center-cropped to the game's card ratio whenever its
+ * native aspect differs (tolerance 0.01). The pipeline now generates posters
+ * NATIVELY at the card ratio (the default 3:4 is natively supported by the
+ * Gemini image endpoints and requested via aspect_ratio), so for default
+ * games this is a no-op — it only kicks in for non-3:4 sources (hand-built
+ * test fixtures, fallback models, or a changed card ratio). Every UI box
  * assumes the card ratio, so the PERSISTED file must already match it —
  * cover vs contain CSS then becomes irrelevant. The crop only ever shrinks:
- * the LONGER side is cropped down to the ratio (native 1024×1024 @ 5/7 →
- * 731×1024), never upscaled. The lower-third greeting title treatment is
- * centered in the artwork, so a symmetric side crop keeps it readable.
+ * the LONGER side is cropped down to the ratio (e.g. native 1024×1024 square
+ * @ 3/4 → 768×1024), never upscaled. The lower-third greeting title treatment
+ * is centered in the artwork, so a symmetric side crop keeps it readable.
  * Defaults: cardRatioW/H undefined → skip cropping (native preserved).
  *
  * Guards: undecodable poster bytes → throws (the caller falls back to

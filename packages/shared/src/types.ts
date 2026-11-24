@@ -35,8 +35,8 @@ export interface CardConfig {
 
 /** Sensible defaults a new game starts with. */
 export const DEFAULT_CARD_CONFIG: CardConfig = {
-  cardRatioW: 5,
-  cardRatioH: 7,
+  cardRatioW: 3,
+  cardRatioH: 4,
   buildTimerSeconds: 600,
   scoringTimerSeconds: 300,
   limits: {

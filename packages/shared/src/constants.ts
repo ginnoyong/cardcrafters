@@ -50,10 +50,11 @@ export const MAX_TIMER_SECONDS = 24 * 60 * 60;
 // Card canvas & layout geometry
 // ---------------------------------------------------------------------------
 
-/** Default card aspect ratio width (5:7 portrait card). */
-export const DEFAULT_CARD_RATIO_W = 5;
+/** Default card aspect ratio width (3:4 portrait card — natively supported
+ *  by the Gemini image endpoints, so montage generation needs zero crop). */
+export const DEFAULT_CARD_RATIO_W = 3;
 /** Default card aspect ratio height. */
-export const DEFAULT_CARD_RATIO_H = 7;
+export const DEFAULT_CARD_RATIO_H = 4;
 /**
  * Layout coordinate space: placements are expressed in a normalized 0–1000
  * space regardless of the card's pixel size, then scaled for rendering.
@@ -68,7 +69,8 @@ export const MIN_ITEM_SIZE_PCT = 6;
  * driver is the coverage-proportional target (see SOLO_ITEM_COVERAGE /
  * TOTAL_COVERAGE_TARGET in the solver). Raised from 45 so a solo item can
  * grow toward "occupying the card" (65% card-area ≈ 80%+ width for a square
- * sticker on the default 5:7 card).
+ * sticker on a 5:7 card — the pre-3:4 default this constant was calibrated
+ * on; the 3:4 default is slightly wider, so this remains a safe ceiling).
  */
 export const MAX_ITEM_SIZE_PCT = 85;
 /**

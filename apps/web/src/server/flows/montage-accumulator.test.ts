@@ -447,7 +447,7 @@ describe("montage accumulator (staging-driven)", () => {
     const rowMock = await sMock.repo.getMontageState(sMock.teamId, sMock.round);
     expect(rowMock?.status).toBe("READY");
     expect(rowMock?.lastError).toBeNull();
-    // The graded poster persists at the mock's native 800×1120 and decodes.
+    // The graded poster persists at the mock's native 800×1066 and decodes.
     const mockFiles = await readdir(path.join(sMock.storageDir, sMock.gameId, sMock.teamId));
     expect(mockFiles).toHaveLength(1);
     const persistedMock = await readFile(
@@ -456,7 +456,7 @@ describe("montage accumulator (staging-driven)", () => {
     const metaMock = await sharp(persistedMock).metadata();
     expect(metaMock.format).toBe("png");
     expect(metaMock.width).toBe(800);
-    expect(metaMock.height).toBe(1120);
+    expect(metaMock.height).toBe(1066);
 
     // REAL MODE — the same seam, once, with the neutral style-derived grading
     // (no style pack → the {0,1,1, vignette 0.15} default).
@@ -485,10 +485,10 @@ describe("montage accumulator (staging-driven)", () => {
     const metaReal = await sharp(persistedReal).metadata();
     expect(metaReal.format).toBe("png");
     // The fake's 1×1 placeholder poster is normalized to the game's card
-    // ratio (the setup game uses DEFAULT_CARD_CONFIG 5:7 → 800×1120): the
+    // ratio (the setup game uses DEFAULT_CARD_CONFIG 3:4 → 800×1067): the
     // persisted file must ALWAYS match the UI box, whatever the model sent.
     expect(metaReal.width).toBe(800);
-    expect(metaReal.height).toBe(1120);
+    expect(metaReal.height).toBe(1067);
   });
 
   it("(g2b) mock mode WITHOUT the seam override — the real gradePoster re-encodes with grading (graded bytes differ from the raw mock poster, no greeting seam anywhere)", async () => {
@@ -527,15 +527,15 @@ describe("montage accumulator (staging-driven)", () => {
     const meta = await sharp(persisted).metadata();
     expect(meta.format).toBe("png");
     expect(meta.width).toBe(800);
-    expect(meta.height).toBe(1120);
+    expect(meta.height).toBe(1066);
   });
 
-  it("(g2c) square AI poster + the game's card ratio → the persisted PNG is resized to the exact card-ratio box (800×1120 for 5:7)", async () => {
+  it("(g2c) square AI poster + the game's card ratio → the persisted PNG is resized to the exact card-ratio box (800×1067 for 3:4)", async () => {
     // Real image models return varying aspects (often square); the persisted
-    // poster must already match the game's card ratio so every UI box (5:7)
+    // poster must already match the game's card ratio so every UI box (3:4)
     // renders identically. The REAL gradePoster runs (no seam override) —
     // the accumulator forwards game.config.cardRatioW/H (the setup game uses
-    // DEFAULT_CARD_CONFIG: 5/7) and then normalizes the final bytes to the
+    // DEFAULT_CARD_CONFIG: 3/4) and then normalizes the final bytes to the
     // exact card-ratio box via normalizePosterToCardRatio (sharp resize fit
     // cover / position centre).
     const s = await setup();
@@ -560,20 +560,21 @@ describe("montage accumulator (staging-driven)", () => {
     const meta = await sharp(persisted).metadata();
     expect(meta.format).toBe("png");
     // Resize math: the accumulator normalizes the final bytes to the exact
-    // card-ratio box at the canonical poster width — 800×(800·7/5) =
-    // 800×1120, fit "cover" centre-cropping the square source's sides.
+    // card-ratio box at the canonical poster width — 800×(800·4/3) ≈
+    // 800×1067, fit "cover" centre-cropping the square source's sides.
     expect(meta.width).toBe(800);
-    expect(meta.height).toBe(1120);
-    // Output ratio is EXACTLY 5:7 — the whole point of the normalization.
-    expect(meta.width! / meta.height!).toBeCloseTo(5 / 7, 6);
+    expect(meta.height).toBe(1067);
+    // Output ratio is the 3:4 card ratio (within a half-pixel of the exact
+    // box — the whole point of the normalization).
+    expect(meta.width! / meta.height!).toBeCloseTo(3 / 4, 3);
   });
 
   it("(g2d) grading seam THROWS → the raw square poster STILL gets normalized to the card-ratio box (fail-open grading must not leak the model's aspect)", async () => {
     // The degraded-but-ready path (gradePoster throws → raw bytes persisted)
     // must NOT bypass aspect normalization: a square/landscape poster saved
-    // raw would be client-cropped by the 5:7 UI box and cut the greeting off.
+    // raw would be client-cropped by the 3:4 UI box and cut the greeting off.
     // normalizePosterToCardRatio runs on the FINAL bytes regardless of the
-    // grading outcome, so even a grading failure persists at 800×1120.
+    // grading outcome, so even a grading failure persists at 800×1067.
     const s = await setup();
     tempDirs.push(s.storageDir);
     const squarePoster = await sharp({
@@ -602,8 +603,8 @@ describe("montage accumulator (staging-driven)", () => {
     const meta = await sharp(persisted).metadata();
     expect(meta.format).toBe("png");
     expect(meta.width).toBe(800);
-    expect(meta.height).toBe(1120);
-    expect(meta.width! / meta.height!).toBeCloseTo(5 / 7, 6);
+    expect(meta.height).toBe(1067);
+    expect(meta.width! / meta.height!).toBeCloseTo(3 / 4, 3);
   });
 
   it("(g2e) grading AND normalization both fail → fail-open to the raw bytes at the native aspect + mime-derived ext (degraded, never lost)", async () => {

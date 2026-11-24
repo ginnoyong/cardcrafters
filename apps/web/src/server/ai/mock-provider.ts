@@ -120,7 +120,7 @@ export class MockProvider implements AiProvider {
       return { ...img, model, latencyMs: img.latencyMs + latencyMs };
     }
     if (task === "montage_image") {
-      // Binary output (like item_image): the procedural 800×1120 poster is
+      // Binary output (like item_image): the procedural 800×1066 poster is
       // returned as the full AiCallResult, not a { data } payload.
       const img = mockMontageImageResult(input);
       return { ...img, model, latencyMs: img.latencyMs + latencyMs };
@@ -1043,7 +1043,8 @@ const MONTAGE_FLAVOR_ADJECTIVES: readonly string[] = [
  * storybook scene — soft cohesive palette, decorative florals and charming
  * accents, subjects integrated into the ONE shared scene) with the greeting
  * BAKED IN as the lower-third hand-lettered title treatment, kept within the
- * central 60% of the image width so a 5:7 portrait crop never truncates it,
+ * central 60% of the image width so a portrait card-ratio crop never
+ * truncates it,
  * family-friendly. No character cap (montagePromptSchema no longer bounds the
  * prompt length). Validated against montagePromptSchema by compute()'s schema
  * table — the same belt-and-braces as other tasks.
@@ -1071,8 +1072,8 @@ function mockMontagePrompt(input: Record<string, unknown>): unknown {
   // Mirrors the hardened montage_prompt template's crop-safety constraint:
   // the greeting rides inside the ARTWORK, in the lower third, and every
   // text glyph stays within the CENTRAL 60% of the image width (outer 20%
-  // margins per side stay text-free) so a tighter portrait (5:7) center
-  // crop can never truncate the greeting's tail.
+  // margins per side stay text-free) so a tighter portrait center crop can
+  // never truncate the greeting's tail.
   const greetingNote = greeting
     ? ` Render the greeting "${greeting}" verbatim as an elegant hand-lettered greeting treatment across the lower third, sized to fit the CENTRAL 60% of the image width (outer 20% margins on each side stay free of text).`
     : " Render the greeting verbatim as an elegant hand-lettered greeting treatment across the lower third, sized to fit the CENTRAL 60% of the image width (outer 20% margins on each side stay free of text).";
@@ -1095,11 +1096,14 @@ function mockMontagePrompt(input: Record<string, unknown>): unknown {
 }
 
 // ---------------------------------------------------------------------------
-// montage_image — procedural 800×1120 poster via @napi-rs/canvas
+// montage_image — procedural 800×1066 poster via @napi-rs/canvas
+// (3:4 portrait — the card's default ratio; 800×4/3 = 1066.67 rounds to 1066,
+// aspect 0.7505 vs the exact 0.75 — inside POSTER_ASPECT_TOLERANCE 0.01, so
+// the pipeline's normalization is a pass-through for mock posters.)
 // ---------------------------------------------------------------------------
 
 export const MONTAGE_IMAGE_WIDTH = 800;
-export const MONTAGE_IMAGE_HEIGHT = 1120;
+export const MONTAGE_IMAGE_HEIGHT = 1066;
 export const MONTAGE_IMAGE_MIME = "image/png";
 
 /**
@@ -1150,7 +1154,7 @@ function wrapText(ctx: SKRSContext2D, text: string, maxWidth: number): string[] 
 }
 
 /**
- * Procedural 800×1120 (2:2.8 portrait) poster: ONE cohesive composition —
+ * Procedural 800×1066 (3:4 portrait) poster: ONE cohesive composition —
  * theme-hash gradient background, a single dominant central hero shape (the
  * first subject) with the remaining subjects as satellites orbiting it at
  * decaying scales, every shape inside the SAME theme-hash hue family, and the

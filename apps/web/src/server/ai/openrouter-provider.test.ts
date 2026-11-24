@@ -280,12 +280,13 @@ describe("OpenRouterProvider montage_image (poster task)", () => {
     expect(STICKER_LEAK.test(prompt)).toBe(false);
   });
 
-  it("images-endpoint montage payload requests the 5:7 card ratio (bleed-in fix) — item_image never does", async () => {
-    // The 5:7 card crop must not truncate the greeting text: the montage
-    // task asks for the card's exact 5:7 ratio via the normalized
-    // `aspect_ratio` knob (providers clamp it to their supported subset, so
-    // the bottom-anchored normalization crop stays minimal). Stickers stay
-    // square — no aspect_ratio field may ride along on item_image.
+  it("images-endpoint montage payload requests the card's 3:4 ratio (native Gemini support) — item_image never does", async () => {
+    // The card's native 3:4 generation must not truncate the greeting text:
+    // the montage task asks for the card's exact 3:4 ratio via the normalized
+    // `aspect_ratio` knob (natively supported by the Gemini image endpoints,
+    // so default games need zero crop — the normalization is a pure backstop).
+    // Stickers stay square — no aspect_ratio field may ride along on
+    // item_image.
     const imagesBody = () =>
       jsonResponse({
         data: [{ b64_json: "QUJD", media_type: "image/png" }],

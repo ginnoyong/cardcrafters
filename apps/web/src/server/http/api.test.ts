@@ -33,7 +33,7 @@ import { MemoryRepo } from "../repo/memory-repo";
 const RATIO_W = DEFAULT_CARD_CONFIG.cardRatioW;
 const RATIO_H = DEFAULT_CARD_CONFIG.cardRatioH;
 const STAGE_W = DEFAULT_CARD_WIDTH_PX;
-const STAGE_H = Math.round((STAGE_W * RATIO_H) / RATIO_W); // → 1120 (5:7)
+const STAGE_H = Math.round((STAGE_W * RATIO_H) / RATIO_W); // → 1067 (3:4)
 
 /** Paper background color — must stay in sync with card-render.ts. */
 const PAPER = { r: 0xfa, g: 0xf5, b: 0xec };

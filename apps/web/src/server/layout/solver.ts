@@ -237,7 +237,8 @@ const HERO_FIDELITY_WEIGHT = 3.0;
  * with n). Pairs where either item has no group are neutral (no info).
  *
  * Weight (1.0) — chosen so cohesion dominates the positioning preferences it
- * must beat, measured on the default 5:7 card (two equal 256×256 squares,
+ * must beat, measured on a 5:7 card (the pre-3:4 default; two equal 256×256
+ * squares,
  * width target 0.55, halfA+halfB ≈ 393): with W = 1.0 the same-group pair
  * equilibrates AT the 1.15× target (≈ 452 units, ratio 1.15 — the spacing
  * term's comfort distance ≈ 513 is weaker: moving d from 452 → 513 costs
@@ -440,7 +441,7 @@ const REBALANCE_WIDE_EXPAND = 6;
  *
  * clamped to [HERO_MIN_WIDTH, HERO_MAX_WIDTH] = [0.25, 0.75] card width.
  * The hero's size therefore scales with the sticker COUNT: n = 1 fills the
- * budget (≈ 0.75 card width for a square on the default 5:7 card — the
+ * budget (≈ 0.75 card width for a square on a 5:7 card — the
  * usable-canvas 85% target ≈ 0.56 of the card area with the greeting zone),
  * while more stickers shrink the hero and keep every support a consistent
  * 0.55×hero sibling.

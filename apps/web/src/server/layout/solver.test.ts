@@ -24,7 +24,7 @@
  * band) documented per n.
  *
  * EVERY numeric pin below is a MEASURED value (probe batch over seeds 1..5,
- * default 5:7 card + top greeting zone), asserted with −0.02/−0.03
+ * explicit 5:7 card fixture + top greeting zone), asserted with −0.02/−0.03
  * measurement slack where the pin sits on a boundary.
  * Configurations:
  *   - "squares": n equal 256×256 stickers, weight 0.5 (the hero-window
@@ -392,8 +392,8 @@ describe("solveLayout — text zone reservation", () => {
 });
 
 describe("solveLayout — hero hierarchy (measured pins)", () => {
-  // MEASURED emergent hero width windows (seeds 1..5, default 5:7 card +
-  // greeting zone). The hero targets 0.60 (center-pinned) with a yield
+  // MEASURED emergent hero width windows (seeds 1..5, explicit 5:7 card
+  // fixture + greeting zone). The hero targets 0.60 (center-pinned) with a yield
   // ladder down to 0.25, clamped to [0.25, 0.75]; supports ride the
   // [0.5, 0.6]×hero band at every n. With the overlap-cap escalation
   // retired (v6) the n = 2 (squares) hero settles just UNDER the 0.75

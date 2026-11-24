@@ -28,7 +28,7 @@ import { DEFAULT_CARD_WIDTH_PX, deriveGradingFromStyle, gradePoster, renderCardP
 const RATIO_W = DEFAULT_CARD_CONFIG.cardRatioW;
 const RATIO_H = DEFAULT_CARD_CONFIG.cardRatioH;
 const STAGE_W = DEFAULT_CARD_WIDTH_PX;
-const STAGE_H = Math.round((STAGE_W * RATIO_H) / RATIO_W); // → 1120 (5:7)
+const STAGE_H = Math.round((STAGE_W * RATIO_H) / RATIO_W); // → 1067 (3:4)
 /** Paper background color — must stay in sync with card-render.ts. */
 const PAPER = { r: 0xfa, g: 0xf5, b: 0xec };
 
@@ -65,7 +65,7 @@ function isPaper([r, g, b]: [number, number, number, number]): boolean {
 }
 
 describe("renderCardPng (real render, mock stickers)", () => {
-  it("renders hero (65% centered) + support + greeting into an opaque 800×1120 PNG", async () => {
+  it("renders hero (65% centered) + support + greeting into an opaque 800×1067 PNG", async () => {
     const storageDir = await newStorageDir();
     const hero = await writeSticker(storageDir, "hero-a", "red balloon");
     const support = await writeSticker(storageDir, "sup-b", "blue cake");
@@ -79,7 +79,7 @@ describe("renderCardPng (real render, mock stickers)", () => {
     const heroDisplayPx = 0.65 * STAGE_W;
     const heroScale = heroDisplayPx / (REF_SIZE * k * pxPerUnit);
     // Card center in the fitted 0..1000 space (the card box is anchored at
-    // the origin — see cardBoxNormalized) → 357.14 for the 5:7 card.
+    // the origin — see cardBoxNormalized) → 375 for the 3:4 card.
     const placements = [
       { itemId: hero.itemId!, x: card.w / 2, y: 550, scale: heroScale, rotation: 0, zIndex: 1 },
       { itemId: support.itemId!, x: 350, y: 850, scale: 0.5, rotation: 0, zIndex: 0 },
@@ -92,10 +92,10 @@ describe("renderCardPng (real render, mock stickers)", () => {
       { storageDir },
     );
 
-    // -- dimensions: 800×1120 (5:7) -----------------------------------------
+    // -- dimensions: 800×1067 (3:4) -----------------------------------------
     const meta = await sharp(png).metadata();
     expect(meta.width).toBe(800);
-    expect(meta.height).toBe(1120);
+    expect(meta.height).toBe(1067);
     expect(meta.format).toBe("png");
 
     // -- raw decode for pixel-level assertions ------------------------------
@@ -107,7 +107,7 @@ describe("renderCardPng (real render, mock stickers)", () => {
     expect(isPaper(bg)).toBe(true);
 
     // -- stickers present: count non-background pixels around the placements.
-    // The hero occupies ~65% × 0.65·(7/5)·800 px of the canvas — its filled
+    // The hero occupies ~65% × 0.65·(4/3)·800 px of the canvas — its filled
     // shape must leave a clear signature; the paper-only variant of the card
     // (no stickers) would count ZERO here.
     const nonPaper = (() => {
@@ -157,7 +157,7 @@ describe("renderCardPng (real render, mock stickers)", () => {
     );
     const raw = await sharp(png).ensureAlpha().raw().toBuffer();
     expect(pixelAt(raw, 10, 10, STAGE_W)[3]).toBe(255);
-    const heroInside = pixelAt(raw, Math.round(STAGE_W / 2), 600 * (STAGE_H / card.h), STAGE_W);
+    const heroInside = pixelAt(raw, Math.round(STAGE_W / 2), Math.round(600 * (STAGE_H / card.h)), STAGE_W);
     expect(isPaper(heroInside)).toBe(false);
   });
 
@@ -238,7 +238,7 @@ describe("renderCardPng finalPass (feathering + montage grading)", () => {
 
     const meta = await sharp(a).metadata();
     expect(meta.width).toBe(800);
-    expect(meta.height).toBe(1120);
+    expect(meta.height).toBe(1067);
     expect(meta.format).toBe("png");
 
     // Pixel pins: pure paper at the corner, opaque, and a non-paper sticker
@@ -247,7 +247,12 @@ describe("renderCardPng finalPass (feathering + montage grading)", () => {
     const bg = pixelAt(raw, 10, 10, STAGE_W);
     expect(bg[3]).toBe(255);
     expect(isPaper(bg)).toBe(true);
-    const heroInside = pixelAt(raw, Math.round(STAGE_W / 2), 550 * (STAGE_H / cardBoxNormalized(RATIO_W, RATIO_H).h), STAGE_W);
+    // y must be an INTEGER pixel: 550 × (1067/1000) = 586.85 is fractional,
+    // and pixelAt's raw-buffer index math (y × width + x) would floor the
+    // product into the wrong row AND shift the column (row 586, col 680 —
+    // off the hero). 5:7's 1.12 factor happened to be integral; 3:4's 1.067
+    // is not, so round explicitly.
+    const heroInside = pixelAt(raw, Math.round(STAGE_W / 2), Math.round(550 * (STAGE_H / cardBoxNormalized(RATIO_W, RATIO_H).h)), STAGE_W);
     expect(isPaper(heroInside)).toBe(false);
   });
 
@@ -297,10 +302,10 @@ describe("renderCardPng finalPass (feathering + montage grading)", () => {
     const meta = await sharp(png).metadata();
     expect(meta.format).toBe("png");
     expect(meta.width).toBe(800);
-    expect(meta.height).toBe(1120);
+    expect(meta.height).toBe(1067);
     // Full raw decode succeeds at the exact expected byte count (RGBA).
     const raw = await sharp(png).ensureAlpha().raw().toBuffer();
-    expect(raw.length).toBe(800 * 1120 * 4);
+    expect(raw.length).toBe(800 * 1067 * 4);
   });
 
   it("(d) grading extremes render without throwing and produce valid PNGs", async () => {
@@ -321,7 +326,7 @@ describe("renderCardPng finalPass (feathering + montage grading)", () => {
       const meta = await sharp(png).metadata();
       expect(meta.format).toBe("png");
       expect(meta.width).toBe(800);
-      expect(meta.height).toBe(1120);
+      expect(meta.height).toBe(1067);
     }
   });
 });
