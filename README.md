@@ -19,7 +19,7 @@ docker compose up -d && sleep 8 && docker compose ps   # postgres + redis health
 npm run dev                                            # run the app on localhost:3000
 ```
 
-Note: the `Dockerfile` is currently unused (compose only provides postgres + redis; the app runs via `npm run dev`).
+Note: `docker compose` only provides postgres + redis; the app itself runs via `npm run dev`. For production see the `docker-compose.prod.yml` stack under *Deploy to a VPS* below.
 
 | URL | What it is |
 |---|---|
@@ -55,6 +55,25 @@ node apps/web/scripts/demo-bots.mjs --url http://localhost:3210 --no-gm-drive
 ## AI configuration
 
 Set `AI_MODE=mock` for deterministic offline play (procedural stickers + canned montage posters), or configure provider keys in `.env` for live generation (`AI_MODE=live`). Task registry, pricing, and prompt templates live in `config/ai-tasks.json` and `config/prompts/`.
+
+## Deploy to a VPS
+
+Prereqs: a VPS with Docker + Docker Compose, a DNS A record for your domain (TLS mode), and inbound ports 80/443 (TLS mode) or 3000 (LAN mode) open.
+
+1. Copy `.env.example` to `.env` on the server and fill it in (at minimum `OPENROUTER_API_KEY`; the compose file overrides `DATABASE_URL`/`REDIS_URL` with container-internal hostnames).
+2. LAN mode (no domain needed):
+
+   ```bash
+   docker compose -f docker-compose.prod.yml up -d --build
+   ```
+
+3. TLS mode (Caddy issues a certificate automatically — requires the DNS A record and ports 80/443 open; close port 3000 in your firewall once active):
+
+   ```bash
+   COMPOSE_PROFILES=tls docker compose -f docker-compose.prod.yml up -d --build
+   ```
+
+Redeploys use the same command — Prisma migrations run on container start (`npx prisma migrate deploy`) and are idempotent, so data in the `pgdata` volume is preserved. The dev workflow (`docker compose up -d` + `npm run dev`) is unchanged and uses a separate compose project.
 
 ## Verification
 

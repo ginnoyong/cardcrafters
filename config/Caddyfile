@@ -1,0 +1,16 @@
+# Card Crafters reverse proxy (Caddy 2).
+#
+# Requirements for automatic HTTPS:
+#   - DNS A record pointing CC_DOMAIN at this server's public IP
+#   - inbound ports 80 and 443 open (80 for the ACME HTTP-01 challenge)
+#   - CC_DOMAIN set in .env (read by docker-compose.prod.yml)
+#
+# WebSockets are proxied by default — Socket.IO needs no extra config.
+#
+# LAN mode: leave CC_DOMAIN empty. Caddy's automatic HTTPS needs a real
+# public domain, so for LAN play just skip this service entirely and use
+# the app's published port (http://<host>:3000) instead.
+
+{$CC_DOMAIN} {
+	reverse_proxy app:3000
+}

@@ -1,0 +1,93 @@
+# Production stack for Card Crafters.
+#
+# LAN mode (no TLS):
+#   docker compose -f docker-compose.prod.yml up -d --build
+#   → app on http://<host>:3000
+#
+# TLS mode (Caddy automatic HTTPS):
+#   COMPOSE_PROFILES=tls docker compose -f docker-compose.prod.yml up -d --build
+#   → requires a DNS A record for CC_DOMAIN (in .env) and ports 80/443 open.
+#   When the tls profile is active, close port 3000 in your firewall — the
+#   app should only be reachable through Caddy.
+#
+# Postgres and Redis are internal-only (no published ports) in production.
+
+name: cardcrafters-prod
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cardcrafters
+      POSTGRES_PASSWORD: cardcrafters
+      POSTGRES_DB: cardcrafters
+    # No published ports: reachable only inside the compose network.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cardcrafters -d cardcrafters"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    # No published ports: reachable only inside the compose network.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  app:
+    build: .
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      # Container-internal hostnames (override any localhost values in .env).
+      DATABASE_URL: postgresql://cardcrafters:cardcrafters@postgres:5432/cardcrafters
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - uploads:/app/apps/web/public/static
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  # Optional automatic-HTTPS reverse proxy (activate with COMPOSE_PROFILES=tls).
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      # Domain for automatic HTTPS (e.g. cards.example.com). Leave empty for
+      # LAN mode — but in LAN mode you don't need this service at all.
+      CC_DOMAIN: ${CC_DOMAIN:-}
+    depends_on:
+      - app
+
+volumes:
+  pgdata:
+  uploads:
+  caddy_data:
+  caddy_config:
