@@ -44,6 +44,9 @@ import { MemoryRepo } from "./src/server/repo/memory-repo";
 import type { Repository } from "./src/server/repo/repository";
 import { PrismaRepo } from "./src/server/repo/prisma-repo";
 import { registerSocketHandlers } from "./src/server/ws/server";
+import { DEFAULT_ITEMS_DIR } from "./src/server/flows/item-image";
+import { DEFAULT_MONTAGE_DIR } from "./src/server/flows/montage-accumulator";
+import { createReadStream, promises as fsp } from "node:fs";
 
 const here = path.dirname(fileURLToPath(import.meta.url)); // apps/web
 
@@ -121,6 +124,73 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Card
   const aiRef: { ai: AiRouter | null } = { ai: null };
   const ioRef: { io: SocketServer | null } = { io: null };
 
+  /**
+   * Runtime-generated image files (stickers + montage posters) are written
+   * under public/static AFTER the Next build — and Next production only
+   * serves assets that existed at build time, so it would 404 every card
+   * image. Serve /static/* directly from disk here (per-request read),
+   * before the Next fallthrough. Works identically in dev and prod.
+   */
+  const STATIC_ROOT = path.dirname(DEFAULT_ITEMS_DIR); // apps/web/public/static
+  const STATIC_CONTENT_TYPES: Record<string, string> = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+  };
+  const serveStatic = (req: http.IncomingMessage, res: http.ServerResponse, pathname: string): void => {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      res.writeHead(405, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
+      return;
+    }
+    // Traversal guard: decode, then require the resolved path to stay under
+    // the static root (montage URLs nest {gameId}/{teamId}/{file} inside it).
+    let rel: string;
+    try {
+      rel = decodeURIComponent(pathname.slice("/static/".length));
+    } catch {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "bad_path" }));
+      return;
+    }
+    const abs = path.resolve(STATIC_ROOT, rel);
+    if (abs !== STATIC_ROOT && !abs.startsWith(STATIC_ROOT + path.sep)) {
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "forbidden" }));
+      return;
+    }
+    const ext = path.extname(abs).toLowerCase();
+    const contentType = STATIC_CONTENT_TYPES[ext];
+    if (!contentType) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "not_found" }));
+      return;
+    }
+    fsp
+      .stat(abs)
+      .then((st) => {
+        if (!st.isFile()) throw new Error("not a file");
+        res.writeHead(200, {
+          "content-type": contentType,
+          "content-length": st.size,
+          "cache-control": "public, max-age=31536000, immutable",
+        });
+        if (req.method === "HEAD") {
+          res.end();
+          return;
+        }
+        const stream = createReadStream(abs);
+        stream.on("error", () => res.destroy());
+        stream.pipe(res);
+      })
+      .catch(() => {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "not_found" }));
+      });
+  };
+
   /** Non-API request: Next when available, 404 otherwise. */
   const fallthrough = (req: http.IncomingMessage, res: http.ServerResponse): void => {
     const handler = nextHandlerRef.handler;
@@ -152,6 +222,10 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Card
       void handleApiRequest(req, res, hubRef.hub, repo, aiRef.ai, ioRef.io).then((consumed) => {
         if (!consumed) fallthrough(req, res);
       });
+      return;
+    }
+    if (url === "/static" || url.startsWith("/static/")) {
+      serveStatic(req, res, url.slice(0, url.indexOf("?") === -1 ? undefined : url.indexOf("?")));
       return;
     }
     fallthrough(req, res);
