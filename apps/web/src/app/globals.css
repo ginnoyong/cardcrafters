@@ -1198,6 +1198,22 @@ label {
   color: var(--accent);
 }
 
+/* Terminal feed rows (rejected / failed / withdrawn): the sticker is never
+   coming to the card, so the row text is struck through and a muted
+   parenthetical note carries the outcome — no live "Find on card" button. */
+.cc-feed-struck {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, var(--text-muted) 55%, transparent);
+}
+
+.cc-feed-note {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
 /* --- No-undo notice -------------------------------------------------------- */
 
 .cc-notice {
