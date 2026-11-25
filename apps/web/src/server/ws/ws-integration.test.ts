@@ -965,7 +965,7 @@ describe("scoring phase end-to-end", () => {
     // Identity mapping: the card labeled "Card X" belongs to team X's real
     // name — labels follow teams, never a positional shuffle artifact.
     for (const c of alexCopy.cards) {
-      const letter = c.label.replace("Card ", "");
+      const letter = String(c.label).replace("Card ", "");
       const expectedName = (await repo.listTeams(gameId)).find(
         (t) => t.label === letter,
       )?.name;
