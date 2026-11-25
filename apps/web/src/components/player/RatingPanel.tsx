@@ -27,9 +27,37 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 
 import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W } from "@cardcrafters/shared";
 
-import type { ClientScoring, ClientScoreTally } from "@/lib/store";
+import type { ClientScoring, ClientScoreTally, ClientScoringCard } from "@/lib/store";
+import { EMPTY_CARD_FINISHED } from "@/lib/empty-card-note";
 import { friendlyScoreError } from "@/lib/socket";
 import CardBack from "../CardBack";
+
+/**
+ * Which face treatment the rating preview renders for a card — extracted as
+ * a pure function so the server/client parity contract is unit-testable:
+ *
+ *  - "empty": the card is BLANK (payload `empty` — 0 renderable READY
+ *    stickers server-side) AND the montage poster is not READY. Both flip
+ *    faces render the client-side empty treatment (CardBack + greeting +
+ *    EMPTY_CARD_FINISHED) instead of the composed PNG — a 0-prompt team
+ *    whose greeting row was dropped used to compose a paper-only PNG whose
+ *    onError→CardBack fallback never fired (a valid image), leaving the
+ *    player staring at a blank card.
+ *  - "image": every other card — the real server artwork (poster montage
+ *    file or composed scoring-card PNG), unchanged behavior.
+ */
+export type RatingCardFace =
+  | { kind: "empty" }
+  | { kind: "image"; variant: "poster" | "sticker" };
+
+export function ratingCardFace(
+  card: Pick<ClientScoringCard, "empty" | "montage">,
+  variant: "poster" | "sticker",
+): RatingCardFace {
+  return card.empty && card.montage?.status !== "ready"
+    ? { kind: "empty" }
+    : { kind: "image", variant };
+}
 
 /** Outcome of one FINAL submit (delivered by the parent's socket ack). */
 export interface ScoreSubmitOutcome {
@@ -150,6 +178,10 @@ export default function RatingPanel({
   // Real team name (decision 2a) — falls back to the anonymous label only if
   // the payload somehow lacks a teamName.
   const cardName = card.teamName ?? card.label;
+  // Face treatment: empty cards (0 renderable READY stickers, no READY
+  // poster) render the client-side empty treatment on BOTH flip faces;
+  // everything else keeps the server artwork path unchanged.
+  const face = ratingCardFace(card, variant);
   // Poster face: when the scoring payload carries a READY montage view,
   // render the real poster file directly (public /static path served by the
   // custom server) — the composed-PNG endpoint stays as the fallback path
@@ -162,7 +194,6 @@ export default function RatingPanel({
     (variant === "poster" && posterSrc ? posterSrc : null) ??
     `/api/games/${gameCode}/scoring-card/${card.cardId}?token=${sessionToken}&v=${cardVersion ?? 0}` +
       (variant === "poster" ? "&variant=poster" : "");
-    (variant === "poster" ? "&variant=poster" : "");
 
   const go = (delta: number): void => {
     setPending(null);
@@ -233,10 +264,41 @@ export default function RatingPanel({
         ) : null}
       </div>
 
-      {/* Finished-card preview (server renders the team's actual card):
-          poster-first — tap the image or the flip button to switch between
-          the AI poster and the sticker card. */}
-      {!imgFailed ? (
+      {/* Finished-card preview: EMPTY cards render the client-side empty
+          treatment on BOTH faces (CardBack + the payload greeting + the
+          finished note) — the flip button still works but both faces look
+          the same, which is honest for a blank card. Non-empty cards keep
+          the server artwork: poster-first — tap the image or the flip button
+          to switch between the AI poster and the sticker card. */}
+      {face.kind === "empty" ? (
+        <>
+          <div
+            className="cc-rating-image-box"
+            style={{
+              aspectRatio: `${cardRatioW} / ${cardRatioH}`,
+              "--card-ratio-w": cardRatioW,
+              "--card-ratio-h": cardRatioH,
+            } as CSSProperties}
+          >
+            <CardBack
+              greeting={card.greeting ?? ""}
+              montageStatus="fallback"
+              note={EMPTY_CARD_FINISHED}
+              cardRatioW={cardRatioW}
+              cardRatioH={cardRatioH}
+            />
+          </div>
+          <button
+            type="button"
+            className="cc-btn cc-flip-btn"
+            data-testid="rating-card-flip"
+            disabled={submitting}
+            onClick={() => setVariant((v) => (v === "poster" ? "sticker" : "poster"))}
+          >
+            {variant === "poster" ? "Show sticker card" : "Show poster"}
+          </button>
+        </>
+      ) : !imgFailed ? (
         <>
           <div
             className="cc-rating-image-box"

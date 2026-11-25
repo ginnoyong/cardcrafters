@@ -16,7 +16,12 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_CARD_CONFIG } from "@cardcrafters/shared";
 
 import { MemoryRepo } from "../repo/memory-repo";
-import { latestGreetingText, scoringMontageView } from "./scoring-card-extras";
+import {
+  latestGreetingText,
+  resolveCardGreeting,
+  scoringCardIsEmpty,
+  scoringMontageView,
+} from "./scoring-card-extras";
 
 const uniq = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 
@@ -56,6 +61,48 @@ describe("latestGreetingText — round-fallback walk", () => {
     const { repo, game, teamB } = await mkGame();
     expect(await latestGreetingText(repo, game.id, teamB.id, 1)).toBe("");
     expect(await latestGreetingText(repo, game.id, teamB.id, 3)).toBe("");
+  });
+});
+
+describe("resolveCardGreeting — LAST-RESORT blank-card guard", () => {
+  it("passes real greeting text through untouched (modulo trim/collapse)", () => {
+    expect(resolveCardGreeting("Happy building, Crew A!", "Castles", "Crew A")).toBe(
+      "Happy building, Crew A!",
+    );
+    // Whitespace normalization only — a real AI greeting is always preferred.
+    expect(resolveCardGreeting("  Hello   world  ", null, "Crew B")).toBe("Hello world");
+  });
+
+  it("falls back to the themed one-liner when the text is empty", () => {
+    expect(resolveCardGreeting("", "Castles", "Crew A")).toBe("Happy Castles, Crew A!");
+    expect(resolveCardGreeting("   ", "  Pirate   Cove  ", "Crew B")).toBe(
+      "Happy Pirate Cove, Crew B!",
+    );
+  });
+
+  it("falls back to the theme-less one-liner when there is no theme", () => {
+    expect(resolveCardGreeting("", null, "Crew A")).toBe("For Crew A!");
+    expect(resolveCardGreeting("", "   ", "Crew B")).toBe("For Crew B!");
+  });
+
+  it("scoringCardIsEmpty — matches renderTeamCardPng's renderable-item filter", async () => {
+    const { repo, game, teamA } = await mkGame();
+    // No items → blank.
+    expect(await scoringCardIsEmpty(repo, teamA.id, game.round)).toBe(true);
+    // A READY item WITHOUT size is not renderable — still blank (the PNG
+    // filters width/height>0 before composing).
+    const unsized = await repo.createItem({
+      teamId: teamA.id,
+      playerId: "player-x",
+      round: game.round,
+      promptRaw: "p",
+      subject: "s",
+      status: "READY",
+    });
+    expect(await scoringCardIsEmpty(repo, teamA.id, game.round)).toBe(true);
+    // Sized → renderable → not blank.
+    await repo.updateItem(unsized.id, { width: 512, height: 512 });
+    expect(await scoringCardIsEmpty(repo, teamA.id, game.round)).toBe(false);
   });
 });
 

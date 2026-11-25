@@ -28,6 +28,7 @@ import type { AiRouter } from "../ai/router";
 import { DEFAULT_MONTAGE_DIR } from "../flows/montage-accumulator";
 import { generateGreetingsForGame } from "../flows/greetings";
 import type { GameHub, RoomEmitter } from "../game/hub";
+import { latestGreetingText, resolveCardGreeting } from "../game/scoring-card-extras";
 import { deriveGradingFromStyle, renderCardPng, type RenderableItem } from "../render/card-render";
 import type { Repository, GameRow } from "../repo/repository";
 import { gmRoom, teamRoom } from "../ws/rooms";
@@ -134,9 +135,13 @@ export function mergeCardConfig(partial: unknown): CardConfig {
  *
  * Greeting lookup: greeting rows are only ever created for round 1 (at game
  * creation), and per-team AI failures drop rows silently, so round 2+ cards
- * would otherwise render with an empty greeting (a blank pale card). If the
- * round-scoped lookup misses, fall back to the team's LATEST greeting from an
- * earlier round — walk rounds downward from round-1 and use the first match.
+ * would otherwise render with an empty greeting (a blank pale card). The
+ * round-scoped lookup walks DOWNWARD via latestGreetingText (same rule the
+ * ws scoring payloads apply — one shared rule, no divergence); a team with
+ * no greeting row in ANY round still gets resolveCardGreeting's LAST-RESORT
+ * themed one-liner (Happy <theme>, <name>! / For <name>!) so the composed
+ * PNG is greeting-bearing even for row-less 0-prompt teams — the client's
+ * CardBack onError fallback then truly never fires.
  */
 async function renderTeamCardPng(
   repo: Repository,
@@ -153,18 +158,20 @@ async function renderTeamCardPng(
   const items: RenderableItem[] = (await repo.listItems(teamId, round, ["READY"]))
     .filter((r) => (r.width ?? 0) > 0 && (r.height ?? 0) > 0)
     .map((r) => ({ itemId: r.id, imageUrl: r.imageUrl, width: r.width!, height: r.height! }));
-  // Round-scoped lookup first; if it misses (greeting rows only exist for
-  // round 1, and per-team AI failures can drop even those), fall back to the
-  // team's LATEST greeting from an earlier round — walk rounds downward from
-  // round-1 and use the first match. A miss everywhere degrades to "".
-  let greeting: Awaited<ReturnType<typeof repo.listGreetings>>[number] | undefined;
-  for (let r = round; r >= 1 && !greeting; r--) {
-    greeting = (await repo.listGreetings(game.id, r)).find((g) => g.teamId === teamId);
-  }
+  // Round-scoped lookup with downward round-walk (latestGreetingText — the
+  // ONE shared rule with the ws scoring payloads). A miss everywhere still
+  // resolves through resolveCardGreeting: the themed last-resort one-liner
+  // keeps even row-less teams' composed cards greeting-bearing.
+  const orderCard = game.scoringOrder?.cards.find((c) => c.teamId === teamId);
+  const teamName =
+    orderCard?.teamName ??
+    (await repo.listTeams(game.id)).find((t) => t.id === teamId)?.name ??
+    "";
+  const greeting = await latestGreetingText(repo, game.id, teamId, round);
   return renderCardPng(
     items,
     { placements: layout?.placements ?? [] },
-    greeting?.text ?? "",
+    resolveCardGreeting(greeting, game.theme ?? null, teamName),
     {
       cardRatioW: game.config.cardRatioW,
       cardRatioH: game.config.cardRatioH,

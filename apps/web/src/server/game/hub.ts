@@ -44,7 +44,12 @@ import type {
 } from "../repo/repository";
 import type { ScoringOrder } from "@cardcrafters/shared";
 import { hashString, mulberry32 } from "../ai/mock-provider";
-import { latestGreetingText, scoringMontageView } from "./scoring-card-extras";
+import {
+  latestGreetingText,
+  resolveCardGreeting,
+  scoringCardIsEmpty,
+  scoringMontageView,
+} from "./scoring-card-extras";
 import { transition } from "./state-machine";
 import { createInitialRuntimeState } from "./types";
 import type { Effect, GameEvent, GameRuntimeState, TransitionResult } from "./types";
@@ -484,17 +489,26 @@ export class GameHub {
         // PUBLIC card copies (player + presenter): team-named (decision 2a) but
         // NEVER the teamId mapping. Each card additionally carries the content
         // needed to render prompt-less teams' cards client-side: the team's
-        // greeting (round-fallback — same rule as renderTeamCardPng) and the
-        // montage poster view when READY. Greeting text is public on the card
-        // artwork anyway (the composed render prints it), so this leaks nothing
-        // new. Resolved at payload time because the finalize montage pass is
+        // greeting (round-fallback — same rule as renderTeamCardPng) pushed
+        // through resolveCardGreeting (LAST-RESORT themed one-liner for teams
+        // whose greeting generation failed in every round — never blank), the
+        // READY montage poster view when READY, and the `empty` flag (no
+        // renderable READY stickers — the client renders its own empty-card
+        // treatment in parity). Greeting text is public on the card artwork
+        // anyway (the composed render prints it), so this leaks nothing new.
+        // Resolved at payload time because the finalize montage pass is
         // fire-and-forget — state read HERE is fresher than at persist time.
         const publicCards = await Promise.all(
           order.cards.map(async (c) => ({
             cardId: c.cardId,
             label: c.label,
             teamName: c.teamName,
-            greeting: await latestGreetingText(this.repo, gameId, c.teamId, state.round),
+            greeting: resolveCardGreeting(
+              await latestGreetingText(this.repo, gameId, c.teamId, state.round),
+              state.theme ?? null,
+              c.teamName,
+            ),
+            empty: await scoringCardIsEmpty(this.repo, c.teamId, state.round),
             montage: await scoringMontageView(this.repo, c.teamId, state.round),
           })),
         );

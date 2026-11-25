@@ -39,6 +39,8 @@ import { regenerateGreeting } from "../flows/greetings";
 import { pickPeoplesChoice, submitScore } from "../flows/scoring";
 import {
   latestGreetingText,
+  resolveCardGreeting,
+  scoringCardIsEmpty,
   scoringMontageView,
 } from "../game/scoring-card-extras";
 import { deriveGameStyle } from "../flows/style";
@@ -225,6 +227,9 @@ export interface SyncFullPayload extends Record<string, unknown> {
       teamId?: string;
       /** Round-fallback greeting — lets players render prompt-less cards. */
       greeting?: string;
+      /** BLANK card (no renderable READY stickers) — the client renders its
+       *  own empty-card treatment instead of the composed PNG. */
+      empty?: boolean;
       /** READY montage poster view (public /static path) or null. */
       montage?: { status: "ready"; imageUrl: string } | null;
     }>;
@@ -397,7 +402,10 @@ export async function buildSyncFull(
     const cardByTeam = new Map(order.cards.map((c) => [c.teamId, c.cardId]));
     const aggregates = await repo.aggregateScores(gameId, round);
     // Per-card content extras (player + presenter): the team's round-fallback
-    // greeting + the READY montage poster view — resolved at payload time so
+    // greeting (pushed through resolveCardGreeting — the LAST-RESORT themed
+    // one-liner for teams whose greeting generation failed in every round,
+    // so no card is ever blank) + the BLANK flag (no renderable READY
+    // stickers) + the READY montage poster view — resolved at payload time so
     // the rating surfaces can render prompt-less teams' cards client-side.
     // Keyed by anonymous cardId; greeting text is public on the card artwork
     // anyway (the composed render prints it). teamId still never rides along.
@@ -408,7 +416,12 @@ export async function buildSyncFull(
             [
               c.cardId,
               {
-                greeting: await latestGreetingText(repo, gameId, c.teamId, round),
+                greeting: resolveCardGreeting(
+                  await latestGreetingText(repo, gameId, c.teamId, round),
+                  state.theme ?? null,
+                  c.teamName,
+                ),
+                empty: await scoringCardIsEmpty(repo, c.teamId, round),
                 montage: await scoringMontageView(repo, c.teamId, round),
               },
             ] as const,
@@ -444,6 +457,7 @@ export async function buildSyncFull(
           label: c.label,
           teamName: c.teamName,
           greeting: cardExtras.get(c.cardId)?.greeting ?? "",
+          empty: cardExtras.get(c.cardId)?.empty ?? false,
           montage: cardExtras.get(c.cardId)?.montage ?? null,
         })),
         yourTeamCardId: order.cards.find((c) => c.teamId === identity.teamId)?.cardId,
@@ -477,6 +491,7 @@ export async function buildSyncFull(
           label: c.label,
           teamName: c.teamName,
           greeting: cardExtras.get(c.cardId)?.greeting ?? "",
+          empty: cardExtras.get(c.cardId)?.empty ?? false,
           montage: cardExtras.get(c.cardId)?.montage ?? null,
           ...(revealMapping ? { teamId: c.teamId } : {}),
         })),

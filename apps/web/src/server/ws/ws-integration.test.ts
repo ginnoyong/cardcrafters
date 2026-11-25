@@ -962,6 +962,9 @@ describe("scoring phase end-to-end", () => {
       // included).
       expect(typeof c.greeting).toBe("string");
       expect((c.greeting as string).length).toBeGreaterThan(0);
+      // The `empty` flag (scoring-card-extras) rides the payload too — the
+      // client needs it to render its empty-card treatment for team C.
+      expect(typeof c.empty).toBe("boolean");
       expect(c).not.toHaveProperty("teamId");
     }
     expect(typeof alexCopy.yourTeamCardId).toBe("string");
@@ -1097,6 +1100,7 @@ describe("scoring phase end-to-end", () => {
         cardId: string;
         teamName: string;
         greeting: string;
+        empty: boolean;
         montage: { status: string; imageUrl: string } | null;
       }>;
       yourTeamCardId?: string;
@@ -1115,6 +1119,23 @@ describe("scoring phase end-to-end", () => {
     // landed). teamId still never rides along.
     expect(
       scoring.cards.every((c) => typeof c.greeting === "string" && c.greeting.length > 0),
+    ).toBe(true);
+    // The `empty` flag rides every card (scoring-card-extras parity with the
+    // composed PNG's renderable-item filter): the itemless team C's card is
+    // BLANK (0 renderable READY stickers — no poster can ever be READY for
+    // it) while the two seeded teams are NOT blank. Every greeting is
+    // non-empty too — this harness seeds greeting rows for ALL teams, so the
+    // passthrough path (not the LAST-RESORT fallback) is what feeds them
+    // here; the fallback itself is covered by the resolveCardGreeting unit
+    // tests (scoring-card-extras.test.ts).
+    const playerCardC0 = scoring.cards.find(
+      (c) => c.cardId === gmCopy.cards.find((x) => x.teamId === teamCId)!.cardId,
+    )!;
+    expect(playerCardC0.empty).toBe(true);
+    expect(
+      scoring.cards
+        .filter((c) => c.cardId !== playerCardC0.cardId)
+        .every((c) => c.empty === false),
     ).toBe(true);
     for (const c of scoring.cards) {
       if (c.montage === null) continue;

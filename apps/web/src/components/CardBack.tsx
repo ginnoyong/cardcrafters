@@ -39,6 +39,7 @@ export default function CardBack({
   montageStatus,
   cardRatioW,
   cardRatioH,
+  note: noteOverride,
 }: {
   /** The team's greeting — the "title" on the card back. */
   greeting: string;
@@ -47,13 +48,18 @@ export default function CardBack({
   /** Card aspect ratio (game config) — same box as the poster/sticker faces. */
   cardRatioW: number;
   cardRatioH: number;
+  /** Optional note-text override (overrides the montageStatus-derived line).
+   *  The RatingPanel empty-card treatment passes EMPTY_CARD_FINISHED — an
+   *  actually blank card must say so, not "no AI poster was generated". */
+  note?: string;
 }) {
   const note =
-    montageStatus === "generating"
+    noteOverride ??
+    (montageStatus === "generating"
       ? "AI poster still generating…"
       : montageStatus === "fallback"
         ? "No AI poster was generated"
-        : "AI poster coming soon…";
+        : "AI poster coming soon…");
 
   return (
     <div

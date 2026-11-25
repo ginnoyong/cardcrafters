@@ -194,8 +194,13 @@ export interface ClientScoringCard {
   teamId?: string;
   /** Round-fallback greeting — present so prompt-less cards still render
    *  their text (keyed by anonymous cardId; greeting is public on the card
-   *  artwork anyway). */
+   *  artwork anyway). Guaranteed non-empty by the server's LAST-RESORT
+   *  resolver (resolveCardGreeting) — absent only in stale/malformed data. */
   greeting?: string;
+  /** BLANK card (0 renderable READY stickers) — when true and the montage
+   *  view is not READY, the client renders its own empty-card treatment
+   *  (CardBack + greeting + finished note) instead of the server PNG. */
+  empty?: boolean;
   /** READY montage poster view (public /static path) or null. */
   montage?: { status: "ready"; imageUrl: string } | null;
 }
@@ -456,6 +461,7 @@ export function parseScoringCards(raw: unknown): ClientScoringCard[] | null {
       ...(typeof e.teamName === "string" && e.teamName ? { teamName: e.teamName } : {}),
       ...(typeof e.teamId === "string" ? { teamId: e.teamId } : {}),
       ...(typeof e.greeting === "string" && e.greeting ? { greeting: e.greeting } : {}),
+      ...(e.empty === true ? { empty: true } : {}),
       ...parseCardMontage(e.montage),
     });
   }
