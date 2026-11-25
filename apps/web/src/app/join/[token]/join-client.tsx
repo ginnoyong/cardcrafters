@@ -673,6 +673,11 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                 </div>
                 <TeamJudgeCard
                   team={team}
+                  greetingOverride={
+                    snapshot.scoring?.cards.find(
+                      (c) => c.cardId === snapshot.scoring?.yourTeamCardId,
+                    )?.greeting
+                  }
                   cardLabel={null}
                   tally={null}
                   actions={null}

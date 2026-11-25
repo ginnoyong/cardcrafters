@@ -376,7 +376,7 @@ describe("capacity + persistence", () => {
 // ---------------------------------------------------------------------------
 
 describe("preScoring hook", () => {
-  it("runs after the GM montage:started heads-up and BEFORE scoring:started; scoringOrder is not yet persisted inside the hook", async () => {
+  it("runs after the GM montage:started heads-up and BEFORE scoring:started; scoringOrder IS persisted inside the hook (hook now fires after public-card resolution)", async () => {
     const repo = new MemoryRepo();
     const { io, sent } = fakeIo();
     let markerRan = false;
@@ -398,9 +398,19 @@ describe("preScoring hook", () => {
     await hub.applyEvent(game.id, { type: "gm:stopBuild", now: NOW });
     hub.shutdown(); // clear the armed SCORING timer
 
-    // The hook ran and observed NO scoringOrder yet (it precedes persistence).
+    // The hook ran and observed the PERSISTED scoringOrder: the hook moved
+    // AFTER public-card resolution + persistence (hub comment) so the
+    // scoring:started emit stays ahead of the finalize chain's
+    // montage:generating (the ordering guarantee the ws-integration suite
+    // asserts).
     expect(markerRan).toBe(true);
-    expect(scoringOrderInHook).toBeNull();
+    const orderInHook = scoringOrderInHook as {
+      round: number;
+      cards: Array<{ cardId: string }>;
+    } | null;
+    expect(orderInHook).not.toBeNull();
+    expect(orderInHook?.round).toBe(1);
+    expect(orderInHook?.cards.length).toBeGreaterThan(0);
 
     // GM-room ordering: montage:started strictly before scoring:started.
     const gmEvents = sent.filter((s) => s.room === gm).map((s) => s.event);

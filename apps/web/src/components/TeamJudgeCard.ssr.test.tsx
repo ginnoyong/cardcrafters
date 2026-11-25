@@ -179,4 +179,28 @@ describe("TeamJudgeCard (SSR) — flip-face geometry parity", () => {
     );
     expect(html).toContain('data-greeting=""');
   });
+
+  it("an empty snapshot greeting falls back to greetingOverride on the card-back face", () => {
+    // Scoring-payload fix wiring: a player whose snapshot team lookup missed
+    // (own-card views are keyed by the ANONYMOUS cardId) passes the scoring
+    // payload's round-fallback greeting as greetingOverride. With
+    // team.greeting.text EMPTY the override must still reach the greeting
+    // surfaces via renderToStaticMarkup — the CardBack face (the default
+    // face when no poster is ready) carries it as the card-back greeting, and
+    // the sticker CardCanvas receives it as its greeting prop. (The quoted
+    // .cc-greeting line mirrors the snapshot team row only — the override
+    // surfaces on the flip faces, which is what a 0-prompt team renders.)
+    const html = renderToStaticMarkup(
+      <TeamJudgeCard
+        {...COMMON_PROPS}
+        team={makeTeam({ greeting: { text: "", status: null } })}
+        greetingOverride="Fallback greeting text"
+      />,
+    );
+    // CardBack greeting face (the visible card-back default face here)...
+    expect(html).toContain("cc-card-back-greeting");
+    expect(html).toContain("Fallback greeting text");
+    // ...and the sticker CardCanvas gets the same fallback greeting prop.
+    expect(html).toContain('data-greeting="Fallback greeting text"');
+  });
 });

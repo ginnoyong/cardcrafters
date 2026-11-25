@@ -192,6 +192,12 @@ export interface ClientScoringCard {
   /** Real team name — present on player + GM payloads (decision 2a). */
   teamName?: string;
   teamId?: string;
+  /** Round-fallback greeting — present so prompt-less cards still render
+   *  their text (keyed by anonymous cardId; greeting is public on the card
+   *  artwork anyway). */
+  greeting?: string;
+  /** READY montage poster view (public /static path) or null. */
+  montage?: { status: "ready"; imageUrl: string } | null;
 }
 
 /** The SCORING phase slice: the round's team-named card order for players
@@ -422,6 +428,21 @@ function trimActivity(entries: ClientActivityEntry[]): ClientActivityEntry[] {
  * `teamId` is kept ONLY when present (GM copies during SCORING, presenter
  * copies from JUDGING onward) and the parsed shape mirrors that exactly.
  */
+/** Parse the optional per-card montage view ({status:"ready", imageUrl}).
+ *  Returns an empty spread when absent so the caller's conditional spread
+ *  pattern stays type-clean. */
+function parseCardMontage(raw: unknown): Partial<ClientScoringCard> {
+  if (
+    raw &&
+    typeof raw === "object" &&
+    (raw as Record<string, unknown>).status === "ready" &&
+    typeof (raw as Record<string, unknown>).imageUrl === "string"
+  ) {
+    return { montage: { status: "ready", imageUrl: String((raw as Record<string, unknown>).imageUrl) } };
+  }
+  return {};
+}
+
 export function parseScoringCards(raw: unknown): ClientScoringCard[] | null {
   if (!Array.isArray(raw)) return null;
   const cards: ClientScoringCard[] = [];
@@ -434,6 +455,8 @@ export function parseScoringCards(raw: unknown): ClientScoringCard[] | null {
       label: e.label,
       ...(typeof e.teamName === "string" && e.teamName ? { teamName: e.teamName } : {}),
       ...(typeof e.teamId === "string" ? { teamId: e.teamId } : {}),
+      ...(typeof e.greeting === "string" && e.greeting ? { greeting: e.greeting } : {}),
+      ...parseCardMontage(e.montage),
     });
   }
   return cards;

@@ -29,6 +29,7 @@ import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W } from "@cardcrafters/shared
 
 import type { ClientScoring, ClientScoreTally } from "@/lib/store";
 import { friendlyScoreError } from "@/lib/socket";
+import CardBack from "../CardBack";
 
 /** Outcome of one FINAL submit (delivered by the parent's socket ack). */
 export interface ScoreSubmitOutcome {
@@ -149,8 +150,18 @@ export default function RatingPanel({
   // Real team name (decision 2a) — falls back to the anonymous label only if
   // the payload somehow lacks a teamName.
   const cardName = card.teamName ?? card.label;
+  // Poster face: when the scoring payload carries a READY montage view,
+  // render the real poster file directly (public /static path served by the
+  // custom server) — the composed-PNG endpoint stays as the fallback path
+  // (it is greeting-bearing server-side via the round-fallback rule).
+  const posterSrc =
+    card.montage?.status === "ready"
+      ? `${card.montage.imageUrl}?v=${cardVersion ?? 0}`
+      : null;
   const imageUrl =
+    (variant === "poster" && posterSrc ? posterSrc : null) ??
     `/api/games/${gameCode}/scoring-card/${card.cardId}?token=${sessionToken}&v=${cardVersion ?? 0}` +
+      (variant === "poster" ? "&variant=poster" : "");
     (variant === "poster" ? "&variant=poster" : "");
 
   const go = (delta: number): void => {
@@ -259,7 +270,14 @@ export default function RatingPanel({
           </button>
         </>
       ) : (
-        <p className="cc-hint">Card preview unavailable.</p>
+        <div className="cc-rating-image-box" style={{ aspectRatio: `${cardRatioW} / ${cardRatioH}` } as CSSProperties}>
+          <CardBack
+            greeting={card.greeting ?? ""}
+            montageStatus={card.montage?.status === "ready" ? "ready" : "fallback"}
+            cardRatioW={cardRatioW}
+            cardRatioH={cardRatioH}
+          />
+        </div>
       )}
 
       {/* Live running average + vote count. */}

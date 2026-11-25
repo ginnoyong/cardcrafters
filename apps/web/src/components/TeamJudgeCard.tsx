@@ -63,6 +63,7 @@ export function JudgeScoreChip({
 
 export default function TeamJudgeCard({
   team,
+  greetingOverride,
   cardLabel,
   tally,
   actions,
@@ -72,6 +73,10 @@ export default function TeamJudgeCard({
   cardRatioH = DEFAULT_CARD_RATIO_H,
 }: {
   team: ClientTeam;
+  /** Fallback greeting when the snapshot team lookup is empty — the scoring
+   *  payload carries the round-fallback greeting keyed by anonymous cardId
+   *  (players cannot map cardId→team, so own-card views pass it here). */
+  greetingOverride?: string;
   /** The scoring card's label ("Card A", …) when one exists. */
   cardLabel: string | null;
   /** The team's live score tally (null = no votes / no scoring row). */
@@ -188,7 +193,7 @@ export default function TeamJudgeCard({
                   </div>
                 ) : (
                   <CardBack
-                    greeting={team.greeting.text}
+                    greeting={team.greeting.text || greetingOverride || ""}
                     montageStatus={team.montageStatus}
                     cardRatioW={cardRatioW}
                     cardRatioH={cardRatioH}
@@ -209,7 +214,7 @@ export default function TeamJudgeCard({
                   <CardCanvas
                     items={team.items}
                     layout={team.layout}
-                    greeting={team.greeting.text}
+                    greeting={team.greeting.text || greetingOverride || ""}
                     cardRatioW={cardRatioW}
                     cardRatioH={cardRatioH}
                     fillContainer

@@ -37,6 +37,10 @@ import {
 import type { AiRouter } from "../ai/router";
 import { regenerateGreeting } from "../flows/greetings";
 import { pickPeoplesChoice, submitScore } from "../flows/scoring";
+import {
+  latestGreetingText,
+  scoringMontageView,
+} from "../game/scoring-card-extras";
 import { deriveGameStyle } from "../flows/style";
 import { createItemImageHandler, type ItemImageEmit } from "../flows/item-image";
 import {
@@ -214,7 +218,16 @@ export interface SyncFullPayload extends Record<string, unknown> {
    */
   scoring?: {
     round: number;
-    cards: Array<{ cardId: string; label: string; teamName?: string; teamId?: string }>;
+    cards: Array<{
+      cardId: string;
+      label: string;
+      teamName?: string;
+      teamId?: string;
+      /** Round-fallback greeting — lets players render prompt-less cards. */
+      greeting?: string;
+      /** READY montage poster view (public /static path) or null. */
+      montage?: { status: "ready"; imageUrl: string } | null;
+    }>;
     yourTeamCardId?: string;
     ratedX?: number;
     ratedY?: number;
@@ -383,6 +396,25 @@ export async function buildSyncFull(
     // the player/presenter copies stay as anonymous as the GM's.
     const cardByTeam = new Map(order.cards.map((c) => [c.teamId, c.cardId]));
     const aggregates = await repo.aggregateScores(gameId, round);
+    // Per-card content extras (player + presenter): the team's round-fallback
+    // greeting + the READY montage poster view — resolved at payload time so
+    // the rating surfaces can render prompt-less teams' cards client-side.
+    // Keyed by anonymous cardId; greeting text is public on the card artwork
+    // anyway (the composed render prints it). teamId still never rides along.
+    const cardExtras = new Map(
+      await Promise.all(
+        order.cards.map(
+          async (c) =>
+            [
+              c.cardId,
+              {
+                greeting: await latestGreetingText(repo, gameId, c.teamId, round),
+                montage: await scoringMontageView(repo, c.teamId, round),
+              },
+            ] as const,
+        ),
+      ),
+    );
     tallies = aggregates.flatMap((a) => {
       const cardId = cardByTeam.get(a.targetTeamId);
       return cardId ? [{ cardId, avg: Math.round(a.avg * 100) / 100, count: a.count }] : [];
@@ -411,6 +443,8 @@ export async function buildSyncFull(
           cardId: c.cardId,
           label: c.label,
           teamName: c.teamName,
+          greeting: cardExtras.get(c.cardId)?.greeting ?? "",
+          montage: cardExtras.get(c.cardId)?.montage ?? null,
         })),
         yourTeamCardId: order.cards.find((c) => c.teamId === identity.teamId)?.cardId,
       };
@@ -442,6 +476,8 @@ export async function buildSyncFull(
           cardId: c.cardId,
           label: c.label,
           teamName: c.teamName,
+          greeting: cardExtras.get(c.cardId)?.greeting ?? "",
+          montage: cardExtras.get(c.cardId)?.montage ?? null,
           ...(revealMapping ? { teamId: c.teamId } : {}),
         })),
       };

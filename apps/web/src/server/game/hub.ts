@@ -44,6 +44,7 @@ import type {
 } from "../repo/repository";
 import type { ScoringOrder } from "@cardcrafters/shared";
 import { hashString, mulberry32 } from "../ai/mock-provider";
+import { latestGreetingText, scoringMontageView } from "./scoring-card-extras";
 import { transition } from "./state-machine";
 import { createInitialRuntimeState } from "./types";
 import type { Effect, GameEvent, GameRuntimeState, TransitionResult } from "./types";
@@ -475,38 +476,46 @@ export class GameHub {
         // is the ONE owner of item rows + item events.
         return;
       case "beginScoring": {
-        // BUILD → SCORING entry: build the round's scoring order, persist it
-        // on Game.scoringOrder (source of truth for sync:full, score
-        // submission and the standings), then announce scoring per audience —
-        // players see team-NAMED cards + their own card id (player anonymity
-        // dropped per user decision 2a), the GM sees the team mapping, and
-        // the presenter sees team-NAMED cards too (decision 2a — team names
-        // are public from scoring onward; the teamId mapping still never
-        // rides the presenter copy during SCORING).
         // (a) GM-only heads-up: the final polish window begins.
         this.emitToRooms(gameId, state.round, "montage:started", {}, [gmRoom(gameId)]);
-        // (b) Fail-open hook: scoring MUST still start even if the polish pass fails.
-        try { await this.preScoring?.(gameId, state.round); }
-        catch (err) { console.warn(`[hub] preScoring failed for ${gameId} — starting scoring anyway:`, err); }
         const teams = await this.repo.listTeams(gameId);
         const order = buildScoringOrder(gameId, state.round, teams);
         await this.repo.updateGame(gameId, { scoringOrder: order });
+        // PUBLIC card copies (player + presenter): team-named (decision 2a) but
+        // NEVER the teamId mapping. Each card additionally carries the content
+        // needed to render prompt-less teams' cards client-side: the team's
+        // greeting (round-fallback — same rule as renderTeamCardPng) and the
+        // montage poster view when READY. Greeting text is public on the card
+        // artwork anyway (the composed render prints it), so this leaks nothing
+        // new. Resolved at payload time because the finalize montage pass is
+        // fire-and-forget — state read HERE is fresher than at persist time.
+        const publicCards = await Promise.all(
+          order.cards.map(async (c) => ({
+            cardId: c.cardId,
+            label: c.label,
+            teamName: c.teamName,
+            greeting: await latestGreetingText(this.repo, gameId, c.teamId, state.round),
+            montage: await scoringMontageView(this.repo, c.teamId, state.round),
+          })),
+        );
+        // (b) Fail-open hook: scoring MUST still start even if the polish pass
+        // fails. Fired only AFTER the public cards are resolved — the
+        // scoring:started emit must stay ahead of any montage:generating from
+        // the finalize chain (the ordering guarantee the ws-integration suite
+        // asserts).
+        try { await this.preScoring?.(gameId, state.round); }
+        catch (err) { console.warn(`[hub] preScoring failed for ${gameId} — starting scoring anyway:`, err); }
         for (const team of teams) {
           const members = await this.repo.listTeamPlayers(team.id);
           const yourTeamCardId = order.cards.find((c) => c.teamId === team.id)?.cardId ?? null;
           // Player cards carry the real teamName (UI decision 2a) but NEVER
           // the teamId mapping.
-          const playerCards = order.cards.map((c) => ({
-            cardId: c.cardId,
-            label: c.label,
-            teamName: c.teamName,
-          }));
           for (const p of members) {
             this.emitToRooms(
               gameId,
               state.round,
               "scoring:started",
-              { cards: playerCards, yourTeamCardId },
+              { cards: publicCards, yourTeamCardId },
               [playerRoom(gameId, p.id)],
             );
           }
@@ -515,14 +524,13 @@ export class GameHub {
         this.emitToRooms(gameId, state.round, "scoring:started", { cards: order.cards }, [
           gmRoom(gameId),
         ]);
-        // Presenter copy: team-NAMED (teamName per decision 2a) but still
-        // anonymous at the MAPPING level — teamId never leaks to the big
-        // screen before the reveal.
+        // Presenter copy: same public cards as players (decision 2a) — teamId
+        // never leaks to the big screen before the reveal.
         this.emitToRooms(
           gameId,
           state.round,
           "scoring:started",
-          { cards: order.cards.map((c) => ({ cardId: c.cardId, label: c.label, teamName: c.teamName })) },
+          { cards: publicCards },
           [presenterRoom(gameId)],
         );
         return;

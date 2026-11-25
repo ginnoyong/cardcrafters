@@ -31,6 +31,8 @@ let joinTokenA: string;
 let joinTokenB: string;
 let teamAId: string;
 let teamBId: string;
+// The itemless third team (montage FALLBACK at scoring entry).
+let teamCId: string;
 // Real PNGs the mock image handler writes under the Next public dir —
 // removed in afterEach so the tests leave no artifacts behind.
 const writtenFiles: string[] = [];
@@ -54,6 +56,7 @@ beforeEach(async () => {
   joinTokenB = setup.teams[1]!.joinToken;
   teamAId = setup.teams[0]!.id;
   teamBId = setup.teams[1]!.id;
+  teamCId = setup.teams[2]!.id;
 });
 
 afterEach(async () => {
@@ -861,6 +864,19 @@ describe("scoring phase end-to-end", () => {
       await repo.updateItem(item.id, { width: 512, height: 512, visualWeight: 1 });
     }
 
+    // Seed the round-1 greeting rows for ALL three teams (production fires
+    // generateGreetingsForGame from POST /api/games — these direct-hub tests
+    // bypass that route, so seed the rows the scoring payloads must carry).
+    const gameRow = await repo.getGame(gameId);
+    for (const team of await repo.listTeams(gameId)) {
+      await repo.createGreeting({
+        teamId: team.id,
+        round: gameRow!.round,
+        text: `Greeting for ${team.label}`,
+        status: "proposed",
+      });
+    }
+
     // Waiters registered BEFORE gm:stopBuild so nothing is missed.
     const alexStarted = waitFor<{ cards: Array<Record<string, unknown>>; yourTeamCardId?: string | null }>(alex, "scoring:started");
     const samStarted = waitFor<{ cards: Array<Record<string, unknown>>; yourTeamCardId?: string | null }>(sam, "scoring:started");
@@ -941,6 +957,11 @@ describe("scoring phase end-to-end", () => {
       expect(typeof c.cardId).toBe("string");
       expect(typeof c.teamName).toBe("string");
       expect((c.teamName as string).length).toBeGreaterThan(0);
+      // The round-fallback greeting rides the scoring:started payload too
+      // (round-1 greeting rows exist for EVERY team — the itemless one
+      // included).
+      expect(typeof c.greeting).toBe("string");
+      expect((c.greeting as string).length).toBeGreaterThan(0);
       expect(c).not.toHaveProperty("teamId");
     }
     expect(typeof alexCopy.yourTeamCardId).toBe("string");
@@ -993,9 +1014,6 @@ describe("scoring phase end-to-end", () => {
     // Counts + routing (deduped by teamId — see collector note): 2
     // montage:generating heads-ups for the two seeded teams; 3 montage:updated
     // EMITS — 2 READY (A, B) + 1 fail-open FALLBACK for the itemless team C.
-    const teamCId = (await repo.listTeams(gameId)).find(
-      (t) => t.id !== teamAId && t.id !== teamBId,
-    )!.id;
     const generatingTeams = new Set(
       gmEventLog.filter((e) => e.event === "montage:generating").map((e) => e.teamId),
     );
@@ -1075,7 +1093,12 @@ describe("scoring phase end-to-end", () => {
     const raw = await resynced;
     const scoring = raw.scoring as {
       round: number;
-      cards: Array<Record<string, unknown>>;
+      cards: Array<{
+        cardId: string;
+        teamName: string;
+        greeting: string;
+        montage: { status: string; imageUrl: string } | null;
+      }>;
       yourTeamCardId?: string;
     };
     expect(scoring.round).toBe(1);
@@ -1085,6 +1108,34 @@ describe("scoring phase end-to-end", () => {
       expect((c.teamName as string).length).toBeGreaterThan(0);
       expect(c).not.toHaveProperty("teamId");
     }
+    // Card extras (scoring-card-extras): every player card carries the
+    // team's round-fallback greeting — keyed by the ANONYMOUS cardId, so the
+    // itemless team C's card greets too — plus the READY-only montage view
+    // ({status:'ready', imageUrl} and NOTHING else; null when no poster
+    // landed). teamId still never rides along.
+    expect(
+      scoring.cards.every((c) => typeof c.greeting === "string" && c.greeting.length > 0),
+    ).toBe(true);
+    for (const c of scoring.cards) {
+      if (c.montage === null) continue;
+      expect(Object.keys(c.montage).sort()).toEqual(["imageUrl", "status"]);
+      expect(c.montage.status).toBe("ready");
+      expect(c.montage.imageUrl).toMatch(/^\/static\/montages\//);
+    }
+    // Exactly the two seeded teams have READY posters; team C fail-opened to
+    // FALLBACK → its montage view is null (looked up via the GM copy's
+    // cardId→teamId map — the player copy itself never names the team).
+    expect(
+      scoring.cards
+        .filter((c) => c.montage !== null)
+        .map((c) => c.cardId)
+        .sort(),
+    ).toEqual([ownCardA, cardB].sort());
+    const cardCId = gmCopy.cards.find((c) => c.teamId === teamCId)!.cardId;
+    const playerCardC = scoring.cards.find((c) => c.cardId === cardCId)!;
+    expect(playerCardC.greeting.length).toBeGreaterThan(0);
+    expect(playerCardC.montage).toBeNull();
+    expect(playerCardC).not.toHaveProperty("teamId");
     expect(scoring.yourTeamCardId).toBe(alexCopy.yourTeamCardId);
     expect(raw.myScores).toEqual([{ cardId: cardB, value: 7 }]);
 
@@ -1176,6 +1227,19 @@ describe("presenter scoring tallies (sync:full + scores:update)", () => {
     );
     expect(alexAck.ok).toBe(true);
 
+    // Seed the round-1 greeting rows for all three teams (see (s1)) — the
+    // presenter scoring snapshot must carry them keyed by the anonymous
+    // cardId.
+    const s2Game = await repo.getGame(gameId);
+    for (const team of await repo.listTeams(gameId)) {
+      await repo.createGreeting({
+        teamId: team.id,
+        round: s2Game!.round,
+        text: `Greeting for ${team.label}`,
+        status: "proposed",
+      });
+    }
+
     const approve = await emitAck<{ ok: boolean }>(gm, "gm:approveGreetings", {});
     expect(approve.ok).toBe(true);
     const stop = await emitAck<{ ok: boolean; phase?: string }>(gm, "gm:stopBuild", {});
@@ -1189,12 +1253,30 @@ describe("presenter scoring tallies (sync:full + scores:update)", () => {
     const resynced = new Promise<SyncFullEvent>((resolve) => presenter.once("sync:full", resolve));
     await emitAck(presenter, "sync:resync", {});
     const raw = await resynced;
-    const scoring = raw.scoring as { cards: Array<{ cardId: string; label: string; teamName: string }> };
+    const scoring = raw.scoring as {
+      cards: Array<{
+        cardId: string;
+        label: string;
+        teamName: string;
+        greeting: string;
+        montage: { status: string; imageUrl: string } | null;
+      }>;
+    };
     expect(Array.isArray(scoring.cards)).toBe(true);
     expect(scoring.cards).toHaveLength(3);
     for (const c of scoring.cards) {
       expect(typeof c.teamName).toBe("string");
       expect((c.teamName as string).length).toBeGreaterThan(0);
+      // Card extras reach the presenter copy too: the round-fallback greeting
+      // (round-1 rows exist for every team) keyed by the anonymous cardId,
+      // and the READY-only montage view — never the teamId mapping.
+      expect(typeof c.greeting).toBe("string");
+      expect(c.greeting.length).toBeGreaterThan(0);
+      if (c.montage !== null) {
+        expect(Object.keys(c.montage).sort()).toEqual(["imageUrl", "status"]);
+        expect(c.montage.status).toBe("ready");
+        expect(c.montage.imageUrl).toMatch(/^\/static\/montages\//);
+      }
       expect(c).not.toHaveProperty("teamId");
     }
     expect(Array.isArray(raw.scores)).toBe(true);
