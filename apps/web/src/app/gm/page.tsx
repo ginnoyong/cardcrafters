@@ -39,7 +39,7 @@ import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W, MAX_TEAMS, PHASE } from "@c
 import { PeoplesChoiceBanner, StandingsList, WinnerBanner, teamLabel } from "@/components/Standings";
 import TeamJudgeCard, { JudgeScoreChip } from "@/components/TeamJudgeCard";
 import TeamMiniCanvas from "@/components/TeamMiniCanvas";
-import { sortByTeamLabel } from "@/lib/team-label-sort";
+import { compareTeamLabels, sortByTeamLabel } from "@/lib/team-label-sort";
 import { minutesToSeconds } from "@/lib/timers";
 import {
   createGameSocket,
@@ -673,7 +673,12 @@ function Console({ game }: { game: CreatedGame }) {
         avg: tally?.avg ?? null,
         count: tally?.count ?? 0,
       };
-    });
+    })
+    // DISPLAY order: ascending Card A → Card N. The underlying scoring
+    // order (shuffled) is the rating SEQUENCE players follow — this only
+    // reorders the GM's console boxes. Tallies/View links are cardId-keyed
+    // and unaffected.
+    .sort((a, b) => compareTeamLabels(a.teamLabel, b.teamLabel));
   // Card→scoring-label map: the scoring card's label ("Card A", …) is the
   // stable display label during scoring/judging — show it on the team card
   // header instead of the (player-facing) join label once cards exist.
@@ -714,7 +719,7 @@ function Console({ game }: { game: CreatedGame }) {
       const bAvg = b.avg ?? -1;
       if (aAvg !== bAvg) return bAvg - aAvg;
       if (b.count !== a.count) return b.count - a.count;
-      return a.teamLabel.localeCompare(b.teamLabel);
+      return compareTeamLabels(a.teamLabel, b.teamLabel);
     });
   // RESULTS banners: winner + People's Choice labels (snapshot teams first,
   // the public standings' labels as the refresh fallback).
