@@ -402,6 +402,7 @@ function TeamMiniCanvas({
   montageImageUrl,
   cardRatioW = DEFAULT_CARD_RATIO_W,
   cardRatioH = DEFAULT_CARD_RATIO_H,
+  preScoring,
 }: {
   team: ClientTeam;
   montageStatus?: "generating" | "ready" | "fallback" | null;
@@ -410,6 +411,14 @@ function TeamMiniCanvas({
    *  ratio as the CardCanvas sticker card. */
   cardRatioW?: number;
   cardRatioH?: number;
+  /** Whether the game is still pre-SCORING (LOBBY/GREETINGS/BUILD) — drives
+   *  the empty-card placeholder copy on the sticker face (BUILD teaser vs
+   *  finished-game note; see lib/empty-card-note.ts). The mini grid renders
+   *  in every phase EXCEPT the judge-box phases (SCORING/JUDGING), so this
+   *  must come from the Console's phase, not be assumed. Named preScoring —
+   *  NOT `building` — because the Console already has a `building` const
+   *  with a DIFFERENT meaning ("the BUILD phase has started"). */
+  preScoring: boolean;
 }) {
   // Flip state: false = default view (AI poster when ready, else the composed
   // CardCanvas), true = the other face. Only meaningful when the poster is
@@ -454,6 +463,7 @@ function TeamMiniCanvas({
       cardRatioW={cardRatioW}
       cardRatioH={cardRatioH}
       resizeSignal={flipped}
+      building={preScoring}
       ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
     />
   );
@@ -561,6 +571,7 @@ function WinnerRevealCard({
           greeting={team.greeting.text}
           cardRatioW={cardRatioW}
           cardRatioH={cardRatioH}
+          building={false}
           ariaLabel={`${team.name}'s winning card — ${readyCount} stickers placed`}
         />
       </div>
@@ -616,6 +627,7 @@ function WinnerRevealCard({
             cardRatioW={cardRatioW}
             cardRatioH={cardRatioH}
             resizeSignal={flipped}
+            building={false}
             ariaLabel={`${team.name}'s winning sticker card — ${readyCount} stickers placed`}
           />
         </div>
@@ -1159,6 +1171,7 @@ function Console({ game }: { game: CreatedGame }) {
                 montageImageUrl={merged?.montageImageUrl ?? team.montageImageUrl ?? null}
                 cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
                 cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
+                preScoring={!resultsStage}
               />
             );
           })}

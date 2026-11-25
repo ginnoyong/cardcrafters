@@ -214,6 +214,7 @@ export default function TeamJudgeCard({
                     cardRatioH={cardRatioH}
                     fillContainer
                     resizeSignal={flipped}
+                    building={false}
                     ariaLabel={`${team.name} sticker card — ${readyCount} stickers placed`}
                   />
                 </div>

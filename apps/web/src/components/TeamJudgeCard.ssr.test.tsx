@@ -31,6 +31,11 @@ vi.mock("next/dynamic", async () => {
           "data-testid": "card-canvas-stub",
           "data-fill-container": props.fillContainer === true ? "true" : "false",
           "data-greeting": typeof props.greeting === "string" ? props.greeting : "",
+          // Phase-aware empty-card placeholder wiring (lib/empty-card-note.ts):
+          // CardCanvas defaults building=true (BUILD teaser); a post-BUILD
+          // surface must pass building={false} explicitly — the stub mirrors
+          // exactly what it receives.
+          "data-building": props.building === false ? "false" : "true",
         });
       },
   };
@@ -111,6 +116,20 @@ describe("TeamJudgeCard (SSR) — flip-face geometry parity", () => {
     expect(html).toContain(`data-fill-container="true"`);
   });
 
+  it("tells the sticker face the game is over (building=false) — judge boxes are post-BUILD", () => {
+    // Phase-aware empty-card placeholder: this component only ever renders
+    // in SCORING/JUDGING, so its CardCanvas must NEVER get the BUILD teaser
+    // treatment for an empty card — assert building={false} reaches it.
+    const html = renderToStaticMarkup(
+      <TeamJudgeCard
+        {...COMMON_PROPS}
+        team={makeTeam({ itemCount: 0, items: [], layout: null })}
+      />,
+    );
+    expect(html).toContain('data-building="false"');
+    expect(html).not.toContain('data-building="true"');
+  });
+
   it("CardBack + sticker faces carry the SAME geometry when no poster is ready", () => {
     const html = renderToStaticMarkup(
       <TeamJudgeCard
@@ -129,5 +148,35 @@ describe("TeamJudgeCard (SSR) — flip-face geometry parity", () => {
     expect(styles[0]).toContain(`aspect-ratio:${RATIO_W} / ${RATIO_H}`);
     expect(styles[0]).toContain(`--card-ratio-w:${RATIO_W}`);
     expect(styles[0]).toContain(`--card-ratio-h:${RATIO_H}`);
+  });
+
+  it("a 0-item team's greeting still reaches the sticker face (and the greeting line)", () => {
+    // Regression (client-side blank sticker face): a team that submitted 0
+    // prompts must STILL render its greeting on the sticker CardCanvas face —
+    // the greeting is lost server-side in the snapshot (round-fallback),
+    // never in this component; assert the component passes team.greeting.text
+    // through verbatim when items are empty.
+    const html = renderToStaticMarkup(
+      <TeamJudgeCard
+        {...COMMON_PROPS}
+        team={makeTeam({ itemCount: 0, items: [], layout: null })}
+      />,
+    );
+
+    // The visible quoted greeting line...
+    expect(html).toContain("cc-greeting");
+    expect(html).toContain("A craft a day keeps the boredom away");
+    // ...and the sticker CardCanvas receives the same greeting prop.
+    expect(html).toContain('data-greeting="A craft a day keeps the boredom away"');
+  });
+
+  it("an empty greeting renders no sticker text (fallback exhausted upstream)", () => {
+    const html = renderToStaticMarkup(
+      <TeamJudgeCard
+        {...COMMON_PROPS}
+        team={makeTeam({ greeting: { text: "", status: null } })}
+      />,
+    );
+    expect(html).toContain('data-greeting=""');
   });
 });

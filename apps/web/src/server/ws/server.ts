@@ -247,6 +247,34 @@ export function filterItemsForIdentity(rows: ItemRow[], identity?: WsIdentity): 
 /** Item statuses whose rows/failReasons are private to the owning player. */
 const PRIVATE_ITEM_STATUSES = new Set(["REJECTED", "FAILED", "REMOVED"]);
 
+/**
+ * Per-team greeting map with the same round-fallback rule renderTeamCardPng
+ * applies (../http/api.ts): greeting rows only ever exist for round 1
+ * (generated once at POST /api/games; per-team AI failures drop even those),
+ * so round 2+ snapshots must fall back to the team's LATEST earlier-round
+ * greeting — otherwise every client CardCanvas sticker face (GM judge boxes,
+ * player own-card view, presenter stage) draws a blank pale card while the
+ * server-composed scoring PNG shows the greeting. Walking DOWNWARD from the
+ * runtime round, the first row seen per team is its latest; a team with no
+ * rows in any round is simply absent (the caller degrades to ""/null).
+ * Stops early once every team has a row (greetings live in round 1, so the
+ * common case is one repo query).
+ */
+export async function latestGreetingsByTeam(
+  repo: Repository,
+  gameId: string,
+  round: number,
+  teamCount: number,
+): Promise<Map<string, Awaited<ReturnType<typeof repo.listGreetings>>[number]>> {
+  const merged = new Map<string, Awaited<ReturnType<typeof repo.listGreetings>>[number]>();
+  for (let r = round; r >= 1 && merged.size < teamCount; r--) {
+    for (const greeting of await repo.listGreetings(gameId, r)) {
+      if (!merged.has(greeting.teamId)) merged.set(greeting.teamId, greeting);
+    }
+  }
+  return merged;
+}
+
 /** Build the sync:full body from the hub + repository. */
 export async function buildSyncFull(
   hub: GameHub,
@@ -260,9 +288,17 @@ export async function buildSyncFull(
 
   // Per-team greeting for the current round (UI: GM console cards + player
   // waiting screen). Missing row → empty text + null status.
-  const greetings = new Map(
-    (await repo.listGreetings(gameId, round)).map((g) => [g.teamId, g]),
-  );
+  //
+  // Round-fallback (the SAME rule renderTeamCardPng applies in ../http/api.ts):
+  // greeting rows only ever exist for ROUND 1 (generated once at game
+  // creation; per-team AI failures drop even those), so a strictly
+  // round-scoped lookup left every round-2+ team with an EMPTY greeting in
+  // its snapshot — all client-side CardCanvas sticker faces (the GM judge
+  // boxes, the player's own-card view) then rendered a blank pale card while
+  // the server-composed scoring PNG (which has the fallback) correctly showed
+  // the greeting. Walk rounds downward and keep each team's LATEST row
+  // (the first row seen while walking downward wins).
+  const greetings = await latestGreetingsByTeam(repo, gameId, round, teams.length);
 
   const teamSnapshots = [];
   for (const team of teams) {

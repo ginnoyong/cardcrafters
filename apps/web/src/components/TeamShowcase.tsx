@@ -90,6 +90,7 @@ export default function TeamShowcase({
               greeting={team.greeting.text}
               cardRatioW={cardRatioW}
               cardRatioH={cardRatioH}
+              building={false}
               ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
             />
             {team.montageStatus === "generating" ? (
@@ -110,6 +111,7 @@ export default function TeamShowcase({
               greeting={team.greeting.text}
               cardRatioW={cardRatioW}
               cardRatioH={cardRatioH}
+              building={false}
               ariaLabel={`${team.name} sticker card — ${readyCount} stickers placed`}
             />
           </div>

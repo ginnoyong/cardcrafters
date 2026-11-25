@@ -16,7 +16,7 @@ import { GameHub, type RoomEmitter } from "../game/hub";
 import { MemoryRepo } from "../repo/memory-repo";
 import type { ItemRow } from "../repo/repository";
 import type { WsIdentity } from "./rooms";
-import { buildSyncFull, filterItemsForIdentity } from "./server";
+import { buildSyncFull, filterItemsForIdentity, latestGreetingsByTeam } from "./server";
 
 /** No phase timers armed (buildTimerSeconds 0) — nothing to clean up. */
 const UNTIMED_CONFIG: CardConfig = {
@@ -303,5 +303,105 @@ describe("buildSyncFull — montage promptText presenter visibility (JUDGING+)",
     expect(playerMontage).not.toBeNull();
     expect(playerMontage!.promptText).toBe("a glossy poster of a red balloon dog");
     expect(playerMontage!.lastError).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Greeting round-fallback: greeting rows only ever exist for ROUND 1
+// (generated once at game creation; per-team AI failures drop even those),
+// so a strictly round-scoped greeting lookup in buildSyncFull handed every
+// round-2+ team an EMPTY greeting in its snapshot — all client-side
+// CardCanvas sticker faces (the GM judge/scoring boxes, the player's
+// own-card TeamJudgeCard) rendered a blank pale card while the
+// server-composed scoring PNG (renderTeamCardPng, which has the same
+// fallback since 6f63173) correctly showed the greeting. The snapshot must
+// apply the SAME latest-earlier-round fallback.
+// ---------------------------------------------------------------------------
+
+describe("latestGreetingsByTeam — greeting round-fallback lookup", () => {
+  it("keeps each team's LATEST row walking rounds downward; absent teams stay absent", async () => {
+    const s = await setup();
+    const round1 = await s.repo.createGreeting({
+      teamId: s.teamId,
+      round: 1,
+      text: "Round one hello",
+      status: "approved",
+    });
+    await s.repo.createGreeting({
+      teamId: s.teamId,
+      round: 2,
+      text: "Round two hello",
+      status: "proposed",
+    });
+
+    // Round 2 lookup → the round-2 row wins (latest, walking downward).
+    const fromRound2 = await latestGreetingsByTeam(s.repo, s.gameId, 2, 1);
+    expect(fromRound2.get(s.teamId)?.text).toBe("Round two hello");
+
+    // Round 1 lookup → the round-1 row.
+    const fromRound1 = await latestGreetingsByTeam(s.repo, s.gameId, 1, 1);
+    expect(fromRound1.get(s.teamId)?.id).toBe(round1.id);
+
+    // A team of ANOTHER game with no greeting rows at all is simply absent
+    // (the snapshot degrades to ""/null instead of throwing).
+    const fresh = await s.hub.createGame(UNTIMED_CONFIG, { teamCount: 1 });
+    const none = await latestGreetingsByTeam(s.repo, fresh.game.id, 1, 1);
+    expect(none.has(fresh.teams[0]!.id)).toBe(false);
+    expect(none.size).toBe(0);
+  });
+});
+
+describe("buildSyncFull — greeting round-fallback (0-prompt team, round 2+)", () => {
+  it("a round-2 snapshot carries the team's round-1 greeting for GM and player alike", async () => {
+    const s = await setup();
+    // Round-1 greeting row (the only round greeting rows ever exist for).
+    const round1 = await s.repo.createGreeting({
+      teamId: s.teamId,
+      round: 1,
+      text: "Crafted with chaos",
+      status: "approved",
+    });
+    // No items at all — the 0-prompt team from the bug report.
+    expect((await buildSyncFull(s.hub, s.repo, s.gameId, gmIdentity(s))).teams[0]!.items).toHaveLength(0);
+
+    // Drive round 1 → RESULTS → gm:newRound (round 2, GREETINGS). No new
+    // greeting generation happens on a round bump (creation-only), so
+    // round 2 has NO greeting rows — the exact blank-face scenario.
+    for (const event of [
+      { type: "gm:stopBuild", now: 1_700_000_001_000 },
+      { type: "gm:stopScoring", now: 1_700_000_002_000 },
+      { type: "gm:pickWinner", teamId: s.teamId, now: 1_700_000_003_000 },
+      { type: "reveal:ack", now: 1_700_000_004_000 },
+      { type: "gm:newRound", now: 1_700_000_005_000 },
+      // Re-arm round 2 through the same ladder the GM console drives
+      // (setTheme → approveGreetings → stopBuild) so the snapshot is taken
+      // in SCORING — the phase where the blank sticker faces were observed.
+      { type: "gm:setTheme", theme: "Birthday", now: 1_700_000_006_000 },
+      { type: "gm:approveGreetings", now: 1_700_000_007_000 },
+      { type: "gm:stopBuild", now: 1_700_000_008_000 },
+    ] as const) {
+      const result = await s.hub.applyEvent(s.gameId, event);
+      expect(result.ok).toBe(true);
+    }
+    expect(await s.repo.listGreetings(s.gameId, 2)).toHaveLength(0);
+
+    // GM snapshot (the judging/scoring boxes render TeamJudgeCard and
+    // TeamMiniCanvas from it): greeting text is the round-1 fallback.
+    const gm = await buildSyncFull(s.hub, s.repo, s.gameId, gmIdentity(s));
+    expect(gm.round).toBe(2);
+    expect(gm.phase).toBe("SCORING");
+    expect(gm.teams[0]!.greeting).toEqual({ text: "Crafted with chaos", status: "approved" });
+
+    // Player snapshot (the join screen's own-card TeamJudgeCard reads it):
+    // the SAME fallback text — the greeting is public (team-named cards),
+    // no teamId mapping rides the scoring cards either way.
+    const player = await buildSyncFull(s.hub, s.repo, s.gameId, playerIdentity(s));
+    expect(player.teams[0]!.greeting).toEqual({ text: "Crafted with chaos", status: "approved" });
+    expect(player.scoring?.cards.every((c) => !("teamId" in c))).toBe(true);
+
+    // Round-1 rows are untouched by the walk.
+    expect((await s.repo.listGreetings(s.gameId, 1)).find((g) => g.teamId === s.teamId)?.id).toBe(
+      round1.id,
+    );
   });
 });

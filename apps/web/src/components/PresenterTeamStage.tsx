@@ -136,6 +136,7 @@ export default function PresenterTeamStage({
                 greeting={team.greeting.text}
                 cardRatioW={cardRatioW}
                 cardRatioH={cardRatioH}
+                building={false}
                 ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
               />
               {team.montageStatus === "generating" ? (
@@ -179,6 +180,7 @@ export default function PresenterTeamStage({
             greeting={team.greeting.text}
             cardRatioW={cardRatioW}
             cardRatioH={cardRatioH}
+            building={false}
             ariaLabel={`${team.name} sticker card — ${readyCount} stickers placed`}
           />
           {/* Sticker prompts accordion — only stickers actually on the card

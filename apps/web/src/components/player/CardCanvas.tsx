@@ -35,6 +35,7 @@ import {
   type MappedPlacement,
 } from "@/lib/canvas-geometry";
 import type { ClientGreetingStyle, ClientItem, ClientLayout } from "@/lib/store";
+import { emptyCardNote } from "@/lib/empty-card-note";
 
 export interface CardCanvasProps {
   /** The team's items (any status; only READY + placed ones are drawn). */
@@ -70,6 +71,16 @@ export interface CardCanvasProps {
    *  sizing (every other caller unchanged). */
   fillContainer?: boolean;
   ariaLabel?: string;
+  /** Whether the game is still in the BUILD phase (or pre-build LOBBY/
+   *  GREETINGS) — drives the empty-card placeholder copy. BUILD keeps the
+   *  classic teaser ("Stickers will appear here as your team creates
+   *  them…"); every later phase (SCORING → RESULTS) shows the finished
+   *  treatment instead ("This card stayed blank this round.") — the teaser
+   *  must never appear once building has ended, on ANY face. Default true:
+   *  the BUILD-only callers (player build screen, live preview grids) need
+   *  no change; every post-BUILD surface passes building={false} explicitly
+   *  (see lib/empty-card-note.ts for the copy contract). */
+  building?: boolean;
 }
 
 // Soft paper card background (CSS vars can't be read by Konva — mirrored in
@@ -246,6 +257,7 @@ export default function CardCanvas({
   resizeSignal = 0,
   fillContainer = false,
   ariaLabel = "team card preview",
+  building = true,
 }: CardCanvasProps) {
   const { containerRef, size } = useStageSize(cardRatioW, cardRatioH, resizeSignal, fillContainer);
   const reducedMotion = usePrefersReducedMotion();
@@ -458,7 +470,7 @@ export default function CardCanvas({
                   y={size.h * 0.4}
                   width={size.w * 0.8}
                   align="center"
-                  text="Stickers will appear here as your team creates them…"
+                  text={emptyCardNote(building)}
                   fontFamily="Georgia"
                   fontSize={Math.max(12, size.w * 0.04)}
                   fill="#b8ab93"
