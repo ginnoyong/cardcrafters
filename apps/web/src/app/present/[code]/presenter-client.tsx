@@ -7,25 +7,35 @@
  * the store's build-phase events (item:pending / item:ready /
  * layout:updated — the presenter socket joins every team room).
  *
- * Scoring/results phases (big-screen duty):
- *  - SCORING: a team-NAMED single-card stage — one card at a time (poster
- *    ↔ sticker flip view) with wrap-around prev/next and a live tally
- *    ("Llama Legends · 7.5 avg · 3 votes"); the team stage is suppressed
- *    (cycling team→card side by side would leak the card↔team mapping —
- *    server-side rule), but the card itself carries its real teamName
- *    (decision 2a — team names are public from scoring onward).
- *  - REVEAL/RESULTS: the one-at-a-time stage shows the viewed team's TWO
- *    cards SIDE BY SIDE (components/PresenterTeamStage.tsx: AI-montage
- *    poster + sticker CardCanvas, each with a prompt-transparency
- *    accordion). Banners are per-viewed-team: the brass "🏆 WINNER" banner
- *    only when the viewed team IS the winner, the sage "👏 Crowd Favourite"
- *    banner only when it is the People's Choice. REVEAL adds "Add 30 more
- *    seconds" (reveal:extend) and "Show results" (reveal:ack — the server
- *    allows GM OR presenter; the hub also auto-expires REVEAL after 30 s,
- *    the button just moves things along) to the stage header; both phases
- *    add a Return button back to the GM console. RESULTS keeps the public
- *    standings list (shared components/Standings.tsx, fed by the
- *    winnerAnnounced payload) below the stage.
+ * Scoring/results phases (big-screen duty) — ALL of them render the SAME
+ * unified side-by-side layout (components/PresenterTeamStage.tsx: AI-montage
+ * poster + sticker CardCanvas from the client snapshot, so a 0-prompt team
+ * shows its greeting + the phase-aware finished note instead of a blank
+ * card):
+ *  - SCORING: a team-NAMED single-card stage — one card at a time with
+ *    wrap-around prev/next and a live tally ("Llama Legends · 7.5 avg · 3
+ *    votes"); the team stage is suppressed (cycling team→card side by side
+ *    would leak the card↔team mapping — server-side rule), but the card
+ *    itself carries its real teamName (decision 2a — team names are public
+ *    from scoring onward). The card's team is resolved from the snapshot
+ *    (prefer card.teamId — present from JUDGING onward; else a unique
+ *    teamName match) and rendered via PresenterTeamStage with the prompt
+ *    accordions SUPPRESSED (prompts are still anonymous during SCORING);
+ *    the old flip-<img> PNG stage survives only as a defensive fallback
+ *    when the team lookup misses (snapshot race / team removed).
+ *  - JUDGING: PresenterTeamStage with the live tally chip and the prompt
+ *    accordions ENABLED (promptText is public from JUDGING); Pick winner +
+ *    Return ride the stage header's actions row.
+ *  - REVEAL/RESULTS: PresenterTeamStage with per-viewed-team banners: the
+ *    brass "🏆 WINNER" banner only when the viewed team IS the winner, the
+ *    sage "👏 Crowd Favourite" banner only when it is the People's Choice.
+ *    REVEAL adds "Add 30 more seconds" (reveal:extend) and "Show results"
+ *    (reveal:ack — the server allows GM OR presenter; the hub also
+ *    auto-expires REVEAL after 30 s, the button just moves things along) to
+ *    the stage header; both phases add a Return button back to the GM
+ *    console. RESULTS keeps the public standings list (shared
+ *    components/Standings.tsx, fed by the winnerAnnounced payload) below
+ *    the stage.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -50,8 +60,7 @@ import {
 } from "@/lib/socket";
 import { StandingsList } from "@/components/Standings";
 import PresenterTeamStage from "@/components/PresenterTeamStage";
-import TeamJudgeCard from "@/components/TeamJudgeCard";
-import { GameStoreProvider, phaseLabel, useGameStore, type SyncFullEvent } from "@/lib/store";
+import { GameStoreProvider, phaseLabel, useGameStore, type SyncFullEvent, type ClientScoringCard, type ClientTeam } from "@/lib/store";
 
 function useCountdown(phaseEndsAt: number | null, serverNow: number): number | null {
   const [remaining, setRemaining] = useState<number | null>(null);
@@ -193,8 +202,8 @@ function PresenterBoard({
   }, []);
 
   // Return to the GM console — shared by EVERY presenter phase's Return
-  // button (scoring stage, REVEAL stage, RESULTS stage; the JUDGING stage's
-  // Return lives inside TeamJudgeCard's actions node). history.length is
+  // button (scoring stage, JUDGING/REVEAL/RESULTS stage headers).
+  // history.length is
   // unreliable for a fresh _blank tab (Chromium reports 2 for the initial
   // about:blank entry, so back() can land on a blank page) — the coded GM
   // URL is the deterministic path back.
@@ -275,6 +284,14 @@ function PresenterBoard({
     : -1;
   const latched = focusedIndex >= 0;
   const stageTeam = snapshot?.teams[latched ? focusedIndex : clampedStageIndex] ?? null;
+  // JUDGING: the viewed team's scoring card + live tally (the mapping is
+  // public on this team-named surface — card.teamId rides the payload from
+  // JUDGING onward).
+  const judgingCard: ClientScoringCard | null =
+    snapshot && stageTeam
+      ? (snapshot.scoring?.cards.find((c) => c.teamId === stageTeam.id) ?? null)
+      : null;
+  const judgingTally = judgingCard ? (snapshot!.scores[judgingCard.cardId] ?? null) : null;
   // SCORING is EXCLUDED from the team stage: the team names would leak which
   // team made which card while the room is rating. SCORING renders the
   // anonymous single-card stage below instead (JUDGING/REVEAL/RESULTS only
@@ -316,7 +333,6 @@ function PresenterBoard({
   const scoringCards = snapshot?.scoring?.cards ?? [];
   const scoringCount = scoringCards.length;
   const [scoringCardIndex, setScoringCardIndex] = useState(0);
-  const [scoringCardFlipped, setScoringCardFlipped] = useState(false);
   // Clamp when the card count shrinks (round reset / scoring aborted); the
   // wrap-around steps below keep the index in range otherwise.
   const clampedScoringIndex = scoringCount > 0 ? Math.min(scoringCardIndex, scoringCount - 1) : 0;
@@ -325,10 +341,26 @@ function PresenterBoard({
   // on the presenter's scoring payload) — shown instead of the "Card B"
   // label; falls back to the label when a payload somehow lacks it.
   const scoringCardName = scoringCard ? (scoringCard.teamName ?? scoringCard.label) : null;
-  // Flip resets whenever the shown card changes (index steps, round swaps).
-  useEffect(() => {
-    setScoringCardFlipped(false);
-  }, [clampedScoringIndex]);
+  // cardId → team lookup for the unified side-by-side stage: prefer
+  // card.teamId (the mapping rides the presenter payload from JUDGING
+  // onward, e.g. after a JUDGING resync), else match the card's public
+  // teamName — team names are unique per game and public from SCORING
+  // onward (decision 2a), so a UNIQUE name match is exact and leaks nothing
+  // the stage header doesn't already show. Null when neither resolves
+  // (snapshot race / team removed) → the defensive PNG <img> fallback below
+  // keeps the stage from ever going blank.
+  const scoringCardTeam: ClientTeam | null = (() => {
+    if (!snapshot || !scoringCard) return null;
+    if (scoringCard.teamId) {
+      const byId = snapshot.teams.find((t) => t.id === scoringCard.teamId);
+      if (byId) return byId;
+    }
+    if (scoringCard.teamName) {
+      const byName = snapshot.teams.filter((t) => t.name === scoringCard.teamName);
+      if (byName.length === 1) return byName[0]!;
+    }
+    return null;
+  })();
   const stepScoringCard = useCallback(
     (delta: number) => {
       setScoringCardIndex((i) => {
@@ -375,6 +407,18 @@ function PresenterBoard({
                   items={team.items}
                   layout={team.layout}
                   greeting={team.greeting.text}
+                  /* Explicit phase-derived `building`: this grid only renders
+                     pre-SCORING (LOBBY/GREETINGS/BUILD — SCORING and the
+                     stage phases replace it), so the BUILD teaser is the
+                     correct empty-card note here. Stated explicitly (not
+                     left to CardCanvas's default) so a future phase change
+                     can't silently show the teaser on a finished-game
+                     surface (lib/empty-card-note.ts contract). */
+                  building={
+                    [PHASE.LOBBY, PHASE.GREETINGS, PHASE.BUILD].includes(
+                      snapshot.phase as (typeof PHASE)[keyof typeof PHASE],
+                    )
+                  }
                   ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
                 />
                 <p className="cc-hint" aria-live="polite">
@@ -387,12 +431,12 @@ function PresenterBoard({
       ) : null}
 
       {/* SCORING onward: one-at-a-time stage — a single team fills the
-          screen, with ←/→ wrap-around cycle buttons. In JUDGING the stage
-          renders the shared TeamJudgeCard (poster-first flip view + sticker
-          prompts) with Pick winner + Return; in REVEAL/RESULTS it renders
-          the side-by-side PresenterTeamStage (poster + sticker cards, each
-          with a prompt accordion, and the viewed team's WINNER / Crowd
-          Favourite banner above the cards when it earned either). */}
+          screen, with ←/→ wrap-around cycle buttons. JUDGING/REVEAL/RESULTS
+          all render the unified side-by-side PresenterTeamStage (poster +
+          sticker cards): JUDGING adds the live tally chip and keeps the
+          prompt accordions, REVEAL/RESULTS add the viewed team's WINNER /
+          Crowd Favourite banner above the cards when it earned either;
+          Pick winner + Return ride the stage header's actions row. */}
       {showStage && stageTeam ? (
         <section aria-label="team showcase stage" className="cc-present-stage" data-testid="presenter-stage">
           <div className="cc-present-stage-header">
@@ -421,8 +465,44 @@ function PresenterBoard({
               >
                 Next →
               </button>
-              {/* Return to the GM console — on every stage phase (the JUDGING
-                  phase's Return lives inside TeamJudgeCard's actions node). */}
+              {/* JUDGING: Pick winner (the big screen can crown the winner;
+                  REVEAL follows via the winnerAnnounced broadcast) + Return
+                  ride the stage header's actions row — the unified
+                  PresenterTeamStage below owns only the card faces. */}
+              {snapshot.phase === PHASE.JUDGING ? (
+                <button
+                  type="button"
+                  className="cc-btn cc-btn-primary"
+                  data-testid="presenter-judge-pick"
+                  disabled={pickingWinner}
+                  onClick={() => {
+                    if (pickingWinner) return;
+                    setPickingWinner(true);
+                    socketRef.current?.emit(
+                      "judging:winner",
+                      { teamId: stageTeam.id },
+                      (ack: { ok?: boolean; code?: string } | undefined) => {
+                        // On failure restore the button (REVEAL unmounts it
+                        // on success via the phase change).
+                        if (!ack?.ok) setPickingWinner(false);
+                      },
+                    );
+                  }}
+                >
+                  {pickingWinner ? "Picking…" : "Pick winner"}
+                </button>
+              ) : null}
+              {/* Return to the GM console — on every stage phase. */}
+              {snapshot.phase === PHASE.JUDGING ? (
+                <button
+                  type="button"
+                  className="cc-btn"
+                  data-testid="presenter-judge-return"
+                  onClick={returnToGm}
+                >
+                  Return
+                </button>
+              ) : null}
               {snapshot.phase === PHASE.REVEAL ? (
                 <button
                   type="button"
@@ -445,76 +525,19 @@ function PresenterBoard({
               ) : null}
             </div>
           </div>
-          {snapshot.phase === PHASE.JUDGING ? (
-            /* JUDGING: the shared judge card (full-screen variant). The
-               scoring cards carry teamId from JUDGING onward (the mapping is
-               public on this team-named surface), so the card->tally lookup
-               lights up the live votes/scores — and the stage carries a
-               Pick winner button (the big screen can crown the winner;
-               REVEAL follows via the winnerAnnounced broadcast). */
-            <TeamJudgeCard
-              team={stageTeam}
-              cardLabel={null}
-              tally={
-                snapshot.scoring?.cards.find((c) => c.teamId === stageTeam.id)
-                  ? (snapshot.scores[
-                      snapshot.scoring.cards.find((c) => c.teamId === stageTeam.id)!.cardId
-                    ] ?? null)
-                  : null
-              }
-              cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
-              cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
-              testId={`presenter-judge-${stageTeam.id}`}
-              actions={
-                <>
-                  <button
-                    type="button"
-                    className="cc-btn cc-btn-primary"
-                    data-testid="presenter-judge-pick"
-                    disabled={pickingWinner}
-                    onClick={() => {
-                      if (pickingWinner) return;
-                      setPickingWinner(true);
-                      socketRef.current?.emit(
-                        "judging:winner",
-                        { teamId: stageTeam.id },
-                        (ack: { ok?: boolean; code?: string } | undefined) => {
-                          // On failure restore the button (REVEAL unmounts it
-                          // on success via the phase change).
-                          if (!ack?.ok) setPickingWinner(false);
-                        },
-                      );
-                    }}
-                  >
-                    {pickingWinner ? "Picking…" : "Pick winner"}
-                  </button>
-                  <button
-                    type="button"
-                    className="cc-btn"
-                    data-testid="presenter-judge-return"
-                    onClick={() => {
-                      // history.length is unreliable for a fresh _blank tab
-                      // (Chromium reports 2 for the initial about:blank entry,
-                      // so back() can land on a blank page). The coded GM URL
-                      // is the deterministic path back.
-                      window.location.assign(`/gm?code=${encodeURIComponent(code)}`);
-                    }}
-                  >
-                    Return
-                  </button>
-                </>
-              }
-            />
-          ) : (
-            <PresenterTeamStage
-              team={stageTeam}
-              cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
-              cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
-              testId="presenter-stage"
-              isWinner={snapshot.winnerTeamId === stageTeam.id}
-              isPeoplesChoice={snapshot.peoplesChoiceTeamId === stageTeam.id}
-            />
-          )}
+          {/* Unified side-by-side stage for JUDGING/REVEAL/RESULTS. JUDGING
+              adds the live tally chip (card→tally lookup above) and keeps
+              the prompt accordions (promptText is public from JUDGING);
+              REVEAL/RESULTS get the winner / Crowd Favourite banners. */}
+          <PresenterTeamStage
+            team={stageTeam}
+            cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
+            cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
+            testId={snapshot.phase === PHASE.JUDGING ? `presenter-judge-${stageTeam.id}` : "presenter-stage"}
+            isWinner={snapshot.winnerTeamId === stageTeam.id}
+            isPeoplesChoice={snapshot.peoplesChoiceTeamId === stageTeam.id}
+            tally={snapshot.phase === PHASE.JUDGING ? judgingTally : undefined}
+          />
         </section>
       ) : null}
 
@@ -539,9 +562,16 @@ function PresenterBoard({
           and the old chip console. Decision 2a: the card's REAL team name is
           public from scoring onward and shows in the stage header (the
           card↔teamId mapping itself still never rides the presenter payload
-          during SCORING — the server strips it). Poster-first: the
-          click-to-flip button swaps between the AI montage poster and the
-          composed sticker card. */}
+          during SCORING — the server strips it; the client resolves the team
+          by unique teamName). UNIFIED LAYOUT: the card renders via the same
+          side-by-side PresenterTeamStage the REVEAL/RESULTS stage uses —
+          fed from the client snapshot so a 0-prompt team shows its greeting
+          + the phase-aware finished note on BOTH faces instead of a blank
+          card. Prompt accordions are SUPPRESSED (prompts are still
+          anonymous during SCORING); the live tally chip rides the stage and
+          the standalone tally line below is kept for the big-screen read.
+          The old flip-<img> PNG stage survives ONLY as a defensive fallback
+          when the team lookup misses (snapshot race / team removed). */}
       {snapshot?.phase === PHASE.SCORING && scoringCard ? (
         <section
           aria-label="scoring stage"
@@ -588,22 +618,30 @@ function PresenterBoard({
               </button>
             </div>
           </div>
-          <button
-            type="button"
-            className="cc-scoring-stage-card"
-            data-testid="presenter-scoring-card"
-            aria-label={`${scoringCardName} — ${scoringCardFlipped ? "sticker card" : "AI montage"} (click to flip)`}
-            onClick={() => setScoringCardFlipped((f) => !f)}
-          >
-            <img
-              src={`/api/games/${code}/scoring-card/${scoringCard.cardId}${scoringCardFlipped ? "" : "?variant=poster"}`}
-              alt={`${scoringCardName} — ${scoringCardFlipped ? "sticker card" : "AI montage poster"}`}
-              draggable={false}
+          {scoringCardTeam ? (
+            <PresenterTeamStage
+              team={scoringCardTeam}
+              cardRatioW={snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W}
+              cardRatioH={snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H}
+              testId="presenter-scoring-card"
+              isWinner={false}
+              isPeoplesChoice={false}
+              showPromptAccordions={false}
+              tally={snapshot.scores[scoringCard.cardId] ?? null}
+              cardLabel={scoringCard.label}
             />
-          </button>
-          <p className="cc-scoring-stage-hint">
-            {scoringCardFlipped ? "Sticker card · click to flip" : "AI montage · click to flip"}
-          </p>
+          ) : (
+            /* Defensive fallback (team lookup missed — snapshot race or the
+               team was removed): the legacy server-rendered PNG poster so
+               the stage NEVER goes blank. Not the primary path. */
+            <div className="cc-scoring-stage-card" data-testid="presenter-scoring-card-fallback">
+              <img
+                src={`/api/games/${code}/scoring-card/${scoringCard.cardId}?variant=poster`}
+                alt={`${scoringCardName} — AI montage poster`}
+                draggable={false}
+              />
+            </div>
+          )}
           <p className="cc-scoring-stage-tally" aria-live="polite" data-testid="presenter-scoring-tally">
             {(() => {
               const tally = snapshot.scores[scoringCard.cardId];

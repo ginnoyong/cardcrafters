@@ -804,6 +804,17 @@ label {
   background: color-mix(in srgb, var(--accent) 14%, var(--bg-card));
 }
 
+/* Stage meta row (PresenterTeamStage): the scoring card's label badge and
+   the live JudgeScoreChip tally — a quiet single line between the banners
+   and the two card columns (SCORING/JUDGING only; absent on REVEAL/
+   RESULTS). Reuses .cc-badge / .cc-judge-score untouched. */
+.cc-stage-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
 .cc-stage-cards {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
