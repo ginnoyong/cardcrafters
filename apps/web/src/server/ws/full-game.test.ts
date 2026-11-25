@@ -274,8 +274,9 @@ describe("full game — 10 teams × 12 players (capacity cap) end to end", () =>
       }
 
       // -----------------------------------------------------------------
-      // → SCORING via gm:stopBuild. Player copy: team-NAMED cards + own-card
-      // pointer, NEVER a teamId. GM copy: the full card→team mapping.
+      // → SCORING via gm:stopBuild. Player copy: LABEL-ONLY card identities
+      // (Card A…) + own-card pointer, NEVER a teamName or teamId. GM copy:
+      // the full card→team mapping.
       // -----------------------------------------------------------------
       const gm = connect({ role: "gm", gameCode });
       await emitAck(gm, "join", { role: "gm", joinToken: gameCode });
@@ -285,7 +286,7 @@ describe("full game — 10 teams × 12 players (capacity cap) end to end", () =>
       const reps = teamIds.map((teamId) => bots.find((b) => b.teamId === teamId)!);
       const repCopies = reps.map((rep) =>
         waitFor<{
-          cards: Array<{ cardId: string; label: string; teamName: string; teamId?: string }>;
+          cards: Array<{ cardId: string; label: string; teamName?: string; teamId?: string }>;
           yourTeamCardId?: string | null;
         }>(rep.sock, "scoring:started", 30_000),
       );
@@ -302,8 +303,7 @@ describe("full game — 10 teams × 12 players (capacity cap) end to end", () =>
       for (const copy of copies) {
         expect(copy.cards).toHaveLength(TEAMS);
         for (const card of copy.cards) {
-          expect(typeof card.teamName).toBe("string");
-          expect((card.teamName as string).length).toBeGreaterThan(0);
+          expect(card).not.toHaveProperty("teamName"); // names stay GM-only
           expect(card).not.toHaveProperty("teamId"); // mapping stays server-side
         }
         expect(typeof copy.yourTeamCardId).toBe("string");
@@ -316,9 +316,9 @@ describe("full game — 10 teams × 12 players (capacity cap) end to end", () =>
       for (const card of gmCopy.cards) expect(typeof card.teamId).toBe("string");
       expect(new Set(gmCopy.cards.map((c) => c.teamId))).toEqual(new Set(teamIds));
 
-      // Shuffled order: cardIndex = position in the persisted scoring order
-      // (Fisher–Yates by gameId:round) — derive every bot's targets from the
-      // payload, never from team order.
+      // Scoring order: cardIndex = position in the persisted scoring order
+      // — derive every bot's targets from the payloads, never from team
+      // order.
       const orderedCards = gmCopy.cards; // cards[i] → deterministic score i+1
       const scoreFor = new Map<string, number>(orderedCards.map((c, i) => [c.cardId, i + 1]));
       const ownCardByTeam = new Map<string, string>(
@@ -328,7 +328,7 @@ describe("full game — 10 teams × 12 players (capacity cap) end to end", () =>
       // -----------------------------------------------------------------
       // RATINGS: 1080 score:submit (12 players × 9 non-own cards; no scoring
       // cooldown) — batched per team, bots in parallel. score = orderIndex+1
-      // makes every card's avg its shuffled position ⇒ strictly distinct
+      // makes every card's avg its order position ⇒ strictly distinct
       // standings.
       // -----------------------------------------------------------------
       const rateBot = async (bot: Bot, ownCardId: string): Promise<void> => {

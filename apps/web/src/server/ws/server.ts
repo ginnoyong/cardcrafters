@@ -208,13 +208,14 @@ export interface SyncFullPayload extends Record<string, unknown> {
   scores?: Array<{ cardId: string; avg: number; count: number }>;
   /**
    * Scoring-order snapshot for the current round — audience-dependent:
-   *  - GM: `cards` carry the card→team mapping plus ratedX (scores cast so
-   *    far) and ratedY (total expected = activePlayers × (teams − 1));
-   *  - players: team-NAMED cards (teamName, per user decision 2a — but still
-   *    no teamId) + their own team's cardId;
-   *  - presenter: team-NAMED cards (teamName per decision 2a — team names
-   *    are public from scoring onward) but still no teamId during SCORING
-   *    (the mapping rides along from JUDGING onward) and no yourTeamCardId.
+   *  - GM: `cards` carry the card→team mapping (teamName + teamId) plus
+   *    ratedX (scores cast so far) and ratedY (total expected =
+   *    activePlayers × (teams − 1));
+   *  - players: LABEL-ONLY card identities (Card A… — no teamName, no
+   *    teamId) + their own team's cardId;
+   *  - presenter: LABEL-ONLY card identities (no teamName — the field is
+   *    GM-only — and no teamId during SCORING; the teamId mapping rides
+   *    along from JUDGING onward) and no yourTeamCardId.
    * The anonymous `scores` tallies ride along for all three audiences.
    * Absent when no scoring order exists for the current round.
    */
@@ -223,6 +224,7 @@ export interface SyncFullPayload extends Record<string, unknown> {
     cards: Array<{
       cardId: string;
       label: string;
+      /** GM-only: the card's REAL team name — never player/presenter-facing. */
       teamName?: string;
       teamId?: string;
       /** Round-fallback greeting — lets players render prompt-less cards. */
@@ -419,7 +421,7 @@ export async function buildSyncFull(
                 greeting: resolveCardGreeting(
                   await latestGreetingText(repo, gameId, c.teamId, round),
                   state.theme ?? null,
-                  c.teamName,
+                  c.label,
                 ),
                 empty: await scoringCardIsEmpty(repo, c.teamId, round),
                 montage: await scoringMontageView(repo, c.teamId, round),
@@ -440,22 +442,25 @@ export async function buildSyncFull(
       const activePlayers = teamSnapshots.reduce((n, t) => n + t.memberCount, 0);
       scoring = {
         round,
-        cards: order.cards.map((c) => ({ cardId: c.cardId, label: c.label, teamId: c.teamId })),
+        cards: order.cards.map((c) => ({
+          cardId: c.cardId,
+          label: c.label,
+          teamName: c.teamName,
+          teamId: c.teamId,
+        })),
         ratedX: scores.length,
         ratedY: activePlayers * Math.max(0, teams.length - 1),
       };
     } else if (identity?.role === "player") {
-      // Players: team-named cards (teamName mirrors beginScoring's player
-      // copy — anonymity dropped per user decision 2a; teamId still never
-      // leaves the server) + which card is THEIR OWN team's. The anonymous
-      // tallies ride along (computed above) so a player's resync restores
-      // the live scoreboard too.
+      // Players: LABEL-ONLY card identities (Card A… — mirrors beginScoring's
+      // player copy; teamName and teamId both stay server-side) + which card
+      // is THEIR OWN team's. The anonymous tallies ride along (computed
+      // above) so a player's resync restores the live scoreboard too.
       scoring = {
         round,
         cards: order.cards.map((c) => ({
           cardId: c.cardId,
           label: c.label,
-          teamName: c.teamName,
           greeting: cardExtras.get(c.cardId)?.greeting ?? "",
           empty: cardExtras.get(c.cardId)?.empty ?? false,
           montage: cardExtras.get(c.cardId)?.montage ?? null,
@@ -473,23 +478,20 @@ export async function buildSyncFull(
           return cardId ? [{ cardId, value: s.value }] : [];
         });
     } else {
-      // Presenter (and any unknown identity): team-NAMED cards (teamName
-      // per user decision 2a — team names are public from scoring onward,
-      // the big screen shows them during the rating stage) + the same
-      // anonymous tallies (computed above) — the presenter scoreboard must
-      // survive a resync exactly like the GM's and the players'.
-      // From JUDGING onward the cards also carry teamId: the judging stage
-      // is team-named (the judge card needs teamId to light up its live
-      // tally), so the card->team mapping is already public here. During
-      // SCORING the teamId mapping stays stripped (only the NAME is public
-      // — the tally board stays cardId-keyed).
+      // Presenter (and any unknown identity): LABEL-ONLY card identities
+      // (Card A… — teamName is GM-only and never reaches the big screen) +
+      // the same anonymous tallies (computed above) — the presenter
+      // scoreboard must survive a resync exactly like the GM's and the
+      // players'. From JUDGING onward the cards also carry teamId (the
+      // card->team mapping is already public at that point). During
+      // SCORING the teamId mapping stays stripped — the tally board stays
+      // cardId-keyed.
       const revealMapping = state.phase !== PHASE.SCORING;
       scoring = {
         round,
         cards: order.cards.map((c) => ({
           cardId: c.cardId,
           label: c.label,
-          teamName: c.teamName,
           greeting: cardExtras.get(c.cardId)?.greeting ?? "",
           empty: cardExtras.get(c.cardId)?.empty ?? false,
           montage: cardExtras.get(c.cardId)?.montage ?? null,

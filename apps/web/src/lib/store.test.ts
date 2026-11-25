@@ -17,8 +17,8 @@ import {
   type SyncFullEvent,
 } from "./store";
 
-describe("parseScoringCards — teamName passthrough (decision 2a)", () => {
-  it("keeps a valid non-empty teamName; drops non-string and empty ones", () => {
+describe("parseScoringCards — teamName tolerance (GM-only; parse unchanged)", () => {
+  it("tolerates a valid non-empty teamName (GM copies); drops non-string and empty ones", () => {
     const parsed = parseScoringCards([
       { cardId: "card-1", label: "Card A", teamName: "Llama Legends" },
       { cardId: "card-2", label: "Card B", teamName: "" },
@@ -33,7 +33,7 @@ describe("parseScoringCards — teamName passthrough (decision 2a)", () => {
     ]);
   });
 
-  it("presenter copies (no teamName/teamId) parse to plain anonymous cards", () => {
+  it("player/presenter copies (no teamName/teamId) parse to plain anonymous cards", () => {
     expect(parseScoringCards([
       { cardId: "card-1", label: "Card A" },
       { cardId: "card-2", label: "Card B" },
@@ -43,7 +43,7 @@ describe("parseScoringCards — teamName passthrough (decision 2a)", () => {
     ]);
   });
 
-  it("GM copies keep teamId alongside teamName (card↔team mapping)", () => {
+  it("GM copies keep teamId alongside teamName (GM-only card↔team mapping)", () => {
     expect(parseScoringCards([
       { cardId: "card-1", label: "Card A", teamName: "Team A", teamId: TEAM_A },
     ])).toEqual([{ cardId: "card-1", label: "Card A", teamName: "Team A", teamId: TEAM_A }]);

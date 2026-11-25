@@ -61,7 +61,7 @@ export default function TeamShowcase({
   return (
     <section
       className="cc-showcase"
-      aria-label={`${team.name} showcase`}
+      aria-label={`Team ${team.label} showcase`}
       data-testid={testId}
     >
       <div className="cc-showcase-main">
@@ -73,12 +73,12 @@ export default function TeamShowcase({
               "--card-ratio-w": cardRatioW,
               "--card-ratio-h": cardRatioH,
             } as CSSProperties}
-            aria-label={`poster for ${team.name}`}
+            aria-label={`poster for Team ${team.label}`}
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={team.montageImageUrl ?? ""}
-              alt={`Finished poster for ${team.name}`}
+              alt={`Finished poster for Team ${team.label}`}
               className="cc-montage-img"
             />
           </div>
@@ -91,7 +91,7 @@ export default function TeamShowcase({
               cardRatioW={cardRatioW}
               cardRatioH={cardRatioH}
               building={false}
-              ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
+              ariaLabel={`Team ${team.label} card — ${readyCount} stickers placed`}
             />
             {team.montageStatus === "generating" ? (
               <p className="cc-montage-status" aria-live="polite">
@@ -112,7 +112,7 @@ export default function TeamShowcase({
               cardRatioW={cardRatioW}
               cardRatioH={cardRatioH}
               building={false}
-              ariaLabel={`${team.name} sticker card — ${readyCount} stickers placed`}
+              ariaLabel={`Team ${team.label} sticker card — ${readyCount} stickers placed`}
             />
           </div>
         ) : null}

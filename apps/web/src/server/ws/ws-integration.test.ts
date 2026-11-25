@@ -811,9 +811,10 @@ describe("reconnect state preservation (refresh regression)", () => {
 
 
 // ---------------------------------------------------------------------------
-// Scoring phase end-to-end (team-named 1-10 ratings → judging → results).
-// Exercises the WS surface: scoring:started (players get teamName, never
-// teamId; presenter copies carry teamName per decision 2a), score:submit acks + guards, live
+// Scoring phase end-to-end (anonymous 1-10 ratings → judging → results).
+// Exercises the WS surface: scoring:started (players + presenter get
+// LABEL-ONLY card identities — Card A… — never teamName and never teamId),
+// score:submit acks + guards, live
 // anonymous scores:update, sync:full scoring/myScores shapes, then
 // judging:winner → reveal:ack → RESULTS.
 // ---------------------------------------------------------------------------
@@ -946,35 +947,24 @@ describe("scoring phase end-to-end", () => {
     expect(stop.ok).toBe(true);
     expect(stop.phase).toBe("SCORING");
 
-    // Player copy: team-NAMED cards (real teamName per decision 2a) + which
-    // card is their own team's — never a teamId (the card↔team mapping must
-    // not reach players).
+    // Player copy: LABEL-ONLY card identities (Card A…) + which card is
+    // their own team's — never a teamName and never a teamId (neither the
+    // real names nor the card↔team mapping may reach players).
     const alexCopy = await alexStarted;
     const samCopy = await samStarted;
     expect(alexCopy.cards).toHaveLength(3);
-    // Card IDENTITY is stable (team "A" is ALWAYS "Card A") but the RATING
-    // SEQUENCE is the deterministic per-game+round shuffle — assert the SET
-    // of labels and the teamName↔label mapping, not the sequence. The
-    // shuffled order itself is verified in hub.test.ts's buildScoringOrder
-    // tests.
-    expect([...alexCopy.cards.map((c) => c.label)].sort()).toEqual([
+    // Card IDENTITY is stable (team "A" is ALWAYS "Card A") and the RATING
+    // SEQUENCE is the fixed ascending label order — assert the exact
+    // sequence. The mapping itself is verified in hub.test.ts's
+    // buildScoringOrder tests.
+    expect(alexCopy.cards.map((c) => c.label)).toEqual([
       "Card A",
       "Card B",
       "Card C",
     ]);
-    // Identity mapping: the card labeled "Card X" belongs to team X's real
-    // name — labels follow teams, never a positional shuffle artifact.
-    for (const c of alexCopy.cards) {
-      const letter = String(c.label).replace("Card ", "");
-      const expectedName = (await repo.listTeams(gameId)).find(
-        (t) => t.label === letter,
-      )?.name;
-      expect(c.teamName).toBe(expectedName);
-    }
     for (const c of alexCopy.cards) {
       expect(typeof c.cardId).toBe("string");
-      expect(typeof c.teamName).toBe("string");
-      expect((c.teamName as string).length).toBeGreaterThan(0);
+      expect(c).not.toHaveProperty("teamName");
       // The round-fallback greeting rides the scoring:started payload too
       // (round-1 greeting rows exist for EVERY team — the itemless one
       // included).
@@ -1106,9 +1096,9 @@ describe("scoring phase end-to-end", () => {
     expect(again.ok).toBe(false);
     expect(again.reason ?? again.code).toBe("already_rated");
 
-    // Player resync: sync:full carries the team-NAMED scoring shape (real
-    // teamName, never teamId) + cardId-keyed myScores (teamId mapping
-    // resolved SERVER-side).
+    // Player resync: sync:full carries the LABEL-ONLY scoring shape (Card
+    // A… — never teamName, never teamId) + cardId-keyed myScores (teamId
+    // mapping resolved SERVER-side).
     const resynced = new Promise<SyncFullEvent>((resolve) => alex.once("sync:full", resolve));
     await emitAck(alex, "sync:resync", {});
     const raw = await resynced;
@@ -1116,7 +1106,7 @@ describe("scoring phase end-to-end", () => {
       round: number;
       cards: Array<{
         cardId: string;
-        teamName: string;
+        label: string;
         greeting: string;
         empty: boolean;
         montage: { status: string; imageUrl: string } | null;
@@ -1126,8 +1116,7 @@ describe("scoring phase end-to-end", () => {
     expect(scoring.round).toBe(1);
     expect(scoring.cards).toHaveLength(3);
     for (const c of scoring.cards) {
-      expect(typeof c.teamName).toBe("string");
-      expect((c.teamName as string).length).toBeGreaterThan(0);
+      expect(c).not.toHaveProperty("teamName");
       expect(c).not.toHaveProperty("teamId");
     }
     // Card extras (scoring-card-extras): every player card carries the
@@ -1194,11 +1183,11 @@ describe("scoring phase end-to-end", () => {
       new Set(gmCopy.cards.map((c) => c.teamId)),
     );
 
-    // The client reducer accepts the new shapes (players see team-named
-    // cards + their own card; the teamId mapping stays server-side).
+    // The client reducer accepts the new shapes (players see label-only
+    // cards + their own card; teamId and teamName both stay server-side).
     const snap = normalizeSyncFull(raw, {}, alexAck.identity.playerId);
     expect(snap.scoring?.cards.every((c) => !("teamId" in c))).toBe(true);
-    expect(snap.scoring?.cards.every((c) => typeof c.teamName === "string" && c.teamName.length > 0)).toBe(true);
+    expect(snap.scoring?.cards.every((c) => !("teamName" in c))).toBe(true);
     expect(snap.scoring?.yourTeamCardId).toBe(alexCopy.yourTeamCardId);
     expect(snap.myScores[cardB]).toBe(7);
 
@@ -1285,10 +1274,10 @@ describe("presenter scoring tallies (sync:full + scores:update)", () => {
     expect(stop.ok).toBe(true);
     expect(stop.phase).toBe("SCORING");
 
-    // Presenter resync during SCORING → sync:full carries the team-NAMED
-    // scoring cards (real teamName per decision 2a — team names are public
-    // from scoring onward) + the (currently empty) tallies — cardId-keyed,
-    // and still no teamId anywhere (the mapping itself stays stripped).
+    // Presenter resync during SCORING → sync:full carries the LABEL-ONLY
+    // scoring cards (Card A… — teamName is GM-only and never reaches the
+    // presenter) + the (currently empty) tallies — cardId-keyed, and still
+    // no teamId anywhere (the mapping itself stays stripped).
     const resynced = new Promise<SyncFullEvent>((resolve) => presenter.once("sync:full", resolve));
     await emitAck(presenter, "sync:resync", {});
     const raw = await resynced;
@@ -1296,7 +1285,6 @@ describe("presenter scoring tallies (sync:full + scores:update)", () => {
       cards: Array<{
         cardId: string;
         label: string;
-        teamName: string;
         greeting: string;
         montage: { status: string; imageUrl: string } | null;
       }>;
@@ -1304,8 +1292,7 @@ describe("presenter scoring tallies (sync:full + scores:update)", () => {
     expect(Array.isArray(scoring.cards)).toBe(true);
     expect(scoring.cards).toHaveLength(3);
     for (const c of scoring.cards) {
-      expect(typeof c.teamName).toBe("string");
-      expect((c.teamName as string).length).toBeGreaterThan(0);
+      expect(c).not.toHaveProperty("teamName");
       // Card extras reach the presenter copy too: the round-fallback greeting
       // (round-1 rows exist for every team) keyed by the anonymous cardId,
       // and the READY-only montage view — never the teamId mapping.
@@ -1323,16 +1310,17 @@ describe("presenter scoring tallies (sync:full + scores:update)", () => {
     for (const t of tallies) {
       expect(t).not.toHaveProperty("teamId");
     }
-    // The client reducer accepts the presenter shape (team-named cards +
-    // tallies) and keeps the teamName passthrough while dropping teamId.
+    // The client reducer accepts the presenter shape (label-only cards +
+    // tallies) and keeps the labels while dropping teamId — and teamName is
+    // GM-only, so it never appears on the presenter copy either.
     const snap = normalizeSyncFull(raw, {}, null);
     expect(snap.scoring?.cards.every((c) => !("teamId" in c))).toBe(true);
-    expect(snap.scoring?.cards.every((c) => typeof c.teamName === "string" && c.teamName.length > 0)).toBe(true);
+    expect(snap.scoring?.cards.every((c) => !("teamName" in c))).toBe(true);
 
     // A player submits a score → the presenter receives the live anonymous
     // scores:update (cardId-keyed, no teamId). Rate a card that is NOT the
-    // player's own team's card (the Fisher–Yates shuffle varies per gameId —
-    // a fixed index can accidentally map to the player's own team). Alex's
+    // player's own team's card (which card that is derives from the
+    // payload's yourTeamCardId, not from a positional assumption). Alex's
     // own cardId comes from alex's own sync:full (yourTeamCardId).
     const alexResynced = new Promise<SyncFullEvent>((resolve) => alex.once("sync:full", resolve));
     await emitAck(alex, "sync:resync", {});
@@ -1394,8 +1382,9 @@ describe("presenter scoring tallies (sync:full + scores:update)", () => {
     const stop = await emitAck<{ ok: boolean; phase?: string }>(gm, "gm:stopBuild", {});
     expect(stop.ok).toBe(true);
 
-    // Presenter resync during SCORING: cards carry teamName (decision 2a)
-    // but still no teamId (the mapping itself stays stripped).
+    // Presenter resync during SCORING: cards are label-only identities —
+    // no teamName (GM-only) and still no teamId (the mapping itself stays
+    // stripped).
     const resynced = new Promise<SyncFullEvent>((resolve) => presenter.once("sync:full", resolve));
     await emitAck(presenter, "sync:resync", {});
     const raw = await resynced;

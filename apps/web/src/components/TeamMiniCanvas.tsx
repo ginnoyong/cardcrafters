@@ -82,10 +82,14 @@ export default function TeamMiniCanvas({
   // position — it never remounts when the poster arrives).
   const showingSticker = posterReady ? flipped : !flipped;
 
+  // Label identity — real team names are GM-only; the grid shows
+  // "Team A"-style labels.
+  const identityLabel = `Team ${team.label}`;
+
   return (
-    <div className="cc-mini" aria-label={`live preview of ${team.name}'s card`}>
+    <div className="cc-mini" aria-label={`live preview of ${identityLabel}'s card`}>
       <h3>
-        {team.name} <span className="cc-muted">({team.label})</span>
+        {identityLabel}
       </h3>
       {/* Button-like flip control (TeamJudgeCard pattern): one toggle whose
           label announces what the NEXT click shows. Default face first (the
@@ -99,11 +103,11 @@ export default function TeamMiniCanvas({
         aria-label={
           flipped
             ? posterReady
-              ? `show AI montage version for ${team.name}`
-              : `show sticker version for ${team.name}`
+              ? `show AI montage version for ${identityLabel}`
+              : `show sticker version for ${identityLabel}`
             : posterReady
-              ? `show sticker version for ${team.name}`
-              : `show card back for ${team.name}`
+              ? `show sticker version for ${identityLabel}`
+              : `show card back for ${identityLabel}`
         }
         data-testid={`gm-mini-flip-${team.id}`}
         onClick={() => setFlipped((v) => !v)}
@@ -132,12 +136,12 @@ export default function TeamMiniCanvas({
             <div
               className="cc-montage"
               style={montageFaceStyle(cardRatioW, cardRatioH)}
-              aria-label={`poster for ${team.name}`}
+              aria-label={`poster for ${identityLabel}`}
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={montageImageUrl ?? ""}
-                alt={`Finished poster for ${team.name}`}
+                alt={`Finished poster for ${identityLabel}`}
                 className="cc-montage-img"
               />
             </div>
@@ -172,7 +176,7 @@ export default function TeamMiniCanvas({
               fillContainer
               resizeSignal={flipped}
               building={preScoring}
-              ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
+              ariaLabel={`${identityLabel} card — ${readyCount} stickers placed`}
             />
           </div>
         </div>

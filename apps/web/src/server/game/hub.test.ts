@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_CARD_CONFIG, MAX_TEAM_MEMBERS, PHASE } from "@cardcrafters/shared";
 
 import { MemoryRepo, RepoError } from "../repo/memory-repo";
-import { GameHub, TEAM_NAME_POOL, type RoomEmitter } from "./hub";
+import { buildScoringOrder, GameHub, TEAM_NAME_POOL, type RoomEmitter } from "./hub";
 
 const NOW = 1_700_000_000_000;
 
@@ -368,6 +368,40 @@ describe("capacity + persistence", () => {
     ).rejects.toThrow(/scores_locked/);
 
     hub.shutdown();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildScoringOrder — stable card identity, NO randomness
+// ---------------------------------------------------------------------------
+
+describe("buildScoringOrder", () => {
+  it("maps team labels A/B/C to Card A/B/C in ascending order regardless of input order", async () => {
+    const { hub } = makeHub();
+    const { teams } = await hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 3 });
+    const [teamA, teamB, teamC] = teams;
+
+    // Shuffled input order — output must still be the stable ascending order.
+    const order = buildScoringOrder("game-1", 1, [teamC!, teamA!, teamB!]);
+
+    expect(order.round).toBe(1);
+    expect(order.cards.map((c) => c.label)).toEqual(["Card A", "Card B", "Card C"]);
+    expect(order.cards.map((c) => c.cardId)).toEqual(["card-a", "card-b", "card-c"]);
+
+    // Identity mapping: card letter is the team's label, never positional.
+    expect(order.cards[0]!.teamId).toBe(teamA!.id);
+    expect(order.cards[1]!.teamId).toBe(teamB!.id);
+    expect(order.cards[2]!.teamId).toBe(teamC!.id);
+  });
+
+  it("is deterministic across gameIds — no randomness in the sequence", async () => {
+    const { hub } = makeHub();
+    const { teams } = await hub.createGame(DEFAULT_CARD_CONFIG, { teamCount: 3 });
+
+    const one = buildScoringOrder("game-1", 1, teams);
+    const two = buildScoringOrder("game-2", 1, teams);
+
+    expect(JSON.stringify(one.cards)).toBe(JSON.stringify(two.cards));
   });
 });
 

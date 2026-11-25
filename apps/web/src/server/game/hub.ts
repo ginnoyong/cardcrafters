@@ -43,7 +43,6 @@ import type {
   TeamRow,
 } from "../repo/repository";
 import type { ScoringOrder } from "@cardcrafters/shared";
-import { hashString, mulberry32 } from "../ai/mock-provider";
 import {
   latestGreetingText,
   resolveCardGreeting,
@@ -132,37 +131,30 @@ function pickTeamNames(count: number, random: () => number = Math.random): strin
 /**
  * Build the round's scoring order.
  *
- * One card per team. Card IDENTITY is stable: the team labeled "A" is ALWAYS
- * "Card A" (cardId "card-a") — labels/cards were previously assigned
- * positionally over a shuffled list, so a team's card letter changed at every
- * scoring entry (user-reported confusion). The only randomness left is the
- * RATING SEQUENCE: the deterministic per-game+round Fisher–Yates shuffle
- * (seed `hashString("${gameId}:${round}")` → mulberry32, same pattern as
- * pickTeamNames) shuffles the ORDER the cards are presented to players, so
- * every hub instance / restart reproduces the exact same sequence — the
- * order is persisted on Game.scoringOrder as the single source of truth.
+ * One card per team, in ASCENDING label order (sortByLabel — "A" → "J"),
+ * with NO randomness: the card sequence players rate is simply the team
+ * label order, and the persisted Game.scoringOrder is the single source of
+ * truth for it. Card IDENTITY is stable by construction: the team labeled
+ * "A" is ALWAYS "Card A" (cardId "card-a") — the card letter is the team's
+ * label, never a positional artifact of a shuffle (the old per-game+round
+ * Fisher–Yates shuffling of the presentation order was dropped; a fixed
+ * ascending order removes the user-reported confusion entirely).
  *
  * `cardId`s derive from the team label ("card-a"…), `label`s are the public
  * display strings ("Card A"…) and `teamName` the card's REAL team name —
- * teamName IS sent to players (player-side anonymity dropped per user
- * decision 2a); the `teamId` mapping is still GM/server-only and must be
- * STRIPPED from every player-facing payload, and presenter copies stay
- * anonymous (cardId+label).
+ * teamName stays SERVER/GM-side (it is STRIPPED from every player- and
+ * presenter-facing payload); the `teamId` mapping is likewise GM/server-only.
  */
 export function buildScoringOrder(
   gameId: string,
   round: number,
   teams: TeamRow[],
 ): ScoringOrder {
-  // IDENTITY-STABLE labels: teams sorted by their label ("A"…"J") so team
-  // "A" always draws "Card A" / "card-a" — the card letter is the team's,
-  // never a positional artifact of the shuffle.
+  // Ascending label order ("A"…"J") — deterministic, no shuffle: team "A"
+  // always draws "Card A" / "card-a" and every hub instance / restart
+  // reproduces the exact same sequence.
   const pool = sortByLabel([...teams]);
-  const random = mulberry32(hashString(`${gameId}:${round}`));
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(random() * (i + 1));
-    [pool[i], pool[j]] = [pool[j]!, pool[i]!];
-  }
+  void gameId;
   return {
     round,
     cards: pool.map((team) => ({
@@ -499,8 +491,9 @@ export class GameHub {
         const teams = await this.repo.listTeams(gameId);
         const order = buildScoringOrder(gameId, state.round, teams);
         await this.repo.updateGame(gameId, { scoringOrder: order });
-        // PUBLIC card copies (player + presenter): team-named (decision 2a) but
-        // NEVER the teamId mapping. Each card additionally carries the content
+        // PUBLIC card copies (player + presenter): cardId + label + content
+        // extras ONLY — the real team name is NEVER client-facing (no
+        // teamName, no teamId). Each card additionally carries the content
         // needed to render prompt-less teams' cards client-side: the team's
         // greeting (round-fallback — same rule as renderTeamCardPng) pushed
         // through resolveCardGreeting (LAST-RESORT themed one-liner for teams
@@ -515,11 +508,10 @@ export class GameHub {
           order.cards.map(async (c) => ({
             cardId: c.cardId,
             label: c.label,
-            teamName: c.teamName,
             greeting: resolveCardGreeting(
               await latestGreetingText(this.repo, gameId, c.teamId, state.round),
               state.theme ?? null,
-              c.teamName,
+              c.label,
             ),
             empty: await scoringCardIsEmpty(this.repo, c.teamId, state.round),
             montage: await scoringMontageView(this.repo, c.teamId, state.round),
@@ -535,8 +527,8 @@ export class GameHub {
         for (const team of teams) {
           const members = await this.repo.listTeamPlayers(team.id);
           const yourTeamCardId = order.cards.find((c) => c.teamId === team.id)?.cardId ?? null;
-          // Player cards carry the real teamName (UI decision 2a) but NEVER
-          // the teamId mapping.
+          // Player cards are LABEL-ONLY identities (Card A…) — teamId and
+          // real names never ride along.
           for (const p of members) {
             this.emitToRooms(
               gameId,

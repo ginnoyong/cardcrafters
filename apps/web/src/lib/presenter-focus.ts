@@ -12,23 +12,27 @@
  *    (unknown ids fall back to the default first card).
  *  - JUDGING (and the later stage phases): the resolved card's TEAM latches
  *    the one-at-a-time stage (teamId is present on the presenter's scoring
- *    payload from JUDGING onward; a unique teamName match is the fallback).
+ *    payload from JUDGING onward; a unique LABEL-LETTER match is the
+ *    fallback — "Card A" → team.label "A". Real team names never reach the
+ *    presenter, so labels are the only anonymous identity available).
  *
  * These are pure functions so the param→index/team resolution is unit-testable
  * without mounting the client board (react-konva / socket dependencies).
  */
 
-/** Structural subset of ClientScoringCard (lib/store) the helpers need. */
+/** Structural subset of ClientScoringCard (lib/store) the helpers need.
+ *  `label` is the card's anonymous display label ("Card A", "Card B", …). */
 export interface FocusScoringCard {
   cardId: string;
   teamId?: string;
-  teamName?: string;
+  label?: string;
 }
 
-/** Structural subset of ClientTeam (lib/store) the helpers need. */
+/** Structural subset of ClientTeam (lib/store) the helpers need —
+ *  `label` is the team's anonymous join label ("A", "B", …). */
 export interface FocusTeam {
   id: string;
-  name: string;
+  label: string;
 }
 
 /**
@@ -63,12 +67,21 @@ export function resolvePresenterCard(
 }
 
 /**
+ * Extract the team label LETTER from a card's display label
+ * ("Card A" → "A"). Tolerates a bare letter ("A" → "A") and case
+ * differences on the "Card" prefix.
+ */
+function labelLetter(cardLabel: string): string {
+  return cardLabel.replace(/^Card\s+/i, "").trim();
+}
+
+/**
  * Resolve a `?card=<cardId>` deep-link param to the card's TEAM: prefer the
  * card's teamId (rides the presenter payload from JUDGING onward), else a
- * UNIQUE teamName match (team names are unique per game and public from
- * SCORING onward — decision 2a). Null when the param is unknown or neither
- * resolves (snapshot race / team removed) — callers keep their default
- * stage positioning.
+ * UNIQUE label-letter match ("Card A" → team.label "A" — the presenter's
+ * payloads are label-only; real team names are stripped server-side). Null
+ * when the param is unknown or neither resolves (snapshot race / team
+ * removed) — callers keep their default stage positioning.
  */
 export function resolvePresenterCardTeam(
   cards: ReadonlyArray<FocusScoringCard>,
@@ -81,9 +94,10 @@ export function resolvePresenterCardTeam(
     const byId = teams.find((t) => t.id === card.teamId);
     if (byId) return byId;
   }
-  if (card.teamName) {
-    const byName = teams.filter((t) => t.name === card.teamName);
-    if (byName.length === 1) return byName[0]!;
+  if (card.label) {
+    const letter = labelLetter(card.label);
+    const byLabel = teams.filter((t) => t.label === letter);
+    if (byLabel.length === 1) return byLabel[0]!;
   }
   return null;
 }

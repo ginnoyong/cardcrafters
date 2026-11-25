@@ -139,7 +139,7 @@ export function mergeCardConfig(partial: unknown): CardConfig {
  * round-scoped lookup walks DOWNWARD via latestGreetingText (same rule the
  * ws scoring payloads apply — one shared rule, no divergence); a team with
  * no greeting row in ANY round still gets resolveCardGreeting's LAST-RESORT
- * themed one-liner (Happy <theme>, <name>! / For <name>!) so the composed
+ * themed one-liner (Happy <theme>, Card <letter>! / For Card <letter>!) so the composed
  * PNG is greeting-bearing even for row-less 0-prompt teams — the client's
  * CardBack onError fallback then truly never fires.
  */
@@ -163,15 +163,20 @@ async function renderTeamCardPng(
   // resolves through resolveCardGreeting: the themed last-resort one-liner
   // keeps even row-less teams' composed cards greeting-bearing.
   const orderCard = game.scoringOrder?.cards.find((c) => c.teamId === teamId);
-  const teamName =
-    orderCard?.teamName ??
-    (await repo.listTeams(game.id)).find((t) => t.id === teamId)?.name ??
+  // Card IDENTITY, not the real name: the composed card's last-resort
+  // greeting is built from the public label ("Card A") — the same
+  // label-letter form the ws scoring payloads use (one shared identity
+  // rule). Fallback: the team's bare join label ("A" — resolveCardGreeting
+  // accepts "Card A" OR "A", taking the last whitespace token).
+  const cardLabel =
+    orderCard?.label ??
+    (await repo.listTeams(game.id)).find((t) => t.id === teamId)?.label ??
     "";
   const greeting = await latestGreetingText(repo, game.id, teamId, round);
   return renderCardPng(
     items,
     { placements: layout?.placements ?? [] },
-    resolveCardGreeting(greeting, game.theme ?? null, teamName),
+    resolveCardGreeting(greeting, game.theme ?? null, cardLabel),
     {
       cardRatioW: game.config.cardRatioW,
       cardRatioH: game.config.cardRatioH,
@@ -377,7 +382,8 @@ export async function handleApiRequest(
   }
 
 /**
- * Sanitize a team name into a filename fragment: lowercase, [a-z0-9] kept,
+ * Sanitize a card label ("Card A" → "card-a") into a filename fragment:
+ * lowercase, [a-z0-9] kept,
  * everything else (and runs of them) collapsed to single dashes. Bounded so
  * pathological names can't produce absurd headers.
  */
@@ -424,7 +430,12 @@ if (req.method === "GET" && exportMatch) {
   const entries: { name: string; bytes: Buffer }[] = [];
   try {
     for (const team of teams) {
-      const namePart = sanitizeFileNamePart(team.name);
+      // Filenames carry the PUBLIC card identity ("card-a-…"), never the
+      // real team name — the same label the scoring payloads use. A team
+      // missing from the scoring order (cannot happen in RESULTS, where
+      // scoring has run) falls back to its join label ("Team A").
+      const orderCardLabel = game.scoringOrder?.cards.find((c) => c.teamId === team.id)?.label;
+      const namePart = sanitizeFileNamePart(orderCardLabel ?? `Team ${team.label}`);
       // Poster: READY montage file from disk when possible, composed fallback
       // otherwise (ext kept dynamic — poster files may be jpg).
       let posterBytes: Buffer | null = null;

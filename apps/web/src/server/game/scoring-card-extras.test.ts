@@ -66,23 +66,24 @@ describe("latestGreetingText — round-fallback walk", () => {
 
 describe("resolveCardGreeting — LAST-RESORT blank-card guard", () => {
   it("passes real greeting text through untouched (modulo trim/collapse)", () => {
-    expect(resolveCardGreeting("Happy building, Crew A!", "Castles", "Crew A")).toBe(
+    expect(resolveCardGreeting("Happy building, Crew A!", "Castles", "Card A")).toBe(
       "Happy building, Crew A!",
     );
     // Whitespace normalization only — a real AI greeting is always preferred.
-    expect(resolveCardGreeting("  Hello   world  ", null, "Crew B")).toBe("Hello world");
+    expect(resolveCardGreeting("  Hello   world  ", null, "Card B")).toBe("Hello world");
   });
 
-  it("falls back to the themed one-liner when the text is empty", () => {
-    expect(resolveCardGreeting("", "Castles", "Crew A")).toBe("Happy Castles, Crew A!");
-    expect(resolveCardGreeting("   ", "  Pirate   Cove  ", "Crew B")).toBe(
-      "Happy Pirate Cove, Crew B!",
+  it("falls back to the themed one-liner when the text is empty (letter = last token of teamLabel)", () => {
+    expect(resolveCardGreeting("", "Castles", "Card A")).toBe("Happy Castles, Card A!");
+    // The bare letter resolves to the same card identity.
+    expect(resolveCardGreeting("", "  Pirate   Cove  ", "B")).toBe(
+      "Happy Pirate Cove, Card B!",
     );
   });
 
   it("falls back to the theme-less one-liner when there is no theme", () => {
-    expect(resolveCardGreeting("", null, "Crew A")).toBe("For Crew A!");
-    expect(resolveCardGreeting("", "   ", "Crew B")).toBe("For Crew B!");
+    expect(resolveCardGreeting("", null, "Card A")).toBe("For Card A!");
+    expect(resolveCardGreeting("", "   ", "B")).toBe("For Card B!");
   });
 
   it("scoringCardIsEmpty — matches renderTeamCardPng's renderable-item filter", async () => {

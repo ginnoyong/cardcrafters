@@ -4,9 +4,9 @@
  * RatingPanel — the player's SCORING surface.
  *
  * Binding decisions (see phase spec):
- *  - ONE card at a time, browsed with prev/next ("Card B · 2 / 3"); cards are
- *    labeled with their real team name (decision 2a), but never the teamId
- *    mapping (that stays server-side);
+ *  - ONE card at a time, browsed with prev/next ("Card B · 2 / 3"); cards
+ *    carry LABEL identity only ("Card A"…) — real team names are GM-only and
+ *    never reach the player UI; the teamId mapping stays server-side;
  *  - the player's OWN team's card is skipped entirely (own-card guard) —
  *    it never appears in the rateable list;
  *  - each card shows its LIVE anonymous average + vote count (scores:update);
@@ -166,7 +166,7 @@ export default function RatingPanel({
         </p>
         {ownCard ? (
           <p className="cc-hint">
-            Your own team's card ({ownCard.teamName ?? ownCard.label}) can't be rated by you.
+            Your own team's card ({ownCard.label}) can't be rated by you.
           </p>
         ) : null}
       </section>
@@ -175,9 +175,8 @@ export default function RatingPanel({
 
   if (!card) return null;
 
-  // Real team name (decision 2a) — falls back to the anonymous label only if
-  // the payload somehow lacks a teamName.
-  const cardName = card.teamName ?? card.label;
+  // Label identity — real team names are GM-only, never rendered to players.
+  const cardName = card.label;
   // Face treatment: empty cards (0 renderable READY stickers, no READY
   // poster) render the client-side empty treatment on BOTH flip faces;
   // everything else keeps the server artwork path unchanged.

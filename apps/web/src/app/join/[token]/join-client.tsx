@@ -327,19 +327,21 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
   const results = snapshot?.phase === PHASE.RESULTS;
   const winnerLabel =
     teamLabel(snapshot?.teams ?? [], snapshot?.winnerTeamId) ||
-    snapshot?.standings.find((s) => s.teamId === snapshot.winnerTeamId)?.label ||
-    "";
+    (snapshot?.standings.find((s) => s.teamId === snapshot.winnerTeamId)?.label
+      ? `Team ${snapshot.standings.find((s) => s.teamId === snapshot.winnerTeamId)!.label}`
+      : "");
   const peoplesChoiceLabel =
     teamLabel(snapshot?.teams ?? [], snapshot?.peoplesChoiceTeamId) ||
-    snapshot?.standings.find((s) => s.teamId === snapshot.peoplesChoiceTeamId)?.label ||
-    "";
+    (snapshot?.standings.find((s) => s.teamId === snapshot.peoplesChoiceTeamId)?.label
+      ? `Team ${snapshot.standings.find((s) => s.teamId === snapshot.peoplesChoiceTeamId)!.label}`
+      : "");
   // Rated summary for JUDGING ("Your ratings: Card B: 7 · Card C: 5").
   const ratedSummary =
     snapshot && Object.keys(snapshot.myScores).length > 0
       ? Object.entries(snapshot.myScores)
           .map(([cardId, value]) => {
             const card = snapshot.scoring?.cards.find((c) => c.cardId === cardId);
-            return `${card?.teamName ?? card?.label ?? "a card"}: ${value}`;
+            return `${card?.label ?? "a card"}: ${value}`;
           })
           .join(" · ")
       : null;
@@ -476,7 +478,7 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
               section carries the timer, and the theme was shown at build. */}
           {build ? (
             <section className="cc-card cc-build-head" aria-label="your team">
-              <h2>{team.name}</h2>
+              <h2>Team {team.label}</h2>
               <p className="cc-badge">
                 {phaseLabel(snapshot.phase)} · round {snapshot.round}
                 {remainingLabel ? ` · ⏱ ${remainingLabel}` : snapshot.phaseEndsAt ? " · timed" : ""}
@@ -535,10 +537,10 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                     aria-pressed={showPoster}
                     aria-label={
                       showPoster
-                        ? `show sticker version for ${team.name}`
+                        ? `show sticker version for Team ${team.label}`
                         : posterReady
-                          ? `show AI montage version for ${team.name}`
-                          : `show card back for ${team.name}`
+                          ? `show AI montage version for Team ${team.label}`
+                          : `show card back for Team ${team.label}`
                     }
                     data-testid="build-card-flip"
                     onClick={() => setShowPoster((v) => !v)}
@@ -578,12 +580,12 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                             snapshot?.cardRatioW ?? DEFAULT_CARD_RATIO_W,
                             snapshot?.cardRatioH ?? DEFAULT_CARD_RATIO_H,
                           )}
-                          aria-label={`poster for ${team.name}`}
+                          aria-label={`poster for Team ${team.label}`}
                         >
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img
                             src={team.montageImageUrl ?? ""}
-                            alt={`Finished poster for ${team.name}`}
+                            alt={`Finished poster for Team ${team.label}`}
                             className="cc-montage-img"
                           />
                         </div>
@@ -615,7 +617,7 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                   posterReady && team.montagePromptText ? (
                     <pre
                       className="cc-prompt-view"
-                      aria-label={`AI montage prompt for ${team.name}`}
+                      aria-label={`AI montage prompt for Team ${team.label}`}
                       data-testid="build-montage-prompt"
                     >
                       {team.montagePromptText}
@@ -661,9 +663,9 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
                   even though the RatingPanel (with its own timer) isn't
                   rendered yet; JUDGING+ has no running timer, so nothing
                   renders when remainingLabel is null. cardLabel stays null:
-                  the scoring card's teamName equals the team name (a
-                  duplicate) — TeamJudgeCard falls back to team.label so its
-                  h3 reads "Name (label)". */}
+                  the scoring card's label is the card's own anonymous
+                  identity ("Card A"…) — TeamJudgeCard falls back to
+                  team.label so its header reads "Team A". */}
               <section className="cc-card" aria-label="your team's card" data-testid="your-teams-card">
                 <div className="cc-own-card-head">
                   <h3>Your team's card</h3>
@@ -737,7 +739,7 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
       ) : (
         <>
           <section className="cc-card" aria-label="your team">
-            <h2>{team ? team.name : "Your team"}</h2>
+            <h2>{team ? `Team ${team.label}` : "Your team"}</h2>
             <p className="cc-badge">
               {snapshot ? `${phaseLabel(snapshot.phase)} · round ${snapshot.round}` : "Connecting…"}
             </p>
@@ -778,7 +780,7 @@ function WaitingScreen({ identity }: { identity: JoinIdentity }) {
             <section className="cc-card" aria-label="phase status" data-testid="phase-placeholder">
               <h3>{phaseLabel(snapshot.phase)}</h3>
               <p>
-                {team ? team.name : "Your team"} · round {snapshot.round}
+                {team ? `Team ${team.label}` : "Your team"} · round {snapshot.round}
               </p>
             </section>
           ) : null}

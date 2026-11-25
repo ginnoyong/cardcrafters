@@ -84,7 +84,7 @@ export function StandingsList({
             <span className="cc-standings-rank" aria-hidden="true">
               {i + 1}.
             </span>{" "}
-            <span className="cc-standings-label">{row.label}</span>
+            <span className="cc-standings-label">Team {row.label}</span>
             <span className="cc-standings-score">
               {row.avg} avg · {row.count} vote{row.count === 1 ? "" : "s"}
             </span>
@@ -98,12 +98,14 @@ export function StandingsList({
   );
 }
 
-/** Resolve a team's display label from the snapshot's teams list. */
+/** Resolve a team's display label from the snapshot's teams list —
+ *  always the anonymous label form ("Team A"), never the real team name
+ *  (real names are server/GM-only; every public surface renders labels). */
 export function teamLabel(
-  teams: Array<{ id: string; name: string; label: string }>,
+  teams: Array<{ id: string; label: string }>,
   teamId: string | null | undefined,
 ): string {
   if (!teamId) return "";
   const team = teams.find((t) => t.id === teamId);
-  return team ? team.name : "";
+  return team ? `Team ${team.label}` : "";
 }

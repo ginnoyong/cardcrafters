@@ -225,7 +225,7 @@ function TeamCard({
       <div className="cc-card cc-team-card">
         {/* Header — team name + label badge. */}
         <h3 className="cc-team-name">
-          {team.name} <span className="cc-muted">({scoringLabel ?? team.label})</span>
+          Team {team.label} <span className="cc-muted">({scoringLabel ?? team.label})</span>
         </h3>
 
         {/* Greeting text (or the generating placeholder). */}
@@ -322,7 +322,9 @@ function TeamCard({
             className="cc-btn cc-btn-small"
             aria-expanded={qrActive}
             aria-pressed={qrActive}
-            aria-label={qrActive ? `hide QR code for ${team.name}` : `show QR code for ${team.name}`}
+            aria-label={
+              qrActive ? `hide QR code for Team ${team.label}` : `show QR code for Team ${team.label}`
+            }
             onClick={onToggleQr}
           >
             {qrActive ? "Hide QR" : "Show QR"}
@@ -339,7 +341,7 @@ function TeamCard({
         >
           {qr ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={qr} alt={`QR code to join ${team.name}`} width={190} height={190} />
+            <img src={qr} alt={`QR code to join Team ${team.label}`} width={190} height={190} />
           ) : (
             <div className="cc-qr-placeholder" aria-hidden="true" />
           )}
@@ -348,7 +350,7 @@ function TeamCard({
             type="button"
             className="cc-btn cc-btn-copy"
             onClick={copy}
-            aria-label={`copy join link for ${team.name}`}
+            aria-label={`copy join link for Team ${team.label}`}
           >
             {copied ? "Copied ✓" : "Copy join link"}
           </button>
@@ -417,7 +419,7 @@ function WinnerRevealCard({
 
   if (!posterReady) {
     return (
-      <div className="cc-winner-card" aria-label={`the winning card by ${team.name}`}>
+      <div className="cc-winner-card" aria-label={`the winning card by Team ${team.label}`}>
         <CardCanvas
           items={team.items}
           layout={team.layout}
@@ -425,7 +427,7 @@ function WinnerRevealCard({
           cardRatioW={cardRatioW}
           cardRatioH={cardRatioH}
           building={false}
-          ariaLabel={`${team.name}'s winning card — ${readyCount} stickers placed`}
+          ariaLabel={`Team ${team.label}'s winning card — ${readyCount} stickers placed`}
         />
       </div>
     );
@@ -462,12 +464,12 @@ function WinnerRevealCard({
               "--card-ratio-w": cardRatioW,
               "--card-ratio-h": cardRatioH,
             } as CSSProperties}
-            aria-label={`winning poster for ${team.name}`}
+            aria-label={`winning poster for Team ${team.label}`}
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={team.montageImageUrl ?? ""}
-              alt={`Winning poster by ${team.name}`}
+              alt={`Winning poster by Team ${team.label}`}
               className="cc-montage-img"
             />
           </div>
@@ -481,7 +483,7 @@ function WinnerRevealCard({
             cardRatioH={cardRatioH}
             resizeSignal={flipped}
             building={false}
-            ariaLabel={`${team.name}'s winning sticker card — ${readyCount} stickers placed`}
+            ariaLabel={`Team ${team.label}'s winning sticker card — ${readyCount} stickers placed`}
           />
         </div>
       </div>
@@ -725,12 +727,14 @@ function Console({ game }: { game: CreatedGame }) {
   // the public standings' labels as the refresh fallback).
   const winnerLabel =
     teamLabel(snapshot?.teams ?? [], snapshot?.winnerTeamId) ||
-    snapshot?.standings.find((s) => s.teamId === snapshot.winnerTeamId)?.label ||
-    "";
+    (snapshot?.standings.find((s) => s.teamId === snapshot.winnerTeamId)?.label
+      ? `Team ${snapshot.standings.find((s) => s.teamId === snapshot.winnerTeamId)!.label}`
+      : "");
   const peoplesChoiceLabel =
     teamLabel(snapshot?.teams ?? [], snapshot?.peoplesChoiceTeamId) ||
-    snapshot?.standings.find((s) => s.teamId === snapshot.peoplesChoiceTeamId)?.label ||
-    "";
+    (snapshot?.standings.find((s) => s.teamId === snapshot.peoplesChoiceTeamId)?.label
+      ? `Team ${snapshot.standings.find((s) => s.teamId === snapshot.peoplesChoiceTeamId)!.label}`
+      : "");
   const resultsStage = phase === PHASE.REVEAL || phase === PHASE.RESULTS;
   // The winning team's live snapshot row (REVEAL/RESULTS only) — drives the
   // big winner card in the banner block (AI poster ⇄ sticker flip).
@@ -867,7 +871,7 @@ function Console({ game }: { game: CreatedGame }) {
                             type="button"
                             className="cc-btn cc-btn-small cc-btn-primary"
                             data-testid={`gm-judge-pick-${team.id}`}
-                            aria-label={`pick ${team.name} as the winner`}
+                            aria-label={`pick Team ${team.label} as the winner`}
                             onClick={() => void gmAction("judging:winner", { teamId: team.id })}
                           >
                             Pick winner

@@ -1,6 +1,6 @@
 /**
  * scoring-card-extras — per-card data the SCORING payload carries BEYOND the
- * anonymous cardId/label/teamName (server-side helpers; nothing here is
+ * anonymous cardId/label (server-side helpers; nothing here is
  * itself audience-aware — the callers decide what rides to players):
  *
  *   - `latestGreetingText` — the team's greeting resolved with the SAME
@@ -17,7 +17,8 @@
  *     greeting generation failed in every round has NO greeting row at all,
  *     so `latestGreetingText` returns "" and the composed PNG would render
  *     paper-only). Falls back to a themed one-liner built from public data
- *     (game theme + team name — both already printed on the card).
+ *     (game theme + the card's label letter — both already printed on the
+ *     card).
  *
  *   - `scoringCardIsEmpty` — whether the team's card for the round is BLANK
  *     (no renderable READY stickers), matching renderTeamCardPng's item
@@ -67,15 +68,18 @@ export async function latestGreetingText(
 /**
  * LAST-RESORT card greeting (see module doc): `text` passthrough when it is
  * non-empty after trim + whitespace collapse; otherwise a themed fallback
- * one-liner built ONLY from public data — `Happy <theme>, <teamName>!` when
- * the game has a theme, `For <teamName>!` when it does not. Pure function.
+ * one-liner built ONLY from public data. `teamLabel` is the scoring-order
+ * card's label identity — either the bare letter ("A") or the full card
+ * label ("Card A"); the fallback letter is the LAST whitespace token, so
+ * both forms resolve to "A". Fallback: `Happy <theme>, Card <letter>!` when
+ * the game has a theme, `For Card <letter>!` when it does not. Pure function.
  */
-export function resolveCardGreeting(text: string, theme: string | null, teamName: string): string {
+export function resolveCardGreeting(text: string, theme: string | null, teamLabel: string): string {
   const clean = text.trim().replace(/\s+/g, " ");
   if (clean) return clean;
   const cleanTheme = (theme ?? "").trim().replace(/\s+/g, " ");
-  const cleanName = teamName.trim().replace(/\s+/g, " ");
-  return cleanTheme ? `Happy ${cleanTheme}, ${cleanName}!` : `For ${cleanName}!`;
+  const letter = teamLabel.trim().split(/\s+/).pop() ?? "";
+  return cleanTheme ? `Happy ${cleanTheme}, Card ${letter}!` : `For Card ${letter}!`;
 }
 
 /**

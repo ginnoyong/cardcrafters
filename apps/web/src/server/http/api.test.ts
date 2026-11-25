@@ -892,6 +892,14 @@ describe("GET /api/games/:code/export/cards (all-cards zip export)", () => {
   const sanitize = (name: string) =>
     name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "team";
 
+  /** Card label per team from the game's scoring order (label identity, not team names). */
+  const cardLabelForTeam = async (gameId: string, teamId: string): Promise<string> => {
+    const game = (await srv.repo.getGame(gameId))!;
+    const card = game.scoringOrder?.cards.find((c) => c.teamId === teamId);
+    if (!card) throw new Error(`no scoring-order card for team ${teamId}`);
+    return card.label;
+  };
+
   const expectPng = (buf: Buffer) => {
     expect(buf[0]).toBe(0x89);
     expect(buf.subarray(1, 4).toString("ascii")).toBe("PNG");
@@ -948,6 +956,11 @@ describe("GET /api/games/:code/export/cards (all-cards zip export)", () => {
     const posterB = await seedPoster(gameId, teamB!.id, game.round, "png");
     await driveToResults(gameId, teamA!.id);
 
+    // Filenames come from the scoring-order card labels ("Card A" → card-a),
+    // never from real team names.
+    const nameA = sanitize(await cardLabelForTeam(gameId, teamA!.id));
+    const nameB = sanitize(await cardLabelForTeam(gameId, teamB!.id));
+
     const res = await fetch(base(`/api/games/${code}/export/cards`));
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("application/zip");
@@ -968,17 +981,21 @@ describe("GET /api/games/:code/export/cards (all-cards zip export)", () => {
     const entries = zip.getEntries();
     expect(entries.length).toBe(4);
     const byName = new Map(entries.map((e) => [e.entryName, e.getData()]));
-    for (const team of teams) {
-      const name = sanitize(team.name);
+    for (const name of [nameA, nameB]) {
       expect(byName.has(`${name}-poster.png`)).toBe(true);
       expect(byName.has(`${name}-card.png`)).toBe(true);
     }
+    // Filenames are label-based ("Card A" → card-a-poster.png), never team names.
+    for (const entry of entries) {
+      expect(entry.entryName).toMatch(/^card-[a-z]-(poster|card)\.png$/);
+    }
+    expect(nameA).not.toBe(nameB);
     // Posters served AS-IS — byte-identical to the persisted montage files.
-    expect(Buffer.compare(byName.get(`${sanitize(teamA!.name)}-poster.png`)!, posterA)).toBe(0);
-    expect(Buffer.compare(byName.get(`${sanitize(teamB!.name)}-poster.png`)!, posterB)).toBe(0);
+    expect(Buffer.compare(byName.get(`${nameA}-poster.png`)!, posterA)).toBe(0);
+    expect(Buffer.compare(byName.get(`${nameB}-poster.png`)!, posterB)).toBe(0);
     // Sticker cards are composed renders — valid PNGs.
-    expectPng(byName.get(`${sanitize(teamA!.name)}-card.png`)!);
-    expectPng(byName.get(`${sanitize(teamB!.name)}-card.png`)!);
+    expectPng(byName.get(`${nameA}-card.png`)!);
+    expectPng(byName.get(`${nameB}-card.png`)!);
   });
 
   it("poster fallback (no montage row) → zip still serves composed PNG posters", async () => {

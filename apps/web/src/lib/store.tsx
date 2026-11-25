@@ -180,16 +180,17 @@ export function parseCritique(raw: unknown): ClientCritique | null {
 }
 
 /** One card in the round's scoring order ("Card A"…).
- *  `teamName` rides on player + GM + presenter copies (anonymity dropped per
- *  user decision 2a — team names are public from scoring onward, including
- *  on the presenter's big-screen rating stage). `teamId` is present ONLY on
- *  GM snapshots during SCORING (the card↔team mapping is server/GM-side);
- *  presenter copies gain teamId from JUDGING onward (public mapping, the
- *  judge card needs it for the tally lookup). */
+ *  `teamName` is GM/SERVER-ONLY — players and the presenter get label identity
+ *  only (cardId + "Card A"-style label, never teamName/teamId). The optional
+ *  field survives parsing purely as GM-copy tolerance; player/presenter UI
+ *  must render labels, never teamName. `teamId` is present ONLY on GM
+ *  snapshots during SCORING (the card↔team mapping is server/GM-side);
+ *  presenter copies gain teamId from JUDGING onward (the judge card needs it
+ *  for the tally lookup). */
 export interface ClientScoringCard {
   cardId: string;
   label: string;
-  /** Real team name — present on player + GM payloads (decision 2a). */
+  /** Real team name — GM/server copies only; NEVER rendered to players. */
   teamName?: string;
   teamId?: string;
   /** Round-fallback greeting — present so prompt-less cards still render
@@ -205,9 +206,9 @@ export interface ClientScoringCard {
   montage?: { status: "ready"; imageUrl: string } | null;
 }
 
-/** The SCORING phase slice: the round's team-named card order for players
- *  and the presenter (decision 2a — team names are public from scoring
- *  onward). */
+/** The SCORING phase slice: the round's label-identified card order
+ *  ("Card A"…) — anonymity holds: no real team names on player or presenter
+ *  copies. */
 export interface ClientScoring {
   round: number;
   cards: ClientScoringCard[];
@@ -428,10 +429,11 @@ function trimActivity(entries: ClientActivityEntry[]): ClientActivityEntry[] {
 /**
  * Parse a scoring:started / sync:full `cards` array into ClientScoringCard[]
  * (null when the payload is malformed so callers keep their previous state).
- * `teamName` is kept when present and non-empty (player + GM + presenter
- * copies per user decision 2a — team names are public from scoring onward);
- * `teamId` is kept ONLY when present (GM copies during SCORING, presenter
- * copies from JUDGING onward) and the parsed shape mirrors that exactly.
+ * `teamName` is tolerated when present and non-empty (GM/server copies only —
+ * parse stays permissive for legacy payloads, but player/presenter UI renders
+ * labels, never teamName); `teamId` is kept ONLY when present (GM copies
+ * during SCORING, presenter copies from JUDGING onward) and the parsed shape
+ * mirrors that exactly.
  */
 /** Parse the optional per-card montage view ({status:"ready", imageUrl}).
  *  Returns an empty spread when absent so the caller's conditional spread

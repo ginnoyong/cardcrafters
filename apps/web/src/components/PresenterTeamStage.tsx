@@ -14,7 +14,7 @@
  *                          its own banner (if any) takes their place.
  *   .cc-stage-meta (conditional — card label / live score tally chip)
  *     - cardLabel → a .cc-badge ("Card A" …) — SCORING cards carry the
- *                   round's card label alongside the team name.
+ *                   round's card label (label identity only, no team names).
  *     - tally     → the shared JudgeScoreChip ("7.5 avg · 3 votes" /
  *                   "no votes yet") — passed during SCORING/JUDGING where
  *                   live tallies are public; omitted (undefined) on
@@ -117,9 +117,12 @@ export default function PresenterTeamStage({
   const readyItems = team.items.filter((i) => i.status === "ready");
 
   const stageTestId = testId ? `${testId}-${team.id}` : undefined;
+  // Label identity — real team names are GM-only; the big screen shows
+  // "Team A"-style labels.
+  const identityLabel = `Team ${team.label}`;
 
   return (
-    <div className="cc-stage" data-testid={stageTestId} aria-label={`${team.name} stage`}>
+    <div className="cc-stage" data-testid={stageTestId} aria-label={`${identityLabel} stage`}>
       {isWinner ? (
         <section
           className="cc-stage-banner cc-stage-banner-winner"
@@ -128,7 +131,7 @@ export default function PresenterTeamStage({
           data-testid="stage-winner-banner"
         >
           <p className="cc-stage-banner-kicker">🏆 WINNER</p>
-          <p className="cc-stage-banner-name">{team.name}</p>
+          <p className="cc-stage-banner-name">{identityLabel}</p>
         </section>
       ) : null}
       {isPeoplesChoice ? (
@@ -139,7 +142,7 @@ export default function PresenterTeamStage({
           data-testid="stage-peoples-choice"
         >
           <p className="cc-stage-banner-kicker">👏 Crowd Favourite</p>
-          <p className="cc-stage-banner-name">{team.name}</p>
+          <p className="cc-stage-banner-name">{identityLabel}</p>
         </section>
       ) : null}
 
@@ -163,12 +166,12 @@ export default function PresenterTeamStage({
             <div
               className="cc-montage"
               style={montageFaceStyle(cardRatioW, cardRatioH)}
-              aria-label={`poster for ${team.name}`}
+              aria-label={`poster for ${identityLabel}`}
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={team.montageImageUrl ?? ""}
-                alt={`Finished poster for ${team.name}`}
+                alt={`Finished poster for ${identityLabel}`}
                 className="cc-montage-img"
               />
             </div>
@@ -183,7 +186,7 @@ export default function PresenterTeamStage({
                   cardRatioH={cardRatioH}
                   fillContainer
                   building={false}
-                  ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
+                  ariaLabel={`${identityLabel} card — ${readyCount} stickers placed`}
                 />
               </div>
               {team.montageStatus === "generating" ? (
@@ -203,7 +206,7 @@ export default function PresenterTeamStage({
                 className="cc-btn cc-btn-small"
                 aria-expanded={showMontagePrompt}
                 aria-controls={`stage-montage-prompt-${team.id}`}
-                aria-label={`view montage prompt for ${team.name}`}
+                aria-label={`view montage prompt for ${identityLabel}`}
                 onClick={() => setShowMontagePrompt((v) => !v)}
               >
                 {showMontagePrompt ? "Hide prompt" : "View montage prompt"}
@@ -241,7 +244,7 @@ export default function PresenterTeamStage({
               cardRatioH={cardRatioH}
               fillContainer
               building={false}
-              ariaLabel={`${team.name} sticker card — ${readyCount} stickers placed`}
+              ariaLabel={`${identityLabel} sticker card — ${readyCount} stickers placed`}
             />
           </div>
           {/* Sticker prompts accordion — only stickers actually on the card
@@ -254,7 +257,7 @@ export default function PresenterTeamStage({
                 className="cc-btn cc-btn-small"
                 aria-expanded={showStickerPrompts}
                 aria-controls={`stage-sticker-prompts-${team.id}`}
-                aria-label={`view sticker prompts for ${team.name}`}
+                aria-label={`view sticker prompts for ${identityLabel}`}
                 onClick={() => setShowStickerPrompts((v) => !v)}
               >
                 {showStickerPrompts ? "Hide prompts" : "View sticker prompts"}

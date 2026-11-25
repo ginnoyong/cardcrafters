@@ -12,14 +12,15 @@
  * poster + sticker CardCanvas from the client snapshot, so a 0-prompt team
  * shows its greeting + the phase-aware finished note instead of a blank
  * card):
- *  - SCORING: a team-NAMED single-card stage — one card at a time with
- *    wrap-around prev/next and a live tally ("Llama Legends · 7.5 avg · 3
+ *  - SCORING: a LABEL-IDENTITY single-card stage — one card at a time with
+ *    wrap-around prev/next and a live tally ("Card B · 7.5 avg · 3
  *    votes"); the team stage is suppressed (cycling team→card side by side
- *    would leak the card↔team mapping — server-side rule), but the card
- *    itself carries its real teamName (decision 2a — team names are public
- *    from scoring onward). The card's team is resolved from the snapshot
- *    (prefer card.teamId — present from JUDGING onward; else a unique
- *    teamName match) and rendered via PresenterTeamStage with the prompt
+ *    would leak the card↔team mapping — server-side rule), and real team
+ *    names are GM-only: players and the presenter get label identity only
+ *    (cardId + "Card A"-style label, never teamName/teamId during SCORING).
+ *    The card's team is resolved from the snapshot (prefer card.teamId —
+ *    present from JUDGING onward; else a LABEL-LETTER match, "Card A" →
+ *    team.label "A") and rendered via PresenterTeamStage with the prompt
  *    accordions SUPPRESSED (prompts are still anonymous during SCORING);
  *    the old flip-<img> PNG stage survives only as a defensive fallback
  *    when the team lookup misses (snapshot race / team removed).
@@ -38,7 +39,7 @@
  *    the stage.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 
 import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W, MAX_TEAM_MEMBERS, PHASE } from "@cardcrafters/shared";
@@ -62,6 +63,7 @@ import {
   resolvePresenterCardIndex,
   resolvePresenterCardTeam,
 } from "@/lib/presenter-focus";
+import { sortByTeamLabel } from "@/lib/team-label-sort";
 import { StandingsList } from "@/components/Standings";
 import PresenterTeamStage from "@/components/PresenterTeamStage";
 import { GameStoreProvider, phaseLabel, useGameStore, type SyncFullEvent, type ClientScoringCard, type ClientTeam } from "@/lib/store";
@@ -172,8 +174,8 @@ function PresenterBoard({
       // and never reach the presenter.
       // -------------------------------------------------------------------
       // Scoring/results events. The presenter's scoring:started carries
-      // team-NAMED cards (teamName per decision 2a — never teamId during
-      // SCORING, and no yourTeamCardId for this surface); scores:update
+      // LABEL-IDENTITY cards (cardId + "Card A"-style labels; never teamId
+      // during SCORING, and no yourTeamCardId for this surface); scores:update
       // rides the whole game room (anonymous per-card tallies);
       // winnerAnnounced carries the winner + People's Choice + public
       // standings for the results board.
@@ -237,7 +239,17 @@ function PresenterBoard({
   // One-at-a-time stage (SCORING onward): which team's showcase fills the
   // screen. Wrap-around prev/next; the index clamps when the team count
   // shrinks (a team leaves / round reset) so the stage never shows empty.
-  const teamCount = snapshot?.teams.length ?? 0;
+  // The cycle runs over a LABEL-SORTED COPY of the snapshot teams
+  // (compareTeamLabels order: A → B → …) so the big-screen stage order is
+  // identity-stable even when the raw snapshot array order drifts (the
+  // server's shuffled scoring order / multi-round resets). Pure copy —
+  // snapshot.teams itself is never mutated; the winner-latch effect below is
+  // unaffected (it latches on team id, not array position).
+  const stageTeams = useMemo(
+    () => (snapshot ? sortByTeamLabel(snapshot.teams) : []),
+    [snapshot],
+  );
+  const teamCount = stageTeams.length;
   const [stageIndex, setStageIndex] = useState(0);
   // Judging: pending flag while the Pick winner ack is in flight (prevents
   // double-picks from rapid clicks; the phase change to REVEAL unmounts the
@@ -290,22 +302,22 @@ function PresenterBoard({
 
   const clampedStageIndex = teamCount > 0 ? Math.min(stageIndex, teamCount - 1) : 0;
   const focusedIndex = focusTeamId
-    ? (snapshot?.teams.findIndex((t) => t.id === focusTeamId) ?? -1)
+    ? (stageTeams.findIndex((t) => t.id === focusTeamId))
     : -1;
   const latched = focusedIndex >= 0;
-  const stageTeam = snapshot?.teams[latched ? focusedIndex : clampedStageIndex] ?? null;
+  const stageTeam = stageTeams[latched ? focusedIndex : clampedStageIndex] ?? null;
   // JUDGING: the viewed team's scoring card + live tally (the mapping is
-  // public on this team-named surface — card.teamId rides the payload from
+  // public on this stage surface — card.teamId rides the payload from
   // JUDGING onward).
   const judgingCard: ClientScoringCard | null =
     snapshot && stageTeam
       ? (snapshot.scoring?.cards.find((c) => c.teamId === stageTeam.id) ?? null)
       : null;
   const judgingTally = judgingCard ? (snapshot!.scores[judgingCard.cardId] ?? null) : null;
-  // SCORING is EXCLUDED from the team stage: the team names would leak which
-  // team made which card while the room is rating. SCORING renders the
-  // anonymous single-card stage below instead (JUDGING/REVEAL/RESULTS only
-  // here).
+  // SCORING is EXCLUDED from the team stage: cycling team→card side by side
+  // would reveal which team made which card while the room is rating. SCORING
+  // renders the anonymous single-card stage below instead (JUDGING/REVEAL/
+  // RESULTS only here).
   const showStage =
     !!snapshot &&
     !!stageTeam &&
@@ -318,7 +330,7 @@ function PresenterBoard({
       // stageIndex relative to the focused team. If the focused team is gone
       // (round reset), just clear the latch and let the plain cycle run.
       if (focusTeamId) {
-        const idx = snapshot?.teams.findIndex((t) => t.id === focusTeamId) ?? -1;
+        const idx = stageTeams.findIndex((t) => t.id === focusTeamId);
         setFocusTeamId(null);
         if (idx >= 0) {
           if (teamCount > 0) setStageIndex((idx + delta + teamCount) % teamCount);
@@ -331,7 +343,7 @@ function PresenterBoard({
         return (base + delta + teamCount) % teamCount;
       });
     },
-    [teamCount, focusTeamId, snapshot],
+    [teamCount, focusTeamId, stageTeams],
   );
 
   // -----------------------------------------------------------------------
@@ -347,27 +359,28 @@ function PresenterBoard({
   // wrap-around steps below keep the index in range otherwise.
   const clampedScoringIndex = scoringCount > 0 ? Math.min(scoringCardIndex, scoringCount - 1) : 0;
   const scoringCard = scoringCards[clampedScoringIndex] ?? null;
-  // Decision 2a: the card's real team name (the server now carries teamName
-  // on the presenter's scoring payload) — shown instead of the "Card B"
-  // label; falls back to the label when a payload somehow lacks it.
-  const scoringCardName = scoringCard ? (scoringCard.teamName ?? scoringCard.label) : null;
+  // Label identity — real team names are GM-only; the presenter shows the
+  // card's public label ("Card A"…).
+  const scoringCardName = scoringCard ? scoringCard.label : null;
   // cardId → team lookup for the unified side-by-side stage: prefer
   // card.teamId (the mapping rides the presenter payload from JUDGING
-  // onward, e.g. after a JUDGING resync), else match the card's public
-  // teamName — team names are unique per game and public from SCORING
-  // onward (decision 2a), so a UNIQUE name match is exact and leaks nothing
-  // the stage header doesn't already show. Null when neither resolves
-  // (snapshot race / team removed) → the defensive PNG <img> fallback below
-  // keeps the stage from ever going blank.
+  // onward, e.g. after a JUDGING resync), else match the card's LABEL
+  // SUFFIX against the team label ("Card A" → team.label "A") — label
+  // identity is stable per round (buildScoringOrder pins card letters to
+  // team letters), so the match is exact and leaks nothing. Null when
+  // neither resolves (snapshot race / team removed) → the defensive PNG
+  // <img> fallback below keeps the stage from ever going blank.
   const scoringCardTeam: ClientTeam | null = (() => {
     if (!snapshot || !scoringCard) return null;
     if (scoringCard.teamId) {
       const byId = snapshot.teams.find((t) => t.id === scoringCard.teamId);
       if (byId) return byId;
     }
-    if (scoringCard.teamName) {
-      const byName = snapshot.teams.filter((t) => t.name === scoringCard.teamName);
-      if (byName.length === 1) return byName[0]!;
+    // Label-letter match: "Card A" (or a bare "A") → team.label === "A".
+    const m = /^(?:Card\s+)?([A-Za-z])$/.exec(scoringCard.label.trim());
+    if (m) {
+      const byLabel = snapshot.teams.filter((t) => t.label === m[1]!.toUpperCase());
+      if (byLabel.length === 1) return byLabel[0]!;
     }
     return null;
   })();
@@ -391,8 +404,8 @@ function PresenterBoard({
   //    matched against the snapshot's own order (an index-based link would
   //    show the wrong team).
   //  - JUDGING/REVEAL/RESULTS → latch the team stage onto the card's team
-  //    (teamId rides the presenter payload from JUDGING onward; a unique
-  //    teamName match is the fallback).
+  //    (teamId rides the presenter payload from JUDGING onward; a label-
+  //    letter match — "Card A" → team.label "A" — is the fallback).
   // Unknown or stale ids are ignored: the stage keeps its default
   // positioning (first card / plain cycle). One-shot per param value, so
   // later manual stepping or syncs never snap the stage back.
@@ -440,9 +453,9 @@ function PresenterBoard({
           {snapshot.teams.map((team) => {
             const readyCount = team.items.filter((i) => i.status === "ready").length;
             return (
-              <div key={team.id} className="cc-mini" aria-label={`live preview of ${team.name}'s card`}>
+              <div key={team.id} className="cc-mini" aria-label={`live preview of Team ${team.label}'s card`}>
                 <h3>
-                  {team.name} <span className="cc-muted">({team.label})</span>
+                  {`Team ${team.label}`}
                 </h3>
                 <CardCanvas
                   items={team.items}
@@ -460,7 +473,7 @@ function PresenterBoard({
                       snapshot.phase as (typeof PHASE)[keyof typeof PHASE],
                     )
                   }
-                  ariaLabel={`${team.name} card — ${readyCount} stickers placed`}
+                  ariaLabel={`Team ${team.label} card — ${readyCount} stickers placed`}
                 />
                 <p className="cc-hint" aria-live="polite">
                   {readyCount} sticker{readyCount === 1 ? "" : "s"} on the card
@@ -481,9 +494,7 @@ function PresenterBoard({
       {showStage && stageTeam ? (
         <section aria-label="team showcase stage" className="cc-present-stage" data-testid="presenter-stage">
           <div className="cc-present-stage-header">
-            <h2>
-              {stageTeam.name} <span className="cc-muted">({stageTeam.label})</span>
-            </h2>
+            <h2>{`Team ${stageTeam.label}`}</h2>
             <span className="cc-badge">
               {(latched ? focusedIndex : clampedStageIndex) + 1} of {teamCount}
             </span>
@@ -598,13 +609,14 @@ function PresenterBoard({
       ) : null}
       {!snapshot ? <p className="cc-hint">Waiting for the first sync…</p> : null}
 
-      {/* SCORING: the team-named single-card stage — replaces the team stage
-          (cycling team→card side by side would leak the card↔team mapping)
-          and the old chip console. Decision 2a: the card's REAL team name is
-          public from scoring onward and shows in the stage header (the
-          card↔teamId mapping itself still never rides the presenter payload
+      {/* SCORING: the label-identity single-card stage — replaces the team
+          stage (cycling team→card side by side would leak the card↔team
+          mapping) and the old chip console. Real team names are GM-only:
+          the stage header shows the card's public label ("Card A"…), the
+          card↔teamId mapping itself never rides the presenter payload
           during SCORING — the server strips it; the client resolves the team
-          by unique teamName). UNIFIED LAYOUT: the card renders via the same
+          by label-letter match ("Card A" → team.label "A"). UNIFIED LAYOUT:
+          the card renders via the same
           side-by-side PresenterTeamStage the REVEAL/RESULTS stage uses —
           fed from the client snapshot so a 0-prompt team shows its greeting
           + the phase-aware finished note on BOTH faces instead of a blank

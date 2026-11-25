@@ -17,11 +17,11 @@ import {
 } from "./presenter-focus";
 
 const SHUFFLED = [
-  { cardId: "card-c", label: "Card C", teamName: "The Fold Cats" },
-  { cardId: "card-a", label: "Card A", teamName: "Team Papercraft" },
-  { cardId: "card-e", label: "Card E", teamName: "Glitter Guild" },
-  { cardId: "card-b", label: "Card B", teamName: "The Glue Guns" },
-  { cardId: "card-d", label: "Card D", teamName: "Ribbon Riots" },
+  { cardId: "card-c", label: "Card C" },
+  { cardId: "card-a", label: "Card A" },
+  { cardId: "card-e", label: "Card E" },
+  { cardId: "card-b", label: "Card B" },
+  { cardId: "card-d", label: "Card D" },
 ];
 
 describe("resolvePresenterCardIndex", () => {
@@ -52,7 +52,6 @@ describe("resolvePresenterCard", () => {
     expect(resolvePresenterCard(SHUFFLED, "card-a")).toEqual({
       cardId: "card-a",
       label: "Card A",
-      teamName: "Team Papercraft",
     });
     expect(resolvePresenterCard(SHUFFLED, "card-x")).toBeNull();
     expect(resolvePresenterCard(SHUFFLED, undefined)).toBeNull();
@@ -61,35 +60,40 @@ describe("resolvePresenterCard", () => {
 
 describe("resolvePresenterCardTeam", () => {
   const teams = [
-    { id: "t1", name: "Team Papercraft" },
-    { id: "t2", name: "The Glue Guns" },
-    { id: "t3", name: "The Fold Cats" },
+    { id: "t1", label: "A" },
+    { id: "t2", label: "B" },
+    { id: "t3", label: "C" },
   ];
 
   it("resolves via the card's teamId when present (JUDGING onward)", () => {
     const cards = [
-      { cardId: "card-b", teamId: "t2", teamName: "The Glue Guns" },
-      { cardId: "card-a", teamId: "t1", teamName: "Team Papercraft" },
+      { cardId: "card-b", teamId: "t2", label: "Card B" },
+      { cardId: "card-a", teamId: "t1", label: "Card A" },
     ];
     expect(resolvePresenterCardTeam(cards, "card-b", teams)).toEqual(teams[1]);
   });
 
-  it("resolves via a UNIQUE teamName match when teamId is absent (SCORING)", () => {
+  it("resolves via a UNIQUE label-letter match when teamId is absent (SCORING)", () => {
     expect(resolvePresenterCardTeam(SHUFFLED, "card-c", teams)).toEqual(teams[2]);
   });
 
-  it("returns null for unknown ids / missing param / ambiguous names", () => {
+  it("returns null for unknown ids / missing param / ambiguous labels", () => {
     expect(resolvePresenterCardTeam(SHUFFLED, "card-z", teams)).toBeNull();
     expect(resolvePresenterCardTeam(SHUFFLED, null, teams)).toBeNull();
-    const dupNames = [
-      { cardId: "card-x", teamName: "Dup" },
-      { cardId: "card-y", teamName: "Dup" },
+    const dupLabels = [
+      { cardId: "card-x", label: "Card X" },
+      { cardId: "card-y", label: "Card X" },
     ];
-    expect(resolvePresenterCardTeam(dupNames, "card-x", teams)).toBeNull();
+    expect(resolvePresenterCardTeam(dupLabels, "card-x", teams)).toBeNull();
+  });
+
+  it("returns null when the label has no matching team letter", () => {
+    const cards = [{ cardId: "card-f", label: "Card F" }];
+    expect(resolvePresenterCardTeam(cards, "card-f", teams)).toBeNull();
   });
 
   it("returns null when the teamId no longer exists in the snapshot", () => {
-    const cards = [{ cardId: "card-a", teamId: "gone", teamName: "Team Papercraft" }];
+    const cards = [{ cardId: "card-a", teamId: "gone", label: "Card A" }];
     expect(resolvePresenterCardTeam(cards, "card-a", [])).toBeNull();
   });
 });

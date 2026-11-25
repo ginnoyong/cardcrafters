@@ -9,7 +9,7 @@
  * visual:
  *
  *   .cc-judge-card
- *     .cc-team-name   team name + (card label)
+ *     .cc-team-name   card label only (no real team names — label identity)
  *     .cc-greeting    the team's greeting, quoted
  *     .cc-judge-visual  the visual — when the AI poster is ready it is a
  *                       button-like flip control (poster ↔ composed sticker
@@ -124,14 +124,17 @@ export default function TeamJudgeCard({
   // — pending/rejected/failed items never made it onto the render.
   const readyItems = team.items.filter((i) => i.status === "ready");
 
+  // Label identity — real team names are never rendered (GM-only data).
+  const identityLabel = cardLabel ?? `Card ${team.label}`;
+
   return (
     <section
       className="cc-judge-card"
       data-testid={testId}
-      aria-label={`${team.name} ${cardKind} card`}
+      aria-label={`${identityLabel} ${cardKind} card`}
     >
       <h3 className="cc-team-name">
-        {team.name} <span className="cc-muted">({cardLabel ?? team.label})</span>
+        {identityLabel}
       </h3>
 
       <p className="cc-greeting">“{team.greeting.text}”</p>
@@ -153,11 +156,11 @@ export default function TeamJudgeCard({
               aria-label={
                 flipped
                   ? posterReady
-                    ? `show AI montage version for ${team.name}`
-                    : `show sticker version for ${team.name}`
+                    ? `show AI montage version for ${identityLabel}`
+                    : `show sticker version for ${identityLabel}`
                   : posterReady
-                    ? `show sticker version for ${team.name}`
-                    : `show card back for ${team.name}`
+                    ? `show sticker version for ${identityLabel}`
+                    : `show card back for ${identityLabel}`
               }
               data-testid={testId ? `${testId}-visual` : undefined}
               onClick={() => setFlipped((v) => !v)}
@@ -181,12 +184,12 @@ export default function TeamJudgeCard({
                   <div
                     className="cc-montage"
                     style={montageFaceStyle(cardRatioW, cardRatioH)}
-                    aria-label={`poster for ${team.name}`}
+                    aria-label={`poster for ${identityLabel}`}
                   >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={team.montageImageUrl ?? ""}
-                      alt={`Finished poster for ${team.name}`}
+                      alt={`Finished poster for ${identityLabel}`}
                       className="cc-montage-img"
                       onError={() => setBrokenPosterUrl(team.montageImageUrl ?? null)}
                     />
@@ -220,7 +223,7 @@ export default function TeamJudgeCard({
                     fillContainer
                     resizeSignal={flipped}
                     building={false}
-                    ariaLabel={`${team.name} sticker card — ${readyCount} stickers placed`}
+                    ariaLabel={`${identityLabel} sticker card — ${readyCount} stickers placed`}
                   />
                 </div>
               </div>
@@ -245,7 +248,7 @@ export default function TeamJudgeCard({
                 className="cc-btn cc-btn-small"
                 aria-expanded={showPrompt}
                 aria-controls={`judge-prompt-${team.id}`}
-                aria-label={`view prompts for ${team.name}`}
+                aria-label={`view prompts for ${identityLabel}`}
                 onClick={() => setShowPrompt((v) => !v)}
               >
                 {showPrompt
