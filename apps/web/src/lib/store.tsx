@@ -78,6 +78,16 @@ export interface ClientActivityEntry {
   itemId: string;
   text: string;
   ts: number;
+  /** Lifecycle mirror of the item the entry is about: "pending" when created
+   *  by item:pending, "ready" when item:ready rewrites it, and a TERMINAL
+   *  state ("rejected" / "failed" / "withdrawn") when the item died before
+   *  reaching the card. Terminal entries never offer "Find on card" (the
+   *  item has no placement — locating it would be a dead no-op) and render
+   *  with a non-success suffix note instead. Absent = legacy entry. */
+  status?: "pending" | "ready" | "rejected" | "failed" | "withdrawn";
+  /** Owner-only rejection reason (item:rejected payload). Only ever present
+   *  on the OWNER's client — item:rejected is not broadcast to the team. */
+  reason?: string;
 }
 
 /**
@@ -505,6 +515,47 @@ function patchItemEverywhere(
   };
 }
 
+/** Patch the activity entry for an item in EVERY team that has one (same
+ *  owner-only-event routing as patchItemEverywhere). Used by item:rejected /
+ *  item:failed to flip the still-pending "added …" entry to a terminal state —
+ *  the owner's feed must never keep a live "Find on card" button for an item
+ *  that will never be on the card. */
+function patchActivityEverywhere(
+  state: GameSnapshot,
+  itemId: string,
+  patch: Partial<ClientActivityEntry>,
+): GameSnapshot {
+  return {
+    ...state,
+    teams: state.teams.map((team) =>
+      team.activity.some((e) => e.itemId === itemId)
+        ? {
+            ...team,
+            activity: team.activity.map((e) =>
+              e.itemId === itemId ? { ...e, ...patch } : e,
+            ),
+          }
+        : team,
+    ),
+  };
+}
+
+/** Mark an UNRESOLVED activity entry (pending / legacy no-status) terminal.
+ *  Entries that already reflect a newer state ("ready") are never downgraded
+ *  — item ids can be resurrected on resubmission, so a stale event must not
+ *  strike a sticker that is already on the card. */
+function markUnresolvedActivity(
+  entries: ClientActivityEntry[],
+  itemId: string,
+  patch: Pick<ClientActivityEntry, "status"> & { reason?: string },
+): ClientActivityEntry[] {
+  return entries.map((e) =>
+    e.itemId === itemId && (e.status === undefined || e.status === "pending")
+      ? { ...e, ...patch }
+      : e,
+  );
+}
+
 /** Does THIS client own the item? Ownership signals, in order: the event
  *  payload's playerId (item:pending carries the submitter's id), an existing
  *  ledger entry, or a row attributed to me. GM/presenter (myPlayerId null)
@@ -693,7 +744,7 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
           status: "pending",
         }),
         activity: trimActivity([
-          { itemId, text: `${nickname} added “${promptRaw}”`, ts: Date.now() },
+          { itemId, text: `${nickname} added “${promptRaw}”`, ts: Date.now(), status: "pending" },
           ...team.activity.filter((e) => e.itemId !== itemId),
         ]),
       }));
@@ -740,6 +791,7 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
                 ? `${nickname}’s “${promptRaw}” is on the card`
                 : `A new sticker joined the card`,
               ts: Date.now(),
+              status: "ready" as const,
             },
             ...team.activity.filter((e) => e.itemId !== itemId),
           ]),
@@ -767,7 +819,11 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
       const reason = typeof p.reason === "string" ? p.reason : "";
       const exampleFix = typeof p.exampleFix === "string" ? p.exampleFix : undefined;
       const next = patchItemEverywhere(base, itemId, { status: "rejected", reason, exampleFix });
-      return patchMyItems(next, itemId, (prev) => ({
+      // The owner's activity entry must follow the ledger: the "added …" row
+      // becomes terminal (rejected + reason) so the feed never keeps a live
+      // "Find on card" button for an item that will never be on the card.
+      const withActivity = patchActivityEverywhere(next, itemId, { status: "rejected", reason });
+      return patchMyItems(withActivity, itemId, (prev) => ({
         promptRaw: prev?.promptRaw ?? "",
         status: "rejected",
         reason,
@@ -782,8 +838,10 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
       const itemId = p.itemId;
       const reason = typeof p.reason === "string" ? p.reason : "";
       const next = patchItemEverywhere(base, itemId, { status: "failed", reason });
-      if (!ownsItem(base, itemId)) return next;
-      return patchMyItems(next, itemId, (prev) => ({
+      // Activity entry follows the ledger (same owner-only routing).
+      const withActivity = patchActivityEverywhere(next, itemId, { status: "failed", reason });
+      if (!ownsItem(base, itemId)) return withActivity;
+      return patchMyItems(withActivity, itemId, (prev) => ({
         promptRaw: prev?.promptRaw ?? "",
         status: "failed",
         reason,
@@ -795,8 +853,11 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
     // the pending placeholder + activity entry for everyone EXCEPT the owner:
     // their ledger keeps the terminal rejected/failed state (with reason /
     // exampleFix) and their row must survive. The ledger itself is NEVER
-    // touched — a pending entry (owner-side, rejected detail still in flight)
-    // keeps its promptRaw for the owner-only event to overwrite.
+    // touched. ACTIVITY FEED: a pending "added …" entry must never survive as
+    // a live "Find on card" row — terminal-ledger owners get a belt-and-braces
+    // re-mark (the owner-only event may have been lost), owners whose
+    // rejected/failed event never arrived get their entry marked "withdrawn"
+    // instead of deleted (the submission stays visible, non-actionable).
     case "itemWithdrawn": {
       const base = roundGuard(state, action.payload);
       if (!base) return state;
@@ -804,10 +865,32 @@ export function storeReducer(state: GameSnapshot | null, action: StoreAction): G
       if (typeof p.itemId !== "string" || typeof p.teamId !== "string") return state;
       const itemId = p.itemId;
       const teamId = p.teamId;
+      const mine = base.myItems[itemId];
       // Owner-keep rule: the owner-only event already marked the ledger
       // terminal — never delete the owner's row/ledger via the broadcast.
-      const mine = base.myItems[itemId];
-      if (mine?.status === "rejected" || mine?.status === "failed") return base;
+      if (mine?.status === "rejected" || mine?.status === "failed") {
+        return withTeam(base, teamId, (team) => ({
+          ...team,
+          // Row + ledger untouched; the feed entry is re-marked terminal in
+          // case the owner-only event's activity patch didn't land.
+          activity: markUnresolvedActivity(team.activity, itemId, {
+            status: mine.status,
+            ...(mine.reason != null ? { reason: mine.reason } : {}),
+          }),
+        }));
+      }
+      if (mine) {
+        // Owner whose item:rejected / item:failed was lost (ledger still
+        // pending): the row placeholder is cleaned up as usual, but the feed
+        // entry is marked "withdrawn" rather than left as a stale "added …"
+        // row with a live button.
+        return withTeam(base, teamId, (team) => ({
+          ...team,
+          items: team.items.filter((i) => i.id !== itemId),
+          activity: markUnresolvedActivity(team.activity, itemId, { status: "withdrawn" }),
+        }));
+      }
+      // Teammates: drop the placeholder row + activity entry entirely.
       return withTeam(base, teamId, (team) => ({
         ...team,
         items: team.items.filter((i) => i.id !== itemId),

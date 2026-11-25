@@ -685,7 +685,14 @@ export function parseRetryAfterSeconds(res: Response): number | undefined {
 export function montageImagePrompt(input: Record<string, unknown>): string {
   const prompt = String(input.prompt ?? "").trim();
   const style = String(input.styleHint ?? "").trim();
-  return style ? `${prompt}\nArt direction: ${style}.` : prompt;
+  // The style hint names palette HEX CODES for color CHOOSING. Without a
+  // no-swatches guard, image models render them literally as a design-spec
+  // palette strip (color boxes with hex labels) inside the artwork.
+  const guard =
+    "Do NOT depict color swatches, palette strips, or hex code labels in the artwork — the palette guides color choice only.";
+  return style
+    ? `${prompt}\nArt direction: ${style}. ${guard}`
+    : `${prompt} ${guard}`;
 }
 
 /** The shared item-image user prompt (chat/completions + images endpoint). */
