@@ -130,26 +130,34 @@ function pickTeamNames(count: number, random: () => number = Math.random): strin
 }
 
 /**
- * Build the round's ANONYMOUS scoring order.
+ * Build the round's scoring order.
  *
- * One card per team, shuffled deterministically per game+round: the seed is
- * `hashString("${gameId}:${round}")` fed into mulberry32 and a Fisher–Yates
- * shuffle (same pattern as pickTeamNames), so every hub instance / restart
- * reproduces the exact same order — the shuffled order is also persisted on
- * Game.scoringOrder as the single source of truth.
+ * One card per team. Card IDENTITY is stable: the team labeled "A" is ALWAYS
+ * "Card A" (cardId "card-a") — labels/cards were previously assigned
+ * positionally over a shuffled list, so a team's card letter changed at every
+ * scoring entry (user-reported confusion). The only randomness left is the
+ * RATING SEQUENCE: the deterministic per-game+round Fisher–Yates shuffle
+ * (seed `hashString("${gameId}:${round}")` → mulberry32, same pattern as
+ * pickTeamNames) shuffles the ORDER the cards are presented to players, so
+ * every hub instance / restart reproduces the exact same sequence — the
+ * order is persisted on Game.scoringOrder as the single source of truth.
  *
- * `cardId`s are opaque ids ("card-a"…), `label`s the public display strings
- * ("Card A"…) and `teamName` the card's REAL team name — teamName IS sent to
- * players (player-side anonymity dropped per user decision 2a); the `teamId`
- * mapping is still GM/server-only and must be STRIPPED from every
- * player-facing payload, and presenter copies stay anonymous (cardId+label).
+ * `cardId`s derive from the team label ("card-a"…), `label`s are the public
+ * display strings ("Card A"…) and `teamName` the card's REAL team name —
+ * teamName IS sent to players (player-side anonymity dropped per user
+ * decision 2a); the `teamId` mapping is still GM/server-only and must be
+ * STRIPPED from every player-facing payload, and presenter copies stay
+ * anonymous (cardId+label).
  */
 export function buildScoringOrder(
   gameId: string,
   round: number,
   teams: TeamRow[],
 ): ScoringOrder {
-  const pool = [...teams];
+  // IDENTITY-STABLE labels: teams sorted by their label ("A"…"J") so team
+  // "A" always draws "Card A" / "card-a" — the card letter is the team's,
+  // never a positional artifact of the shuffle.
+  const pool = sortByLabel([...teams]);
   const random = mulberry32(hashString(`${gameId}:${round}`));
   for (let i = pool.length - 1; i > 0; i--) {
     const j = Math.floor(random() * (i + 1));
@@ -157,13 +165,18 @@ export function buildScoringOrder(
   }
   return {
     round,
-    cards: pool.map((team, i) => ({
-      cardId: `card-${TEAM_LABELS[i]?.toLowerCase() ?? String(i)}`,
-      label: `Card ${TEAM_LABELS[i] ?? i + 1}`,
+    cards: pool.map((team) => ({
+      cardId: `card-${(team.label ?? "").toLowerCase() || team.id}`,
+      label: `Card ${team.label}`,
       teamName: team.name,
       teamId: team.id,
     })),
   };
+}
+
+/** Teams sorted ascending by label ("A" < "B" < … < "J"). */
+function sortByLabel(teams: TeamRow[]): TeamRow[] {
+  return [...teams].sort((a, b) => (a.label ?? "").localeCompare(b.label ?? ""));
 }
 
 /** Round `n` to 2 decimal places (avg score display). */

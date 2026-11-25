@@ -952,7 +952,25 @@ describe("scoring phase end-to-end", () => {
     const alexCopy = await alexStarted;
     const samCopy = await samStarted;
     expect(alexCopy.cards).toHaveLength(3);
-    expect(alexCopy.cards.map((c) => c.label)).toEqual(["Card A", "Card B", "Card C"]);
+    // Card IDENTITY is stable (team "A" is ALWAYS "Card A") but the RATING
+    // SEQUENCE is the deterministic per-game+round shuffle — assert the SET
+    // of labels and the teamName↔label mapping, not the sequence. The
+    // shuffled order itself is verified in hub.test.ts's buildScoringOrder
+    // tests.
+    expect([...alexCopy.cards.map((c) => c.label)].sort()).toEqual([
+      "Card A",
+      "Card B",
+      "Card C",
+    ]);
+    // Identity mapping: the card labeled "Card X" belongs to team X's real
+    // name — labels follow teams, never a positional shuffle artifact.
+    for (const c of alexCopy.cards) {
+      const letter = c.label.replace("Card ", "");
+      const expectedName = (await repo.listTeams(gameId)).find(
+        (t) => t.label === letter,
+      )?.name;
+      expect(c.teamName).toBe(expectedName);
+    }
     for (const c of alexCopy.cards) {
       expect(typeof c.cardId).toBe("string");
       expect(typeof c.teamName).toBe("string");
