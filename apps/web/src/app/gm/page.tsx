@@ -750,16 +750,13 @@ function Console({ game }: { game: CreatedGame }) {
   // standalone full-width control BELOW it (the old cc-scoring-console box
   // is retired).
   const judgeBoxes = judging || phase === PHASE.SCORING;
-  // Judge boxes render in judgingRows order (avg desc → count desc → label,
-  // same ordering as the old table); teams without a scoring row keep their
-  // original order AFTER the scored ones. JUDGING only — SCORING never sorts.
-  const judgingOrderedTeams: typeof teams = judging
-    ? [
-        ...judgingRows
-          .map((row) => teams.find((t) => t.id === row.teamId))
-          .filter((t): t is (typeof teams)[number] => t !== undefined),
-        ...teams.filter((t) => !scoringLabelByTeam.has(t.id)),
-      ]
+  // Judge boxes: displayed in ascending Card A → Card N sequence in BOTH
+  // phases. The shuffled scoring order is the players' rating SEQUENCE —
+  // the GM console is the console of record, and its boxes read in label
+  // order (the score chip carries the live tally wherever the card sits;
+  // JUDGING keeps the score-sorted rows in the table/standings below).
+  const judgingOrderedTeams: typeof teams = judgeBoxes
+    ? sortByTeamLabel(teams)
     : teams;
 
   return (
