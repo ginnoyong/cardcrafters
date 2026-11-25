@@ -208,7 +208,14 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Card
     const url = req.url ?? "/";
     if (url === "/api/health" || url.startsWith("/api/health?")) {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true, service: "card-crafters" }));
+      res.end(JSON.stringify({
+          ok: true,
+          service: "card-crafters",
+          // Deployment identity: git SHA on push-deploys, Railway deployment id on
+          // `railway up` deploys (synthetic hash), "local" in dev — lets anyone
+          // verify WHICH version is live without the dashboard.
+          version: process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.RAILWAY_DEPLOYMENT_ID ?? "local",
+        }));
       return;
     }
     // Tiny JSON API (game create/summary) — handled BEFORE Next so the GM
