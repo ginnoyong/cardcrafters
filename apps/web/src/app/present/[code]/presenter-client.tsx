@@ -58,6 +58,10 @@ import {
   onEvent,
   type AckResult,
 } from "@/lib/socket";
+import {
+  resolvePresenterCardIndex,
+  resolvePresenterCardTeam,
+} from "@/lib/presenter-focus";
 import { StandingsList } from "@/components/Standings";
 import PresenterTeamStage from "@/components/PresenterTeamStage";
 import { GameStoreProvider, phaseLabel, useGameStore, type SyncFullEvent, type ClientScoringCard, type ClientTeam } from "@/lib/store";
@@ -90,11 +94,17 @@ function fmt(seconds: number): string {
 
 function PresenterBoard({
   code,
+  focusCardId,
   focusTeamId: initialFocusTeamId,
 }: {
   code: string;
-  /** Deep-link focus (GM judging "View" → /present/<code>?team=<id>): the
-   *  stage latches onto this team once the snapshot lands. */
+  /** Deep-link focus (GM "View" → /present/<code>?card=<cardId>): once the
+   *  snapshot's scoring cards land, the SCORING carousel jumps to this card
+   *  and JUDGING+ latches the stage onto its team. Unknown ids are ignored
+   *  (the default first card / plain stage cycle applies). */
+  focusCardId?: string;
+  /** Legacy team-level deep link (?team=<id>): the stage latches onto this
+   *  team once the snapshot lands. */
   focusTeamId?: string;
 }) {
   const { snapshot, dispatch } = useGameStore();
@@ -371,6 +381,37 @@ function PresenterBoard({
     },
     [scoringCount],
   );
+
+  // -----------------------------------------------------------------------
+  // Card-level deep link (?card=<cardId> from the GM judge boxes). Once the
+  // snapshot's scoring cards land (they come with the first sync), resolve
+  // the param ONCE against the CURRENT phase's stage:
+  //  - SCORING → position the anonymous card carousel on the card. The
+  //    scoring order is shuffled per game+round, so the cardId must be
+  //    matched against the snapshot's own order (an index-based link would
+  //    show the wrong team).
+  //  - JUDGING/REVEAL/RESULTS → latch the team stage onto the card's team
+  //    (teamId rides the presenter payload from JUDGING onward; a unique
+  //    teamName match is the fallback).
+  // Unknown or stale ids are ignored: the stage keeps its default
+  // positioning (first card / plain cycle). One-shot per param value, so
+  // later manual stepping or syncs never snap the stage back.
+  const focusAppliedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!focusCardId || !snapshot) return;
+    if (focusAppliedRef.current === focusCardId) return;
+    const cards = snapshot.scoring?.cards ?? [];
+    if (cards.length === 0) return;
+    focusAppliedRef.current = focusCardId;
+
+    if (snapshot.phase === PHASE.SCORING) {
+      const idx = resolvePresenterCardIndex(cards, focusCardId, 0);
+      if (cards[idx]?.cardId === focusCardId) setScoringCardIndex(idx);
+    } else {
+      const team = resolvePresenterCardTeam(cards, focusCardId, snapshot.teams);
+      if (team) setFocusTeamId(team.id);
+    }
+  }, [focusCardId, snapshot]);
 
   return (
     <main className="cc-main">
@@ -658,15 +699,22 @@ function PresenterBoard({
 
 export default function PresenterClient({
   code,
+  focusCardId,
   focusTeamId,
 }: {
   code: string;
-  /** Deep-link focus (GM judging "View" → /present/<code>?team=<id>). */
+  /** Deep-link focus (GM "View" → /present/<code>?card=<cardId>). */
+  focusCardId?: string;
+  /** Deep-link focus (legacy ?team=<id>): the stage latches onto this team. */
   focusTeamId?: string;
 }) {
   return (
     <GameStoreProvider>
-      <PresenterBoard code={code} focusTeamId={focusTeamId} />
+      <PresenterBoard
+        code={code}
+        focusCardId={focusCardId}
+        focusTeamId={focusTeamId}
+      />
     </GameStoreProvider>
   );
 }

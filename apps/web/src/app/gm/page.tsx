@@ -39,6 +39,7 @@ import { DEFAULT_CARD_RATIO_H, DEFAULT_CARD_RATIO_W, MAX_TEAMS, PHASE } from "@c
 import { PeoplesChoiceBanner, StandingsList, WinnerBanner, teamLabel } from "@/components/Standings";
 import TeamJudgeCard, { JudgeScoreChip } from "@/components/TeamJudgeCard";
 import TeamMiniCanvas from "@/components/TeamMiniCanvas";
+import { sortByTeamLabel } from "@/lib/team-label-sort";
 import { minutesToSeconds } from "@/lib/timers";
 import {
   createGameSocket,
@@ -687,6 +688,15 @@ function Console({ game }: { game: CreatedGame }) {
       .filter((c) => typeof c.teamId === "string")
       .map((c) => [c.teamId!, snapshot?.scores[c.cardId] ?? null]),
   );
+  // Team→cardId map for the judge-box "View" deep link. The link must carry
+  // the EXACT cardId (the scoring order is shuffled per round and the
+  // presenter's scoring stage is snapshot-driven), so an index or the team id
+  // alone could land the presenter on the wrong card.
+  const cardIdByTeam = new Map(
+    scoringCards
+      .filter((c) => typeof c.teamId === "string")
+      .map((c) => [c.teamId!, c.cardId]),
+  );
   // Readiness: ratedX is live-computed from the tallies (every score:submit
   // lands as scores:update); the sync snapshot's ratedX/ratedY is the
   // refresh/resync fallback. ratedY = active players × (teams − 1).
@@ -834,9 +844,18 @@ function Console({ game }: { game: CreatedGame }) {
                             readout lives IN the box now (the old chips
                             console is gone). JUDGING adds Pick winner. */}
                         <JudgeScoreChip tally={tallyByTeamId.get(team.id) ?? null} />
+                        {/* Deep link targets the exact cardId whenever the
+                            team has a scoring row — the shuffled scoring
+                            order makes any index-based mapping wrong. The
+                            ?team=<id> fallback keeps the link working in the
+                            degenerate case of a team with no card yet. */}
                         <a
                           className="cc-btn cc-btn-small"
-                          href={`/present/${game.code}?team=${team.id}`}
+                          href={
+                            cardIdByTeam.has(team.id)
+                              ? `/present/${game.code}?card=${cardIdByTeam.get(team.id)}`
+                              : `/present/${game.code}?team=${team.id}`
+                          }
                           data-testid={`gm-judge-view-${team.id}`}
                         >
                           View
@@ -1011,7 +1030,7 @@ function Console({ game }: { game: CreatedGame }) {
           (the judge boxes' flip visual carries the poster/sticker now). */}
       {!judgeBoxes && snapshot && snapshot.teams.length > 0 ? (
         <section aria-label="live card previews" className="cc-mini-grid">
-          {snapshot.teams.map((team) => {
+          {sortByTeamLabel(snapshot.teams).map((team) => {
             // Montage state rides the live snapshot; the Console's merged
             // teams map is the refresh fallback (REST summary fields).
             const merged = teams.find((t) => t.id === team.id);
