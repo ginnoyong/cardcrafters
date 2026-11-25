@@ -513,12 +513,36 @@ label {
 .cc-mini {
   width: 240px;
   display: grid;
+  /* Lock the (single implicit) column to the CELL width. An auto-sized
+     column is sized by its content's max-content contribution — and the
+     mini's poster face contains an img with an 800×1066 intrinsic size
+     whose min-content contribution is capped only by .cc-montage's
+     viewport max-width cap (max(260px, 70vh) × ratio ≈ 516px on a large
+     GM monitor). The column then grew to ~516px: the flip face overflowed
+     the 240px cell and spilled over the neighbouring team's mini card.
+     minmax(0, 1fr) pins the track to the cell — the faces (width:100% +
+     inline aspect-ratio) size FROM the cell, never from the image.
+     (minmax(0, …) also disables the grid item's automatic min-size, so the
+     flip control can always shrink to the cell.) */
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.4rem;
 }
 
 .cc-mini h3 {
   margin: 0;
   font-size: 1rem;
+}
+
+/* Mini flip faces are sized by the CELL, not the viewport. The shared
+   .cc-montage caps (max-height: max(260px, 70vh) + the proportional
+   max-width) exist so a poster beside a CardCanvas matches on FULL-WIDTH
+   surfaces (judge boxes, build stage) — for a 240px mini cell they are
+   irrelevant/oversized and must never inject a size bigger than the cell.
+   The mini faces' geometry comes entirely from width:100% + the inline
+   aspect-ratio (montageFaceStyle) on the 240px cell. */
+.cc-mini .cc-montage {
+  max-height: none;
+  max-width: none;
 }
 
 /* Montage (poster) accumulator surfaces (GM/presenter minis + player card
@@ -572,6 +596,14 @@ label {
   place-content: center;
   gap: 0.5rem;
   padding: 1.5rem;
+  /* NO global border-box reset exists in this codebase (only textarea sets
+     one) — with content-box this padding ADDS to .cc-montage's width:100%
+     + inline aspect-ratio: the card-back face rendered at 288×368 inside a
+     240px-wide mini cell (48px bigger than the sticker CardCanvas face on
+     BOTH axes, spilling over the neighbouring mini). border-box makes the
+     outer box exactly the wrapper's 240×320 — pixel-identical to the
+     poster and sticker faces. */
+  box-sizing: border-box;
   text-align: center;
   border-radius: 14px;
   /* Back-of-card feel: the same cream paper as the sticker card, with a
