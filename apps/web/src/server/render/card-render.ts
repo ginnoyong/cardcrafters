@@ -300,9 +300,11 @@ export async function renderCardPng(
 const POSTER_ASPECT_TOLERANCE = 0.01;
 
 /**
- * Center-crop a PNG to the given card ratio — crop-only, never upscale.
- * Degenerate targets (< 1px, e.g. a 1×1 placeholder poster) keep the native
- * size; undefined/invalid ratios skip the crop entirely.
+ * Crop a PNG to the given card ratio — crop-only, never upscale. Anchored to
+ * the BOTTOM (greeting band lives there): a taller-than-ratio source is
+ * trimmed from the TOP (decorative scenery), never the bottom. Degenerate
+ * targets (< 1px, e.g. a 1×1 placeholder poster) keep the native size;
+ * undefined/invalid ratios skip the crop entirely.
  */
 async function cropToCardRatio(
   png: Buffer,
@@ -327,10 +329,11 @@ async function cropToCardRatio(
     targetH = Math.floor(width / targetAspect);
   }
   if (targetW < 1 || targetH < 1) return png;
-  // fit "cover" + position "centre" with target dims ≤ native = a pure
-  // center crop at 1:1 scale — no resampling, no upscaling.
+  // fit "cover" + position "bottom" with target dims ≤ native = a pure crop
+  // at 1:1 scale — no resampling, no upscaling. Bottom anchor: the greeting
+  // band at the bottom of the artwork must never be the cropped side.
   return sharp(png)
-    .resize({ width: targetW, height: targetH, fit: "cover", position: "centre" })
+    .resize({ width: targetW, height: targetH, fit: "cover", position: "bottom" })
     .png()
     .toBuffer();
 }

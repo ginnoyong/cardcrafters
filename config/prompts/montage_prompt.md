@@ -45,7 +45,10 @@ The illustration must:
   The greeting's phrasing must be kept VERBATIM — do not reword, translate,
   or omit any part of it.
 - Text sizing: {{textSizeHint}} The text must fit ENTIRELY within the
-  lower-third band — no letter may extend below that boundary.
+  lower-third band — no letter may extend below that boundary. Keep a clear
+  BOTTOM MARGIN: the last text line must end at least 8% of the image height
+  above the bottom edge — never place text at the extreme bottom of the
+  canvas (overflowing the canvas crops the text).
 - The greeting text must fit within the CENTRAL 60% of the image width
   (portrait 3:4 composition — compose for a tall card; leave the outer 20%
   margins on each side free of text). Never run the greeting full-bleed edge
@@ -61,7 +64,7 @@ The illustration must:
 ---
 Round theme: {{theme}}
 Greeting text (render this verbatim as the hand-lettered greeting treatment in the lower third, sized to fit the CENTRAL 60% of the image width): {{greeting}}
-Text sizing: {{textSizeHint}} The text must fit ENTIRELY within the lower-third band — no letter may extend below that boundary.
+Text sizing: {{textSizeHint}} The text must fit ENTIRELY within the lower-third band, ending at least 8% of the image height above the bottom edge — no letter may extend below that boundary.
 Scene elements to include (all of them, named in the prompt): {{subjects}}
 
 Respond with ONLY this JSON (no markdown fences, no commentary):

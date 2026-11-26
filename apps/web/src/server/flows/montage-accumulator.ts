@@ -189,7 +189,7 @@ export function textSizeHint(greeting: string): string {
   if (n <= 80) {
     return "Render the greeting text at SMALL size — each line approximately 4% of the image height, fitting the full greeting in 2-3 lines within the lower-third band.";
   }
-  return "Render the greeting text at COMPACT size — each line approximately 2.5% of the image height, fitting the full greeting in 3-4 tightly-spaced lines within the lower-third band. Do NOT let the text extend below the lower-third boundary.";
+  return "Render the greeting text at COMPACT size — each line approximately 2.5% of the image height, fitting the full greeting in 3-4 tightly-spaced lines within the lower-third band. Do NOT let the text extend below the lower-third boundary. The last text line must end at least 8% of the image height above the bottom edge of the canvas — never draw text at the extreme bottom.";
 }
 
 export interface MontageAccumulatorDeps {
