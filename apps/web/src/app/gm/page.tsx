@@ -223,10 +223,9 @@ function TeamCard({
   return (
     <div className="cc-team" aria-label={`team ${team.label} card`}>
       <div className="cc-card cc-team-card">
-        {/* Header — team name + label badge. */}
-        <h3 className="cc-team-name">
-          Team {team.label} <span className="cc-muted">({scoringLabel ?? team.label})</span>
-        </h3>
+        {/* Header — label-only identity ("Team A"). The scoring card label
+            ("Card A") appears from scoring onward on the judge boxes. */}
+        <h3 className="cc-team-name">Team {team.label}</h3>
 
         {/* Greeting text (or the generating placeholder). */}
         {regenBusy ? (
